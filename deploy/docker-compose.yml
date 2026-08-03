@@ -1,0 +1,50 @@
+# Minimal Omnora single-container deployment example.
+# Replace the image tag with the first published release image when available.
+services:
+  omnora:
+    image: ghcr.io/omnora/omnora:0.1.0-dev
+    container_name: omnora
+    restart: unless-stopped
+    init: true
+    user: "${PUID:-1000}:${PGID:-1000}"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      # Direct LAN HTTP entry. Bind to a specific private host address in production.
+      - "${OMNORA_LAN_BIND:-127.0.0.1}:8080:8080"
+      # Trusted reverse-proxy backend entry. Keep this reachable only by the proxy.
+      - "${OMNORA_PROXY_BIND:-127.0.0.1}:8081:8081"
+    environment:
+      TZ: "${TZ:-UTC}"
+      UMASK: "${UMASK:-0027}"
+      OMNORA_CONFIG_DIR: /etc/omnora
+      OMNORA_DATA_DIR: /var/lib/omnora
+      OMNORA_DB_PATH: /var/lib/omnora/omnora.db
+      OMNORA_HTTP_ADDR: 0.0.0.0:8080
+      OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:?set a one-time local initialization token}"
+      OMNORA_INITIALIZATION_TOKEN_TTL: "${OMNORA_INITIALIZATION_TOKEN_TTL:-30m}"
+      OMNORA_MANAGED_STORAGE_DIR: /srv/omnora/managed
+      OMNORA_PREDECLARED_MOUNT_ROOT: /mnt/omnora
+      OMNORA_LAN_HTTP_ENABLED: "${OMNORA_LAN_HTTP_ENABLED:-true}"
+      OMNORA_LAN_HTTP_LISTEN: "0.0.0.0:8080"
+      OMNORA_LAN_HTTP_ALLOWED_CIDRS: "${OMNORA_LAN_HTTP_ALLOWED_CIDRS:-192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,fc00::/7}"
+      OMNORA_PROXY_HTTPS_ENABLED: "${OMNORA_PROXY_HTTPS_ENABLED:-false}"
+      OMNORA_PROXY_HTTPS_LISTEN: "0.0.0.0:8081"
+      OMNORA_PROXY_HTTPS_TRUSTED_CIDRS: "${OMNORA_PROXY_HTTPS_TRUSTED_CIDRS:-127.0.0.1/32,::1/128}"
+      OMNORA_ROUTE_ADMIN_WEB_ENABLED: "${OMNORA_ROUTE_ADMIN_WEB_ENABLED:-true}"
+      OMNORA_ROUTE_MEMBER_WEB_ENABLED: "${OMNORA_ROUTE_MEMBER_WEB_ENABLED:-true}"
+      OMNORA_ROUTE_SHARE_ENABLED: "${OMNORA_ROUTE_SHARE_ENABLED:-false}"
+      OMNORA_ROUTE_REST_ENABLED: "${OMNORA_ROUTE_REST_ENABLED:-true}"
+      OMNORA_ROUTE_MCP_ENABLED: "${OMNORA_ROUTE_MCP_ENABLED:-false}"
+      OMNORA_ROUTE_OPENAPI_ENABLED: "${OMNORA_ROUTE_OPENAPI_ENABLED:-true}"
+    volumes:
+      - ./config:/etc/omnora
+      - ./data:/var/lib/omnora
+      - ./managed:/srv/omnora/managed
+      # Bind NAS directories under /mnt/omnora before registering them in Omnora.
+      # Keep external mounts read-only unless write access is intentionally required.
+    tmpfs:
+      - /tmp:size=128m,mode=1777

@@ -1,0 +1,26 @@
+# Aliyun ECS test-server override for the base Omnora Compose file.
+# Use with:
+#   docker compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compose.aliyun-test.yml up -d
+services:
+  omnora:
+    container_name: omnora-aliyun-test
+    labels:
+      omnora.environment: aliyun-test
+      omnora.role: test-server
+    ports:
+      # Keep the test instance local to the ECS host by default. Reach it with an SSH tunnel,
+      # or place a TLS reverse proxy in front of 127.0.0.1:8081 after explicitly enabling it.
+      - "${OMNORA_LAN_BIND:-127.0.0.1}:8080:8080"
+      - "${OMNORA_PROXY_BIND:-127.0.0.1}:8081:8081"
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      OMNORA_DEPLOY_ENV: aliyun-test
+      OMNORA_LAN_HTTP_ALLOWED_CIDRS: "${OMNORA_LAN_HTTP_ALLOWED_CIDRS:-127.0.0.1/32,::1/128}"
+      OMNORA_PROXY_HTTPS_ENABLED: "${OMNORA_PROXY_HTTPS_ENABLED:-false}"
+      OMNORA_ROUTE_SHARE_ENABLED: "${OMNORA_ROUTE_SHARE_ENABLED:-false}"
+      OMNORA_ROUTE_MCP_ENABLED: "${OMNORA_ROUTE_MCP_ENABLED:-false}"
+    volumes:
+      - ./aliyun-test/config:/etc/omnora
+      - ./aliyun-test/data:/var/lib/omnora
+      - ./aliyun-test/managed:/srv/omnora/managed
+      - ./aliyun-test/mounts:/mnt/omnora:ro

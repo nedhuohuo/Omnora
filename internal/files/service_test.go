@@ -1,0 +1,197 @@
+package files
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"omnora/internal/domain"
+	"omnora/internal/storage"
+)
+
+func TestListDirectoryReturnsStableMetadata(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "notes.md"), "hello")
+	writeFile(t, filepath.Join(root, "photo.JPG"), "image")
+	writeFile(t, filepath.Join(root, "report.pdf"), "pdf")
+	writeFile(t, filepath.Join(root, "movie.mp4"), "media")
+	writeFile(t, filepath.Join(root, "sheet.xlsx"), "office")
+	writeFile(t, filepath.Join(root, "archive.bin"), "unknown")
+	mkdir(t, filepath.Join(root, "docs"))
+
+	listing, err := NewService().ListDirectory(Mount{
+		Root: root,
+		Mode: domain.MountModeReadOnly,
+	}, ".")
+	if err != nil {
+		t.Fatalf("ListDirectory() error = %v", err)
+	}
+
+	if listing.RelativePath != "." {
+		t.Fatalf("RelativePath = %q, want %q", listing.RelativePath, ".")
+	}
+	if !listing.ReadOnly {
+		t.Fatalf("ReadOnly = false, want true")
+	}
+
+	want := []struct {
+		name        string
+		relative    string
+		kind        EntryKind
+		readOnly    bool
+		previewKind PreviewKind
+	}{
+		{"docs", "docs", EntryKindDir, true, PreviewKindUnknownDownload},
+		{"archive.bin", "archive.bin", EntryKindFile, true, PreviewKindUnknownDownload},
+		{"movie.mp4", "movie.mp4", EntryKindFile, true, PreviewKindMedia},
+		{"notes.md", "notes.md", EntryKindFile, true, PreviewKindMarkdown},
+		{"photo.JPG", "photo.JPG", EntryKindFile, true, PreviewKindImage},
+		{"report.pdf", "report.pdf", EntryKindFile, true, PreviewKindPDF},
+		{"sheet.xlsx", "sheet.xlsx", EntryKindFile, true, PreviewKindOfficeDownload},
+	}
+
+	if len(listing.Entries) != len(want) {
+		t.Fatalf("len(Entries) = %d, want %d: %#v", len(listing.Entries), len(want), listing.Entries)
+	}
+	for i, wantEntry := range want {
+		got := listing.Entries[i]
+		if got.Name != wantEntry.name ||
+			got.RelativePath != wantEntry.relative ||
+			got.Kind != wantEntry.kind ||
+			got.ReadOnly != wantEntry.readOnly ||
+			got.PreviewKind != wantEntry.previewKind {
+			t.Fatalf("Entries[%d] = %#v, want %#v", i, got, wantEntry)
+		}
+		if got.ModifiedAt.Location() != time.UTC {
+			t.Fatalf("Entries[%d].ModifiedAt location = %v, want UTC", i, got.ModifiedAt.Location())
+		}
+	}
+}
+
+func TestListDirectoryNestedPathAndReadWriteMount(t *testing.T) {
+	root := t.TempDir()
+	mkdir(t, filepath.Join(root, "docs"))
+	writeFile(t, filepath.Join(root, "docs", "readme.txt"), "hello")
+
+	listing, err := NewService().ListDirectory(Mount{
+		Root: root,
+		Mode: domain.MountModeReadWrite,
+	}, "docs/../docs")
+	if err != nil {
+		t.Fatalf("ListDirectory() error = %v", err)
+	}
+
+	if listing.RelativePath != "docs" {
+		t.Fatalf("RelativePath = %q, want %q", listing.RelativePath, "docs")
+	}
+	if listing.ReadOnly {
+		t.Fatalf("ReadOnly = true, want false")
+	}
+	if len(listing.Entries) != 1 {
+		t.Fatalf("len(Entries) = %d, want 1", len(listing.Entries))
+	}
+	got := listing.Entries[0]
+	if got.RelativePath != "docs/readme.txt" {
+		t.Fatalf("entry RelativePath = %q, want %q", got.RelativePath, "docs/readme.txt")
+	}
+	if got.ReadOnly {
+		t.Fatalf("entry ReadOnly = true, want false")
+	}
+	if got.Size != int64(len("hello")) {
+		t.Fatalf("entry Size = %d, want %d", got.Size, len("hello"))
+	}
+}
+
+func TestListDirectoryRejectsUnsafePaths(t *testing.T) {
+	root := t.TempDir()
+	tests := []string{
+		"../outside",
+		"/absolute",
+		storage.ReservedNamespace,
+		storage.ReservedNamespace + "/trash",
+	}
+
+	for _, relativePath := range tests {
+		t.Run(relativePath, func(t *testing.T) {
+			_, err := NewService().ListDirectory(Mount{
+				Root: root,
+				Mode: domain.MountModeReadOnly,
+			}, relativePath)
+			if err == nil {
+				t.Fatalf("ListDirectory() error = nil, want error")
+			}
+		})
+	}
+}
+
+func TestListDirectorySkipsReservedNamespaceAndSymlinks(t *testing.T) {
+	root := t.TempDir()
+	mkdir(t, filepath.Join(root, storage.ReservedNamespace))
+	writeFile(t, filepath.Join(root, "visible.txt"), "hello")
+	writeFile(t, filepath.Join(root, "target.txt"), "secret")
+
+	if err := os.Symlink(filepath.Join(root, "target.txt"), filepath.Join(root, "linked.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	listing, err := NewService().ListDirectory(Mount{
+		Root: root,
+		Mode: domain.MountModeReadOnly,
+	}, ".")
+	if err != nil {
+		t.Fatalf("ListDirectory() error = %v", err)
+	}
+
+	for _, entry := range listing.Entries {
+		if entry.Name == storage.ReservedNamespace {
+			t.Fatalf("reserved namespace entry was listed: %#v", entry)
+		}
+		if entry.Name == "linked.txt" {
+			t.Fatalf("symlink entry was listed: %#v", entry)
+		}
+	}
+}
+
+func TestListDirectoryRejectsNonDirectoryAndInvalidMount(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "file.txt"), "hello")
+
+	_, err := NewService().ListDirectory(Mount{
+		Root: root,
+		Mode: domain.MountModeReadOnly,
+	}, "file.txt")
+	if !errors.Is(err, ErrNotDirectory) {
+		t.Fatalf("ListDirectory() error = %v, want ErrNotDirectory", err)
+	}
+
+	_, err = NewService().ListDirectory(Mount{
+		Root: root,
+		Mode: domain.MountMode("surprise"),
+	}, ".")
+	if !errors.Is(err, ErrInvalidMountMode) {
+		t.Fatalf("ListDirectory() error = %v, want ErrInvalidMountMode", err)
+	}
+
+	_, err = NewService().ListDirectory(Mount{
+		Mode: domain.MountModeReadOnly,
+	}, ".")
+	if !errors.Is(err, ErrInvalidMount) {
+		t.Fatalf("ListDirectory() error = %v, want ErrInvalidMount", err)
+	}
+}
+
+func writeFile(t *testing.T, name, contents string) {
+	t.Helper()
+	if err := os.WriteFile(name, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", name, err)
+	}
+}
+
+func mkdir(t *testing.T, name string) {
+	t.Helper()
+	if err := os.Mkdir(name, 0o755); err != nil {
+		t.Fatalf("Mkdir(%q) error = %v", name, err)
+	}
+}

@@ -1,0 +1,88 @@
+package config
+
+import (
+	"testing"
+	"time"
+
+	"omnora/internal/domain"
+)
+
+func TestLoadEnvDefaultsFailClosed(t *testing.T) {
+	clearEnv(t)
+
+	cfg, err := LoadEnv()
+	if err != nil {
+		t.Fatalf("LoadEnv() error = %v", err)
+	}
+
+	if cfg.HTTP.Addr != "127.0.0.1:8080" {
+		t.Fatalf("HTTP addr = %q", cfg.HTTP.Addr)
+	}
+	if cfg.Database.Path != "" {
+		t.Fatalf("DB path = %q, want empty", cfg.Database.Path)
+	}
+	if cfg.Database.BusyTimeout != 5*time.Second {
+		t.Fatalf("busy timeout = %s", cfg.Database.BusyTimeout)
+	}
+	if cfg.Initialization.Token != "" {
+		t.Fatalf("initialization token = %q, want empty", cfg.Initialization.Token)
+	}
+	if cfg.Initialization.TTL != 30*time.Minute {
+		t.Fatalf("initialization ttl = %s", cfg.Initialization.TTL)
+	}
+	for _, group := range domain.AllRouteGroups {
+		if cfg.Routes.Enabled(group) {
+			t.Fatalf("route group %s should be disabled by default", group)
+		}
+	}
+}
+
+func TestLoadEnvRouteGroups(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("OMNORA_ROUTE_REST_ENABLED", "true")
+	t.Setenv("OMNORA_ROUTE_SHARE_ENABLED", "on")
+
+	cfg, err := LoadEnv()
+	if err != nil {
+		t.Fatalf("LoadEnv() error = %v", err)
+	}
+
+	if !cfg.Routes.Enabled(domain.RouteGroupREST) {
+		t.Fatal("REST route group should be enabled")
+	}
+	if !cfg.Routes.Enabled(domain.RouteGroupShare) {
+		t.Fatal("share route group should be enabled")
+	}
+	if cfg.Routes.Enabled(domain.RouteGroupAdminWeb) {
+		t.Fatal("admin route group should remain disabled")
+	}
+}
+
+func TestLoadEnvRejectsInvalidBool(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("OMNORA_ROUTE_MCP_ENABLED", "sometimes")
+
+	if _, err := LoadEnv(); err == nil {
+		t.Fatal("LoadEnv() error = nil, want invalid boolean")
+	}
+}
+
+func clearEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"OMNORA_HTTP_ADDR",
+		"OMNORA_DB_PATH",
+		"OMNORA_SQLITE_BUSY_TIMEOUT",
+		"OMNORA_INITIALIZATION_TOKEN",
+		"OMNORA_INITIALIZATION_TOKEN_TTL",
+		"OMNORA_TOTP_ENCRYPTION_KEY",
+		"OMNORA_ROUTE_MEMBER_WEB_ENABLED",
+		"OMNORA_ROUTE_ADMIN_WEB_ENABLED",
+		"OMNORA_ROUTE_SHARE_ENABLED",
+		"OMNORA_ROUTE_REST_ENABLED",
+		"OMNORA_ROUTE_MCP_ENABLED",
+		"OMNORA_ROUTE_OPENAPI_ENABLED",
+	} {
+		t.Setenv(name, "")
+	}
+}

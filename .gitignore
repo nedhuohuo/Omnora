@@ -1,1 +1,4 @@
 .superpowers/
+deploy/*.env
+!deploy/*.env.example
+deploy/aliyun-test/
