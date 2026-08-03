@@ -13,6 +13,7 @@
 | [验收标准](verification/acceptance-criteria.md) | 开发、测试、发布 | 功能、安全、性能、可靠性和发布门槛 |
 | [项目框架设计](superpowers/specs/2026-08-02-omnora-project-foundation-design.md) | 开发、测试、运维 | 工程骨架、模块依赖、技术探针、测试与 CI 门禁 |
 | [完整 Web 设计](design/web-application-design.md) | 产品、设计、前端、测试 | 成员端、管理员控制台、公开分享页、响应式、状态和验收范围 |
+| [阿里云测试服务器](deployment/aliyun-test-server.md) | 开发、测试、运维 | 阿里云 ECS 测试服务器边界、访问方式和部署文件 |
 | [安全披露](../SECURITY.md) | 安全研究者 | 漏洞报告渠道和响应范围 |
 | [社区许可证](../LICENSE) | 使用者、分发者 | `AGPL-3.0-only` 许可证正文 |
 | [商业许可政策](../COMMERCIAL-LICENSE.md) | 商业使用者 | 商业许可的当前状态与边界 |
@@ -34,4 +35,4 @@
 
 ## 版本状态
 
-当前文档描述 Omnora 第一版，状态为“设计已收敛，待实施计划”。项目尚无可运行版本。所有数值均为首版目标或验收门槛，不代表已经实测达成。
+当前文档描述 Omnora 第一版，状态为「设计已收敛，工程骨架已落地，业务闭环待实现」。仓库已包含可构建的后端 / 前端脚手架、OpenAPI 契约与 Docker Compose 示例，但尚无正式发布的产品版本。所有数值均为首版目标或验收门槛，不代表已经实测达成。
