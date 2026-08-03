@@ -12,6 +12,7 @@
 | [安全模型](security/security-model.md) | 开发、安全、运维 | 信任边界、认证授权、路径安全、网络暴露、凭证和备份恢复 |
 | [验收标准](verification/acceptance-criteria.md) | 开发、测试、发布 | 功能、安全、性能、可靠性和发布门槛 |
 | [项目框架设计](superpowers/specs/2026-08-02-omnora-project-foundation-design.md) | 开发、测试、运维 | 工程骨架、模块依赖、技术探针、测试与 CI 门禁 |
+| [完整 Web 设计](superpowers/specs/2026-08-02-omnora-full-web-design.md) | 产品、设计、前端、测试 | 成员端、管理员控制台、公开分享页、响应式、状态和验收范围 |
 | [安全披露](../SECURITY.md) | 安全研究者 | 漏洞报告渠道和响应范围 |
 | [社区许可证](../LICENSE) | 使用者、分发者 | `AGPL-3.0-only` 许可证正文 |
 | [商业许可政策](../COMMERCIAL-LICENSE.md) | 商业使用者 | 商业许可的当前状态与边界 |
