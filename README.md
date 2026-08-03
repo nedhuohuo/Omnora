@@ -9,12 +9,12 @@ Omnora is a lightweight, self-hosted digital space for files, people, and AI.
 ## 第一版范围
 
 - 通过空间组织个人文件、共享文件和 NAS 已有目录；一个空间可包含多个挂载。
-- 添加挂载时明确选择只读或读写，并手动决定是否加入轻量元数据索引。
+- 只有系统管理员可以添加或修改挂载；添加时明确选择只读或读写，并手动决定是否加入轻量元数据索引。
 - 提供账号、空间 ACL、文件管理、大文件续传、托管挂载回收站和审计。
 - 支持文件与文件夹分享，可选密码、有效期、访问/下载次数限制和主动撤销。
 - 在浏览器中预览图片、PDF、文本、Markdown 和原生支持的音视频；Office 文件仅下载。
 - 提供版本化 REST API、OpenAPI 3.1 和 Streamable HTTP MCP，为 AI Token 设置操作范围与目录边界。
-- 局域网 HTTP 需要管理员显式启用；任何公网 Web、分享、REST 或 MCP 访问必须使用 HTTPS。
+- 可同时启用受限的局域网 HTTP 入口和可信反向代理 HTTPS 入口；系统不自动判断请求是否来自公网。Lucky 可在公网终止 HTTPS 后转发到仅供代理使用的内网入口。
 
 第一版不提供 Office 转换、视频转码、OCR、正文索引、向量检索、RAG、WebDAV、S3/SMB 网关或多节点集群。
 

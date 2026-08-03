@@ -46,7 +46,21 @@ SQLite 使用 WAL 模式，并遵守以下约束：
 
 热备份使用 SQLite Online Backup API 或等价的一致性方案，不能把“执行 WAL checkpoint”当作完整备份。
 
-## 5. 文件身份与访问
+## 5. 挂载注册与身份
+
+应用只接受部署者预先映射到容器的目录，不接受宿主机绝对路径，也不在容器内执行 mount。挂载注册和配置变更通过全局串行锁与 SQLite 事务执行，并在激活前对所有未删除挂载重新检查，防止两个管理员并发注册冲突目录。
+
+首版按以下顺序验证候选挂载：
+
+1. 规范化容器绝对路径，按路径组件边界比较完全相同和双向父子关系；`/data/a` 与 `/data/a/b` 冲突，`/data/a` 与 `/data/ab` 不冲突。
+2. 从预声明目录逐级以目录文件描述符、`O_NOFOLLOW` 和等价约束打开，候选根或父组件包含符号链接、magic link 时拒绝。
+3. 使用 `statx` 或等价接口采集设备号、inode 和 mount ID；根目录对象身份相同即拒绝。
+4. 解析 `/proc/self/mountinfo`，使用文件系统 `major:minor` 与 mount root 按路径组件比较 bind 来源；来源相同或构成父子关系时拒绝。
+5. 无法获得足够身份信息或无法证明与已有挂载相互独立时，返回 `mount_identity_unverifiable` 并拒绝激活，不提供确认绕过。
+
+系统保存验证后的 `mount_identity`。启动、备份恢复、重新启用和每次扫描前复核；实际文件访问使用受根目录文件描述符约束的解析器并复核根身份。身份变化、无法验证或产生新冲突时立即停用挂载，排除其搜索结果并拒绝分享和文件访问，保留索引仅用于诊断，等待管理员处理。
+
+## 6. 文件身份与访问
 
 API 使用不可猜测的内部对象 ID，不接收宿主机绝对路径。对象 ID 映射到 `space_id + mount_id + relative_path + identity_fingerprint`。
 
@@ -60,7 +74,7 @@ API 使用不可猜测的内部对象 ID，不接收宿主机绝对路径。对�
 
 Linux 优先使用 `openat2` 与 `RESOLVE_BENEATH`、`RESOLVE_NO_MAGICLINKS` 等约束；不可用时使用逐级目录文件描述符和 `O_NOFOLLOW` 的安全回退。不能采用“先检查字符串路径，再按路径打开”的实现。
 
-## 6. 索引与对账
+## 7. 索引与对账
 
 索引由管理员逐挂载启用。索引只保存名称、相对路径、类型、大小、修改时间和必要身份字段，不读取正文、不计算内容哈希。
 
@@ -71,7 +85,7 @@ Linux 优先使用 `openat2` 与 `RESOLVE_BENEATH`、`RESOLVE_NO_MAGICLINKS` 等
 
 百万文件对账可能持续超过一天，因此调度器不能按固定时刻重复创建全量任务。
 
-## 7. 后台任务调度
+## 8. 后台任务调度
 
 后台任务整体并发为 1，但采用优先级和协作式让出：
 
@@ -83,7 +97,7 @@ Linux 优先使用 `openat2` 与 `RESOLVE_BENEATH`、`RESOLVE_NO_MAGICLINKS` 等
 
 扫描任务每批完成后保存检查点并让出执行权，避免长任务阻塞高优先级工作。所有任务必须幂等，重启后从持久化状态恢复；永久失败进入可见失败状态，不无限重试。
 
-## 8. 文件传输
+## 9. 文件传输
 
 - 上传按固定分片流式写入同挂载临时目录，完成后原子 rename。
 - 创建上传会话时预占配额；失败、过期或取消后释放。
@@ -93,7 +107,7 @@ Linux 优先使用 `openat2` 与 `RESOLVE_BENEATH`、`RESOLVE_NO_MAGICLINKS` 等
 
 跨挂载复制使用固定缓冲区流式传输；移动遵守领域模型定义的“复制、校验、删除源”。
 
-## 9. 预览
+## 10. 预览
 
 - 图片由浏览器直接显示；可选缩略图默认关闭、并发为 1。
 - PDF 由浏览器端 PDF.js 渲染。
@@ -103,23 +117,34 @@ Linux 优先使用 `openat2` 与 `RESOLVE_BENEATH`、`RESOLVE_NO_MAGICLINKS` 等
 
 不可信主动内容不能与认证应用同源直接执行。详细响应头、隔离源和 sandbox 规则由安全模型定义。
 
-## 10. 网络模式
+## 11. 网络入口
 
-### 10.1 局域网 HTTP
+`lan_http` 与 `proxy_https` 是可以同时启用的独立入口配置，不是根据请求地址自动切换的全局模式。每个入口使用独立监听器或宿主发布端口；入口未启用、配置无效或请求不满足该入口信任条件时失败关闭。
 
-管理员可以显式启用局域网 HTTP，并配置允许的 LAN CIDR。该模式：
+### 11.1 `lan_http`
 
-- 只用于可信局域网；界面持续显示不安全提示。
+管理员可以显式启用局域网 HTTP 入口，并配置允许的 IPv4/IPv6 LAN CIDR。该入口：
+
+- 只根据 socket 直接对端地址执行 LAN CIDR 准入，忽略 `Forwarded`、`X-Forwarded-*` 和 `X-Real-IP`。
+- 只用于可信局域网，界面持续显示不安全提示。
 - Cookie 使用 `HttpOnly` 与 `SameSite`，但无法使用 `Secure`。
-- 不允许作为公网基线配置。
+- 宿主端口只能绑定到明确的 loopback 或私网地址，不允许作为公网入口。
 
-### 10.2 HTTPS
+### 11.2 `proxy_https`
 
-公网 Web、公开分享、远程 REST 和远程 MCP 必须经极空间反向代理、Caddy、Nginx 或等价入口提供 HTTPS。可信代理 CIDR、外部 URL 和转发头必须显式配置。
+公网 Web、公开分享、远程 REST 和远程 MCP 必须经 Lucky、极空间反向代理、Caddy、Nginx 或等价入口提供 HTTPS。管理员必须配置可信代理 CIDR、外部 HTTPS URL 和接受的转发头格式。只有 socket 直接对端属于可信代理 CIDR，且该代理声明外部协议为 HTTPS 时，应用才接受认证和文件访问；缺失、冲突或来自非可信来源的转发信息全部拒绝。
 
-管理端、成员 Web、分享、REST、MCP 和 OpenAPI 具有独立暴露开关。默认 Compose 不自动配置 UPnP，不使用 Host 网络或 Docker Socket。
+Lucky 的推荐拓扑为：
 
-## 11. 资源目标
+`公网 HTTPS:443 -> Lucky -> HTTP 127.0.0.1:<代理专用端口> -> Omnora proxy_https`
+
+Lucky 在公网终止 TLS 后使用同机 HTTP 后端是允许的，但代理专用端口必须只对 Lucky 可达。公网 `80` 只执行同域名 `301`/`308` HTTPS 跳转，不能直接反向代理 Omnora；未匹配 Host 应拒绝。代理需要保留 Host，传递可信外部协议与客户端地址，并支持流式响应、Range、WebSocket 和 MCP 长连接，不得缓冲完整文件。
+
+### 11.3 路由组
+
+管理端、成员 Web、分享、REST、MCP 和 OpenAPI 具有六个独立暴露开关。网络入口信任检查与路由组开关是正交条件，请求必须同时通过；启用分享不能连带启用其他路由组。默认 Compose 不自动配置 UPnP，不使用 Host 网络或 Docker Socket。
+
+## 12. 资源目标
 
 - 发布 `linux/amd64` 与 `linux/arm64` 镜像。
 - 极空间 8 GB RAM 为首要验证环境。
@@ -130,7 +155,7 @@ Linux 优先使用 `openat2` 与 `RESOLVE_BENEATH`、`RESOLVE_NO_MAGICLINKS` 等
 
 支持 `PUID`、`PGID`、`TZ` 和 `UMASK`。SQLite 与配置建议放在 SSD 或系统盘，文件内容可以放在机械盘。
 
-## 12. 备份与恢复
+## 13. 备份与恢复
 
 备份包括一致性 SQLite 快照、应用配置、密钥和托管文件。外部挂载只备份配置与对象元数据，不复制其文件内容。
 
