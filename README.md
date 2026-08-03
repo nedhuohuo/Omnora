@@ -2,64 +2,48 @@
 
 Omnora is a lightweight, self-hosted digital space for files, people, and AI.
 
-万境是一个面向个人、家庭和小团队的轻量自托管数字空间。第一版聚焦 NAS 文件管理、安全分享、浏览器预览，以及通过 REST 和 MCP 为 AI 提供受控文件访问。
+万境是面向个人、家庭和小团队的轻量自托管数字空间。它以 NAS 文件为核心，为成员、访客和 AI 提供统一、受控的文件访问能力。
 
-> Project status: design phase. There is no runnable release yet.
+> 项目状态：需求与架构设计阶段，暂无可运行版本。
 
-## First-release goals
+## 第一版范围
 
-- Run as one Go application container with an embedded Web UI.
-- Use SQLite in WAL mode for accounts, permissions, shares, tokens, audit events, jobs, and file metadata.
-- Support managed storage and existing NAS directories mounted read-only or read-write.
-- Provide member accounts, space permissions, quotas, recycle bin, and resumable transfers.
-- Share files or folders with an optional password, expiration, access limits, and revocation.
-- Preview images, PDF, text, Markdown, and browser-native audio/video without server-side conversion.
-- Expose a versioned REST API, OpenAPI 3.1 specification, and Streamable HTTP MCP server.
-- Give AI credentials explicit operation scopes and directory boundaries.
-- Maintain a lightweight global metadata index without reading file contents or calculating hashes.
+- 通过空间组织个人文件、共享文件和 NAS 已有目录；一个空间可包含多个挂载。
+- 添加挂载时明确选择只读或读写，并手动决定是否加入轻量元数据索引。
+- 提供账号、空间 ACL、文件管理、大文件续传、托管挂载回收站和审计。
+- 支持文件与文件夹分享，可选密码、有效期、访问/下载次数限制和主动撤销。
+- 在浏览器中预览图片、PDF、文本、Markdown 和原生支持的音视频；Office 文件仅下载。
+- 提供版本化 REST API、OpenAPI 3.1 和 Streamable HTTP MCP，为 AI Token 设置操作范围与目录边界。
+- 局域网 HTTP 需要管理员显式启用；任何公网 Web、分享、REST 或 MCP 访问必须使用 HTTPS。
 
-## Resource model
+第一版不提供 Office 转换、视频转码、OCR、正文索引、向量检索、RAG、WebDAV、S3/SMB 网关或多节点集群。
 
-Omnora is designed for low-power NAS hardware:
+## 轻量部署
 
-- one application container;
-- no PostgreSQL, Redis, OpenSearch, office converter, or video transcoder;
-- no GPU dependency;
-- one low-priority indexing task at a time;
-- target idle memory usage of 100-300 MB;
-- `linux/amd64` and `linux/arm64` images.
+默认部署只有一个应用容器：Go 进程提供 Web、API、MCP、传输和后台任务，前端静态资源嵌入可执行文件，SQLite WAL 保存业务数据与轻量元数据。文件内容始终保留在 NAS 文件系统。
 
-The metadata index stores only file name, normalized path, type, size, and modification time. Indexing is rate-limited, pausable, and optional per storage root.
+- 首要验证平台：8 GB RAM 的极空间 NAS，同时兼容普通 Linux Docker Compose。
+- 镜像架构：`linux/amd64`、`linux/arm64`。
+- 空闲内存目标：100 至 300 MB；普通浏览、搜索和传输目标不超过 500 MB。
+- 不依赖 GPU、外部数据库、搜索集群、Office 转换器或转码服务。
+- 索引按挂载开启，仅读取文件元数据；未索引挂载仍可逐目录浏览，但不进入全局搜索。
 
-## Preview support
+以上均为首版验收目标，尚未经过可运行版本实测。
 
-| Type | First-release behavior |
-| --- | --- |
-| Images | Browser display |
-| PDF | Browser-side PDF.js rendering |
-| Text | Size-limited browser display |
-| Markdown | Sanitized browser rendering |
-| Audio and video | Browser-native codecs only |
-| Word, Excel, PowerPoint | Download only |
-| Other formats | File information and download |
+## 文档
 
-Omnora does not perform office conversion, video transcoding, OCR, full-text extraction, or semantic indexing in the first release.
+从[文档地图](docs/README.md)进入分层文档：
 
-## Documentation
+- [产品需求](docs/requirements/product-requirements.md)：用户、场景、功能范围和非目标。
+- [领域模型](docs/design/domain-model.md)：空间、挂载、权限、对象和生命周期。
+- [技术架构](docs/design/architecture.md)：部署、模块、数据、任务和资源约束。
+- [安全模型](docs/security/security-model.md)：信任边界、认证授权和安全基线。
+- [验收标准](docs/verification/acceptance-criteria.md)：第一版发布门槛。
 
-- [Product and architecture design](docs/superpowers/specs/2026-08-02-omnora-design.md)
-- [Community license](LICENSE)
-- [Commercial licensing](COMMERCIAL-LICENSE.md)
-- [Contribution policy](CONTRIBUTING.md)
-- [Notices](NOTICE)
+## 许可证与贡献
 
-## Licensing
+社区版本使用 GNU Affero General Public License v3.0 only（`AGPL-3.0-only`）。AGPL 允许个人和商业使用，但使用者必须遵守其条款。
 
-Omnora uses a dual-license model:
+项目计划未来提供独立商业许可，但目前尚未指定法律许可方，因此没有可购买或申请的商业许可证，也暂不接收外部版权贡献。
 
-- The community edition is available under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`).
-- Organizations that need proprietary terms without AGPL obligations must obtain a separate written commercial license from the Omnora Project maintainers.
-
-Commercial activity is not automatically prohibited by the AGPL. Users may use Omnora commercially under the AGPL if they comply with its terms. The separate commercial license is for users who need different terms.
-
-See [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) for the licensing policy. This repository does not currently accept external code contributions because a legal commercial licensor has not yet been designated.
+详见[社区许可证](LICENSE)、[商业许可政策](COMMERCIAL-LICENSE.md)、[贡献政策](CONTRIBUTING.md)、[安全披露政策](SECURITY.md)和[项目声明](NOTICE)。

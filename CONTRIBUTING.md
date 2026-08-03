@@ -10,12 +10,12 @@ A legal commercial licensor and contributor agreement counterparty have not yet 
 
 You may still:
 
-- report reproducible defects;
+- report reproducible non-security defects;
 - propose features and use cases;
-- provide security reports through the repository's published security channel once available;
+- follow [SECURITY.md](SECURITY.md) for the current limits on security reporting;
 - discuss architecture and interoperability without submitting copyrighted implementation material.
 
-Do not include patches, source code, design assets, or substantial copied text in an issue while this restriction is active.
+Do not include patches, source code, design assets, substantial copied text, exploit details, credentials, or personal data in an issue while this restriction is active.
 
 ## Future contributor agreement
 
@@ -25,5 +25,4 @@ A Developer Certificate of Origin alone is not sufficient for Omnora's planned d
 
 ## Development process
 
-Build instructions, coding standards, test requirements, security reporting instructions, and pull request checks will be added with the first implementation plan and project scaffold.
-
+Build instructions, coding standards, test requirements, and pull request checks will be added with the first implementation plan and project scaffold.

@@ -2,7 +2,11 @@ Omnora / 万境
 Copyright (c) 2026 Omnora Project contributors
 
 The Omnora community edition is licensed under AGPL-3.0-only.
-Alternative proprietary terms may be offered under a separate written commercial agreement.
+Do not apply “or any later version” language to Omnora source notices.
+
+A proprietary commercial license may be offered later under a separate written
+agreement. No legal commercial licensor has been designated yet, so commercial
+licenses are not currently available.
 
 The public project name is not, by itself, a legal person or entity. A legal
 commercial licensor must be designated before proprietary licenses are issued
@@ -10,4 +14,3 @@ or external code contributions are accepted.
 
 Third-party notices will be maintained with release artifacts as dependencies
 are introduced.
-
