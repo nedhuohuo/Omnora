@@ -163,6 +163,26 @@ export type AdminMountListItem = {
   tone: string;
 };
 
+export type AdminRouteGroupItem = {
+  id: string;
+  label: string;
+  exposed: boolean;
+  entry: string;
+  risk: string;
+  tone: string;
+};
+
+export type HostDirectoryEntry = {
+  name: string;
+  path: string;
+};
+
+export type HostDirectorySuggestions = {
+  roots?: string[];
+  path?: string;
+  entries?: HostDirectoryEntry[];
+};
+
 export type AuditEventPayload = {
   occurredAt: string;
   actor: string;
@@ -175,6 +195,191 @@ export type AuditEventPayload = {
 
 export type AuditEventsPayload = {
   items?: AuditEventPayload[];
+};
+
+export type ShareStatus = 'active' | 'expired' | 'revoked';
+
+export type SharePayload = {
+  id: string;
+  publicId: string;
+  spaceId: string;
+  mountId: string;
+  relativePath: string;
+  allowPreview: boolean;
+  allowDownload: boolean;
+  maxVisits?: number;
+  usedVisits: number;
+  maxDownloads?: number;
+  usedDownloads: number;
+  expiresAt: string;
+  revokedAt?: string;
+  status: ShareStatus;
+};
+
+export type AiTokenBoundary = {
+  spaceId: string;
+  mountId: string;
+  path: string;
+};
+
+export type AiTokenStatus = 'active' | 'expired' | 'revoked';
+
+export type AiTokenListItem = {
+  id: string;
+  publicId?: string;
+  accountId?: string;
+  name: string;
+  scopes: string[];
+  boundaries?: AiTokenBoundary[];
+  expiresAt?: string;
+  createdAt?: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+  status?: AiTokenStatus;
+};
+
+export type ThemePreference = 'system' | 'light' | 'dark';
+
+export type AccountPayload = {
+  email: string;
+  displayName: string;
+  totpEnabled: boolean;
+  theme: ThemePreference;
+};
+
+export type UpdatePasswordPayload = {
+  currentPassword: string;
+  newPassword: string;
+  revokeTokens?: boolean;
+  revokeShares?: boolean;
+};
+
+export type AccountSessionPayload = {
+  id: string;
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt?: string;
+  current: boolean;
+};
+
+export type PreferencesPayload = {
+  theme: ThemePreference;
+};
+
+export type RenameObjectPayload = {
+  from: string;
+  toName?: string;
+  toPath?: string;
+};
+
+export type MoveObjectPayload = {
+  from: string;
+  toDir: string;
+};
+
+export type SharePortalCurrentPayload = {
+  path?: string;
+  allowPreview?: boolean;
+  allowDownload?: boolean;
+  expiresAt?: string;
+};
+
+export type SharePortalEntry = {
+  name: string;
+  relativePath: string;
+  kind: 'dir' | 'file';
+  size?: number;
+  modifiedAt?: string;
+  readOnly?: boolean;
+  previewKind?: string;
+};
+
+export type SharePortalChildrenPayload = {
+  relativePath?: string;
+  readOnly?: boolean;
+  entries?: SharePortalEntry[];
+};
+
+export type AdminOverviewPayload = {
+  accounts?: Record<string, number>;
+  spaces?: number;
+  mountsByHealth?: Record<string, number>;
+  jobsByStatus?: Record<string, number>;
+  routeGroups?: AdminRouteGroupItem[];
+  latestBackup?: BackupPayload | null;
+  risks?: string[];
+};
+
+export type AdminUserPayload = {
+  id: string;
+  email: string;
+  displayName: string;
+  role: 'admin' | 'member';
+  status: string;
+  totpRequired: boolean;
+};
+
+export type CreateAdminUserPayload = {
+  email: string;
+  displayName: string;
+  password: string;
+  role?: 'admin' | 'member';
+};
+
+export type CreateAdminUserResponse = {
+  user: { id: string; email: string; displayName: string; role: string; status: string };
+  space: { id: string; type: string; name: string; role: string };
+};
+
+export type CreateAdminSpacePayload = {
+  name: string;
+};
+
+export type SpaceMemberRole = 'viewer' | 'editor' | 'manager';
+
+export type AdminSpaceMemberPayload = {
+  accountId: string;
+  email?: string;
+  displayName?: string;
+  permission: SpaceMemberRole;
+};
+
+export type EmergencyAccessPayload = {
+  id: string;
+  adminAccountId: string;
+  targetSpaceId: string;
+  reason: string;
+  expiresAt: string;
+  revokedAt?: string;
+  createdAt: string;
+};
+
+export type CreateEmergencyAccessPayload = {
+  spaceId: string;
+  password: string;
+  totpCode: string;
+  reason: string;
+};
+
+export type NetworkEntryId = 'lan_http' | 'proxy_https';
+
+export type NetworkEntryPayload = {
+  name: NetworkEntryId;
+  enabled: boolean;
+  bindAddr: string;
+  cidrs: string[];
+  externalHttpsUrl: string;
+  updatedAt?: string;
+};
+
+export type BackupPayload = {
+  id: string;
+  status: string;
+  path?: string;
+  createdBy?: string;
+  createdAt: string;
+  completedAt?: string;
+  notes?: string;
 };
 
 export class ApiError extends Error {
@@ -283,12 +488,59 @@ export function registerAdminMount(payload: AdminMountPayload, signal?: AbortSig
   });
 }
 
+export function renameAdminMount(mountId: string, displayName: string, signal?: AbortSignal) {
+  return requestJson<AdminMountListItem>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ displayName }),
+    signal,
+  });
+}
+
+export function deleteAdminMount(mountId: string, deleteData = false, signal?: AbortSignal) {
+  return requestJson<{ id?: string; deleted?: boolean; deleteData?: boolean; dataDeleted?: boolean }>(
+    `/api/v1/admin/mounts/${encodeURIComponent(mountId)}`,
+    {
+      method: 'DELETE',
+      body: JSON.stringify({ deleteData }),
+      signal,
+    },
+  );
+}
+
+export function reverifyAdminMount(mountId: string, signal?: AbortSignal) {
+  return requestJson<AdminMountListItem>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}/reverify`, {
+    method: 'POST',
+    signal,
+  });
+}
+
 export function listAdminSpaces(signal?: AbortSignal) {
   return requestJson<{ items: AdminSpacePayload[] }>('/api/v1/admin/spaces', { signal });
 }
 
 export function listAdminMounts(signal?: AbortSignal) {
   return requestJson<{ items: AdminMountListItem[] }>('/api/v1/admin/mounts', { signal });
+}
+
+export function listAdminRouteGroups(signal?: AbortSignal) {
+  return requestJson<{ items: AdminRouteGroupItem[] }>('/api/v1/admin/route-groups', { signal });
+}
+
+export function updateAdminRouteGroup(groupId: string, exposed: boolean, signal?: AbortSignal) {
+  return requestJson<AdminRouteGroupItem>(`/api/v1/admin/route-groups/${encodeURIComponent(groupId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ exposed }),
+    signal,
+  });
+}
+
+export function listAdminHostDirectories(path: string, signal?: AbortSignal) {
+  const params = new URLSearchParams();
+  if (path) {
+    params.set('path', path);
+  }
+  const query = params.toString();
+  return requestJson<HostDirectorySuggestions>(`/api/v1/admin/host-directories${query ? `?${query}` : ''}`, { signal });
 }
 
 export function listDirectoryChildren(spaceId: string, mountId: string, path: string, signal?: AbortSignal) {
@@ -322,6 +574,11 @@ export function createDirectory(spaceId: string, mountId: string, payload: Creat
 
 export function downloadURL(spaceId: string, mountId: string, path: string) {
   const params = new URLSearchParams({ path });
+  return `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/download?${params.toString()}`;
+}
+
+export function previewURL(spaceId: string, mountId: string, path: string) {
+  const params = new URLSearchParams({ path, inline: '1' });
   return `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/download?${params.toString()}`;
 }
 
@@ -385,7 +642,7 @@ export function createAiToken(payload: CreateAiTokenPayload, signal?: AbortSigna
 }
 
 export function listAiTokens(signal?: AbortSignal) {
-  return requestJson<{ items?: unknown[] }>('/api/v1/ai-tokens', { signal });
+  return requestJson<{ items?: AiTokenListItem[] }>('/api/v1/ai-tokens', { signal });
 }
 
 export function revokeAiToken(tokenId: string, signal?: AbortSignal) {
@@ -506,6 +763,259 @@ export async function exchangeShareFragmentWithPassword(fragment: ShareFragment,
       secret: fragment.secret,
       ...(password ? { password } : {}),
     }),
+    signal,
+  });
+}
+
+// -- Member shares --------------------------------------------------------
+
+export function listShares(signal?: AbortSignal) {
+  return requestJson<{ items?: SharePayload[] }>('/api/v1/shares', { signal });
+}
+
+export function deleteShare(shareId: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/shares/${encodeURIComponent(shareId)}`, {
+    method: 'DELETE',
+    signal,
+  });
+}
+
+export function buildShareURL(fragment: string) {
+  return `${window.location.origin}/share#${fragment}`;
+}
+
+// -- Member account ---------------------------------------------------------
+
+export function getAccount(signal?: AbortSignal) {
+  return requestJson<AccountPayload>('/api/v1/account', { signal });
+}
+
+export function updateAccountPassword(payload: UpdatePasswordPayload, signal?: AbortSignal) {
+  return requestJson<void>('/api/v1/account/password', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function listSessions(signal?: AbortSignal) {
+  return requestJson<{ items?: AccountSessionPayload[] }>('/api/v1/account/sessions', { signal });
+}
+
+export function deleteSession(sessionId: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/account/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+    signal,
+  });
+}
+
+export function disableTOTP(password: string, code: string, signal?: AbortSignal) {
+  return requestJson<void>('/api/v1/account/totp/disable', {
+    method: 'POST',
+    body: JSON.stringify({ password, code }),
+    signal,
+  });
+}
+
+export function getPreferences(signal?: AbortSignal) {
+  return requestJson<PreferencesPayload>('/api/v1/account/preferences', { signal });
+}
+
+export function updatePreferences(payload: PreferencesPayload, signal?: AbortSignal) {
+  return requestJson<PreferencesPayload>('/api/v1/account/preferences', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+// -- Member file management --------------------------------------------------
+
+export function renameObject(spaceId: string, mountId: string, payload: RenameObjectPayload, signal?: AbortSignal) {
+  return requestJson<unknown>(
+    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/rename`,
+    { method: 'POST', body: JSON.stringify(payload), signal },
+  );
+}
+
+export function moveObject(spaceId: string, mountId: string, payload: MoveObjectPayload, signal?: AbortSignal) {
+  return requestJson<unknown>(
+    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/move`,
+    { method: 'POST', body: JSON.stringify(payload), signal },
+  );
+}
+
+export function deleteObject(spaceId: string, mountId: string, path: string, signal?: AbortSignal) {
+  const params = new URLSearchParams({ path });
+  return requestJson<void>(
+    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/object?${params.toString()}`,
+    { method: 'DELETE', signal },
+  );
+}
+
+// -- Share portal (anonymous, cookie-scoped) ---------------------------------
+
+export function getSharePortalCurrent(signal?: AbortSignal) {
+  return requestJson<SharePortalCurrentPayload>('/api/v1/share/current', { signal });
+}
+
+export function listSharePortalChildren(path: string, signal?: AbortSignal) {
+  const params = new URLSearchParams();
+  if (path) {
+    params.set('path', path);
+  }
+  const query = params.toString();
+  return requestJson<SharePortalChildrenPayload>(`/api/v1/share/children${query ? `?${query}` : ''}`, { signal });
+}
+
+export function sharePortalDownloadURL(path: string, inline = false) {
+  const params = new URLSearchParams({ path });
+  if (inline) {
+    params.set('inline', '1');
+  }
+  return `/api/v1/share/download?${params.toString()}`;
+}
+
+// -- Admin: overview ----------------------------------------------------------
+
+export function getAdminOverview(signal?: AbortSignal) {
+  return requestJson<AdminOverviewPayload>('/api/v1/admin/overview', { signal });
+}
+
+// -- Admin: users ---------------------------------------------------------------
+
+export function listAdminUsers(signal?: AbortSignal) {
+  return requestJson<{ items?: AdminUserPayload[] }>('/api/v1/admin/users', { signal });
+}
+
+export function createAdminUser(payload: CreateAdminUserPayload, signal?: AbortSignal) {
+  return requestJson<CreateAdminUserResponse>('/api/v1/admin/users', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function disableAdminUser(userId: string, signal?: AbortSignal) {
+  return requestJson<{ id: string; status: string }>(`/api/v1/admin/users/${encodeURIComponent(userId)}/disable`, {
+    method: 'POST',
+    signal,
+  });
+}
+
+export function enableAdminUser(userId: string, signal?: AbortSignal) {
+  return requestJson<{ id: string; status: string }>(`/api/v1/admin/users/${encodeURIComponent(userId)}/enable`, {
+    method: 'POST',
+    signal,
+  });
+}
+
+export function revokeAdminUserSessions(userId: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/admin/users/${encodeURIComponent(userId)}/revoke-sessions`, {
+    method: 'POST',
+    signal,
+  });
+}
+
+// -- Admin: spaces and ACL -------------------------------------------------------
+
+export function createAdminSpace(payload: CreateAdminSpacePayload, signal?: AbortSignal) {
+  return requestJson<AdminSpacePayload>('/api/v1/admin/spaces', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function listSpaceMembers(spaceId: string, signal?: AbortSignal) {
+  return requestJson<{ items?: AdminSpaceMemberPayload[] }>(
+    `/api/v1/admin/spaces/${encodeURIComponent(spaceId)}/members`,
+    { signal },
+  );
+}
+
+export function putSpaceMember(spaceId: string, accountId: string, permission: SpaceMemberRole, signal?: AbortSignal) {
+  return requestJson<AdminSpaceMemberPayload>(
+    `/api/v1/admin/spaces/${encodeURIComponent(spaceId)}/members/${encodeURIComponent(accountId)}`,
+    { method: 'PUT', body: JSON.stringify({ permission }), signal },
+  );
+}
+
+export function removeSpaceMember(spaceId: string, accountId: string, signal?: AbortSignal) {
+  return requestJson<void>(
+    `/api/v1/admin/spaces/${encodeURIComponent(spaceId)}/members/${encodeURIComponent(accountId)}`,
+    { method: 'DELETE', signal },
+  );
+}
+
+// -- Admin: emergency access -------------------------------------------------------
+
+export function listEmergencyAccess(signal?: AbortSignal) {
+  return requestJson<{ items?: EmergencyAccessPayload[] }>('/api/v1/admin/emergency-access', { signal });
+}
+
+export function createEmergencyAccess(payload: CreateEmergencyAccessPayload, signal?: AbortSignal) {
+  return requestJson<EmergencyAccessPayload>('/api/v1/admin/emergency-access', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function revokeEmergencyAccess(id: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/admin/emergency-access/${encodeURIComponent(id)}/revoke`, {
+    method: 'POST',
+    signal,
+  });
+}
+
+// -- Admin: network entries -------------------------------------------------------
+
+export function listNetworkEntries(signal?: AbortSignal) {
+  return requestJson<{ items?: NetworkEntryPayload[] }>('/api/v1/admin/network-entries', { signal });
+}
+
+export function putNetworkEntry(payload: NetworkEntryPayload, signal?: AbortSignal) {
+  return requestJson<NetworkEntryPayload>('/api/v1/admin/network-entries', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+// -- Admin: share and token governance -------------------------------------------
+
+export function listAdminShares(signal?: AbortSignal) {
+  return requestJson<{ items?: SharePayload[] }>('/api/v1/admin/shares', { signal });
+}
+
+export function revokeAdminShare(shareId: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/admin/shares/${encodeURIComponent(shareId)}`, {
+    method: 'DELETE',
+    signal,
+  });
+}
+
+export function listAdminAiTokens(signal?: AbortSignal) {
+  return requestJson<{ items?: AiTokenListItem[] }>('/api/v1/admin/ai-tokens', { signal });
+}
+
+export function revokeAdminAiToken(tokenId: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/admin/ai-tokens/${encodeURIComponent(tokenId)}`, {
+    method: 'DELETE',
+    signal,
+  });
+}
+
+// -- Admin: backups ------------------------------------------------------------------
+
+export function listAdminBackups(signal?: AbortSignal) {
+  return requestJson<{ items?: BackupPayload[] }>('/api/v1/admin/backups', { signal });
+}
+
+export function createAdminBackup(signal?: AbortSignal) {
+  return requestJson<BackupPayload>('/api/v1/admin/backups', {
+    method: 'POST',
     signal,
   });
 }

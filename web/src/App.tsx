@@ -1,4 +1,5 @@
 import MemberFilesApp from './member/MemberFilesApp';
+import SharePortalApp from './SharePortalApp';
 
 function RouteUnavailable({ title, detail }: { title: string; detail: string }) {
   return <main className="route-unavailable"><strong>Omnora</strong><h1>{title}</h1><p>{detail}</p></main>;
@@ -13,7 +14,7 @@ export default function App() {
     return <MemberFilesApp entry="admin" />;
   }
   if (pathname === '/share' || pathname.startsWith('/share/')) {
-    return <RouteUnavailable title="分享页面独立部署中" detail="分享访问不会显示成员空间导航。" />;
+    return <SharePortalApp />;
   }
   return <RouteUnavailable title="页面不存在" detail="请返回成员文件空间。" />;
 }

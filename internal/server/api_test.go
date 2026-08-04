@@ -317,7 +317,10 @@ func newAPITestServer(t *testing.T) (*store.DB, http.Handler) {
 		t.Fatalf("open test database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return db, New(config.Config{Routes: map[domain.RouteGroup]bool{domain.RouteGroupREST: true}}, db)
+	return db, New(config.Config{
+		Routes: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+		RouteEnvOverrides: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+	}, db)
 }
 
 func createAPITestAccounts(t *testing.T, db *store.DB) (identity.Account, identity.Account) {

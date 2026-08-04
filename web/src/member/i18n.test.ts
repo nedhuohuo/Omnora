@@ -47,6 +47,13 @@ describe('member locale', () => {
     expect(getStoredLocale()).toBe('en-US');
     expect(resolveLocale('en-US')).toBe('en-US');
   });
+
+  it('keeps zh-CN and en-US message keys in parity', () => {
+    const zhKeys = Object.keys(localeMessages['zh-CN']).sort();
+    const enKeys = Object.keys(localeMessages['en-US']).sort();
+
+    expect(enKeys).toEqual(zhKeys);
+  });
 });
 
 describe('directory response formatting', () => {

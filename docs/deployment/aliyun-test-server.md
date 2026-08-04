@@ -20,27 +20,46 @@ Before the first deployment, confirm that the ECS instance is still owned by the
 - Confirm the ECS instance is in the expected Aliyun account and region.
 - Confirm the host is not serving production traffic, scheduled jobs, VPN/proxy exit traffic, or any personal data.
 - Confirm SSH uses key-only authentication where possible; do not rely on root password login for normal operations.
-- Confirm Aliyun security groups and host firewall do not expose Omnora `8080` or `8081` publicly.
+- Confirm Aliyun security group allows inbound `8080/tcp` for the intended testers (current operator choice: public HTTP on `8080` for this disposable test box).
+- Confirm host firewall and security group keep `8081` closed to the public internet.
 - Confirm the test data directory is disposable and excluded from Git.
 - Confirm any temporary reverse proxy has explicit Host, TLS, and source allowlist settings.
 
 ## Access Model
 
-The default test configuration binds Omnora to `127.0.0.1` on the ECS host. Test access should go through an SSH tunnel:
+The current Aliyun test deployment intentionally exposes Member/Admin Web on the ECS public interface:
+
+| Entry | Bind | Purpose |
+| --- | --- | --- |
+| LAN HTTP `8080` | `0.0.0.0` | External browser access for testers |
+| Proxy HTTPS `8081` | `127.0.0.1` | Local-only; not for public direct access |
+
+External URL:
+
+```text
+http://120.26.88.7:8080
+```
+
+Matching env values on the host (`deploy/aliyun-test.env`):
+
+```text
+OMNORA_LAN_BIND=0.0.0.0
+OMNORA_PROXY_BIND=127.0.0.1
+OMNORA_LAN_HTTP_ALLOWED_CIDRS=0.0.0.0/0,::/0
+```
+
+This is a disposable test-box choice, not a production security model. Keep Share and MCP route groups disabled unless a specific test requires them. `OMNORA_DEPLOY_ENV=aliyun-test` is an environment label, not a security boundary. The actual boundary remains the bind address, CIDR checks, route-group switches, Aliyun security group, host firewall, and any reverse-proxy policy.
+
+If Clash/Meta TUN is enabled locally and SSH to the host fails, add `120.26.88.7/32` to the `DIRECT` rules or temporarily disable that TUN route. The operator note records this as a required connectivity condition for SSH operations.
+
+Optional SSH tunnel (only when you deliberately switch `OMNORA_LAN_BIND` back to `127.0.0.1`):
 
 ```bash
 ssh aliyunssh -L 18080:127.0.0.1:8080
+# then open http://127.0.0.1:18080
 ```
 
-If Clash/Meta TUN is enabled locally, add `120.26.88.7/32` to the `DIRECT` rules or temporarily disable that TUN route before opening the tunnel. The operator note records this as a required connectivity condition.
-
-Then open:
-
-```text
-http://127.0.0.1:18080
-```
-
-Do not expose `8080` or `8081` directly to the public internet. `OMNORA_DEPLOY_ENV=aliyun-test` is an environment label, not a security boundary. The actual boundary is the bind address, CIDR checks, route-group switches, Aliyun security group, host firewall, and any reverse-proxy policy. If remote browser access is required, put a TLS reverse proxy in front of `127.0.0.1:8081`, keep `OMNORA_PROXY_HTTPS_ENABLED=true`, configure trusted proxy CIDRs explicitly, and keep public route groups disabled unless a specific test requires them.
+If remote HTTPS browser access is required later, put a TLS reverse proxy in front of `127.0.0.1:8081`, keep `OMNORA_PROXY_HTTPS_ENABLED=true`, configure trusted proxy CIDRs explicitly, and keep public route groups disabled unless a specific test requires them.
 
 ## Deployment Files
 
@@ -59,17 +78,17 @@ OMNORA_INITIALIZATION_TOKEN
 OMNORA_TOTP_ENCRYPTION_KEY
 ```
 
-Start the test server:
+Start the test server (this host uses Docker Compose 1.29.2, so prefer `docker-compose`):
 
 ```bash
 cd deploy
-docker compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compose.aliyun-test.yml up -d
+docker-compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compose.aliyun-test.yml up -d
 ```
 
 Check status:
 
 ```bash
-docker compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compose.aliyun-test.yml ps
+docker-compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compose.aliyun-test.yml ps
 docker logs --tail 80 omnora-aliyun-test
 ```
 
@@ -77,8 +96,19 @@ Stop the test server:
 
 ```bash
 cd deploy
-docker compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compose.aliyun-test.yml down
+docker-compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compose.aliyun-test.yml down
 ```
+
+## Storage Mounts
+
+| Container path | Host path | Purpose |
+| --- | --- | --- |
+| `/srv/omnora/managed` | `deploy/aliyun-test/managed` | Managed mounts (always read-write in the container) |
+| `/mnt/omnora` | `deploy/aliyun-test/mounts` | Predeclared external mount root (read-write on this test box) |
+
+Register external mounts under `/mnt/omnora/...`, or managed mounts under `/srv/omnora/managed/...`. Do not point mounts at `/srv/omnora/data` or other paths that are not bind-mounted into the container.
+
+Effective write access is still `Docker volume mode ∩ Omnora mount mode`. If you later switch the Compose bind back to `:ro`, existing `read_write` mounts will fail create/upload until the volume is remounted read-write.
 
 ## Guardrails
 
@@ -86,4 +116,5 @@ docker compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compos
 - Never store root passwords, private keys, API tokens, or generated TOTP encryption keys in this repository.
 - Keep test data synthetic or explicitly disposable.
 - Keep `OMNORA_ROUTE_SHARE_ENABLED=false` and `OMNORA_ROUTE_MCP_ENABLED=false` by default.
+- Treat open `0.0.0.0/0` CIDR on `8080` as test-only; do not copy this allowlist into production.
 - Record any firewall, domain, or reverse-proxy changes in the operator vault after they are made.

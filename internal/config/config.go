@@ -13,11 +13,18 @@ import (
 )
 
 type Config struct {
-	HTTP           HTTPConfig
-	Database       DatabaseConfig
-	Initialization InitializationConfig
-	Secrets        SecretConfig
-	Routes         access.RouteGroups
+	HTTP              HTTPConfig
+	Database          DatabaseConfig
+	Initialization    InitializationConfig
+	Secrets           SecretConfig
+	Storage           StorageConfig
+	Routes            access.RouteGroups
+	RouteEnvOverrides map[domain.RouteGroup]bool
+}
+
+type StorageConfig struct {
+	ManagedDir           string
+	PredeclaredMountRoot string
 }
 
 type HTTPConfig struct {
@@ -49,7 +56,12 @@ func LoadEnv() (Config, error) {
 		Initialization: InitializationConfig{
 			TTL: 30 * time.Minute,
 		},
-		Routes: access.DefaultRouteGroups(),
+		Storage: StorageConfig{
+			ManagedDir:           "/srv/omnora/managed",
+			PredeclaredMountRoot: "/mnt/omnora",
+		},
+		Routes:            access.DefaultRouteGroups(),
+		RouteEnvOverrides: map[domain.RouteGroup]bool{},
 	}
 
 	if value := strings.TrimSpace(os.Getenv("OMNORA_HTTP_ADDR")); value != "" {
@@ -83,6 +95,12 @@ func LoadEnv() (Config, error) {
 		cfg.Initialization.TTL = ttl
 	}
 	cfg.Secrets.TOTPEncryptionKey = strings.TrimSpace(os.Getenv("OMNORA_TOTP_ENCRYPTION_KEY"))
+	if value := strings.TrimSpace(os.Getenv("OMNORA_MANAGED_STORAGE_DIR")); value != "" {
+		cfg.Storage.ManagedDir = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OMNORA_PREDECLARED_MOUNT_ROOT")); value != "" {
+		cfg.Storage.PredeclaredMountRoot = value
+	}
 
 	envByGroup := map[domain.RouteGroup]string{
 		domain.RouteGroupMemberWeb: "OMNORA_ROUTE_MEMBER_WEB_ENABLED",
@@ -99,6 +117,7 @@ func LoadEnv() (Config, error) {
 		}
 		if ok {
 			cfg.Routes.Set(group, enabled)
+			cfg.RouteEnvOverrides[group] = enabled
 		}
 	}
 

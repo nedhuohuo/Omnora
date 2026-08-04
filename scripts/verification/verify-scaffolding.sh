@@ -56,15 +56,21 @@ if grep -Eiq 'postgres|redis|opensearch|minio|onlyoffice|libreoffice|ffmpeg|dock
 fi
 pass "compose file avoids external service dependencies and privileged settings"
 
-if grep -Eiq 'docker\.sock|network_mode:[[:space:]]*host|privileged:[[:space:]]*true|0\.0\.0\.0|:rw([[:space:]#]|$)' "$ALIYUN_TEST_COMPOSE"; then
-  fail "Aliyun test compose contains unsafe public bind or privileged setting"
+if grep -Eiq 'docker\.sock|network_mode:[[:space:]]*host|privileged:[[:space:]]*true|:rw([[:space:]#]|$)' "$ALIYUN_TEST_COMPOSE"; then
+  fail "Aliyun test compose contains unsafe privileged or write-mount setting"
 fi
 grep -Fq 'omnora.environment: aliyun-test' "$ALIYUN_TEST_COMPOSE" ||
   fail "Aliyun test compose must label the deployment environment"
-grep -Fq '127.0.0.1' "$ALIYUN_TEST_COMPOSE" ||
-  fail "Aliyun test compose must default to host-local bind addresses"
+grep -Fq 'OMNORA_PROXY_BIND:-127.0.0.1' "$ALIYUN_TEST_COMPOSE" ||
+  fail "Aliyun test compose must keep proxy_https host-local by default"
+grep -Fq 'OMNORA_LAN_BIND:-0.0.0.0' "$ALIYUN_TEST_COMPOSE" ||
+  fail "Aliyun test compose must default LAN HTTP bind to 0.0.0.0 for external test access"
 grep -Fq 'OMNORA_TEST_SERVER_HOST=replace-with-private-vault-host' "$ALIYUN_TEST_ENV_EXAMPLE" ||
   fail "Aliyun test env example must not commit the real host"
+grep -Fq 'OMNORA_LAN_BIND=0.0.0.0' "$ALIYUN_TEST_ENV_EXAMPLE" ||
+  fail "Aliyun test env example must expose LAN HTTP on 0.0.0.0"
+grep -Fq 'OMNORA_PROXY_BIND=127.0.0.1' "$ALIYUN_TEST_ENV_EXAMPLE" ||
+  fail "Aliyun test env example must keep proxy_https on 127.0.0.1"
 grep -Fq 'OMNORA_ROUTE_MCP_ENABLED=false' "$ALIYUN_TEST_ENV_EXAMPLE" ||
   fail "Aliyun test env example must keep MCP disabled by default"
 grep -Fq 'OMNORA_ROUTE_SHARE_ENABLED=false' "$ALIYUN_TEST_ENV_EXAMPLE" ||
@@ -73,11 +79,13 @@ grep -Fq 'deploy/*.env' "$GITIGNORE" ||
   fail ".gitignore must exclude real deployment env files"
 grep -Fq 'deploy/aliyun-test/' "$GITIGNORE" ||
   fail ".gitignore must exclude Aliyun test runtime data"
-grep -Fq 'SSH tunnel' "$ALIYUN_TEST_DOC" ||
-  fail "Aliyun test deployment doc must prefer SSH tunnel access"
+grep -Fq 'http://120.26.88.7:8080' "$ALIYUN_TEST_DOC" ||
+  fail "Aliyun test deployment doc must document the external HTTP URL"
+grep -Fq 'OMNORA_LAN_BIND=0.0.0.0' "$ALIYUN_TEST_DOC" ||
+  fail "Aliyun test deployment doc must document the public LAN bind"
 grep -Fq 'OMNORA_DEPLOY_ENV=aliyun-test' "$CHECKLIST" ||
   fail "release checklist must state deploy env is not a security boundary"
-pass "Aliyun test-server scaffold keeps public exposure closed by default"
+pass "Aliyun test-server scaffold documents external HTTP access with local proxy_https"
 
 grep -Eq '^openapi:[[:space:]]*3\.1\.0' "$OPENAPI" || fail "OpenAPI document must use 3.1.0"
 for route_group in admin_web member_web share rest mcp openapi; do

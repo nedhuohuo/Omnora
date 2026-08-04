@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"embed"
 	"io/fs"
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 
 	"omnora/internal/config"
 	"omnora/internal/domain"
@@ -14,9 +16,10 @@ import (
 )
 
 type Server struct {
-	cfg config.Config
-	db  *store.DB
-	mux *http.ServeMux
+	cfg      config.Config
+	db       *store.DB
+	mux      *http.ServeMux
+	routesMu sync.RWMutex
 }
 
 // The Docker build replaces the placeholder with the Vite production bundle.
@@ -30,6 +33,9 @@ func New(cfg config.Config, db *store.DB) http.Handler {
 		cfg: cfg,
 		db:  db,
 		mux: http.NewServeMux(),
+	}
+	if db != nil {
+		_ = s.hydrateRouteGroups(context.Background())
 	}
 	s.routes()
 	return securityHeaders(requestID(s.mux))
@@ -136,12 +142,24 @@ func (s *Server) handleProductGroup(group domain.RouteGroup, routePath string) {
 
 func (s *Server) gate(group domain.RouteGroup, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.cfg.Routes.Enabled(group) {
+		if !s.routeEnabled(group) {
 			httpx.WriteError(w, r, http.StatusNotFound, "route_group_disabled", "route group is not exposed")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) routeEnabled(group domain.RouteGroup) bool {
+	s.routesMu.RLock()
+	defer s.routesMu.RUnlock()
+	return s.cfg.Routes.Enabled(group)
+}
+
+func (s *Server) setRouteEnabled(group domain.RouteGroup, enabled bool) {
+	s.routesMu.Lock()
+	defer s.routesMu.Unlock()
+	s.cfg.Routes.Set(group, enabled)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

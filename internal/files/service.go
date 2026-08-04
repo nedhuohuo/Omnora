@@ -184,6 +184,94 @@ func (Service) CreateDirectory(mount Mount, parentPath, name string) (string, er
 	return created, nil
 }
 
+// Rename moves an existing file or directory to a new relative path within
+// the same mount. It refuses to overwrite an existing target and rejects
+// symlinks anywhere along either path.
+func (Service) Rename(mount Mount, from, to string) (string, error) {
+	return moveWithinMount(mount, from, to)
+}
+
+// Move relocates an existing file or directory into a different directory
+// within the same mount, keeping its base name.
+func (Service) Move(mount Mount, from, toDir string) (string, error) {
+	cleanedFrom, err := storage.CleanRelativePath(from)
+	if err != nil || cleanedFrom == "." {
+		return "", ErrNotFile
+	}
+	to := joinRelativePath(mustCleanDir(toDir), path.Base(cleanedFrom))
+	return moveWithinMount(mount, cleanedFrom, to)
+}
+
+func mustCleanDir(dir string) string {
+	cleaned, err := storage.CleanRelativePath(dir)
+	if err != nil {
+		return "."
+	}
+	return cleaned
+}
+
+func moveWithinMount(mount Mount, from, to string) (string, error) {
+	cleanedFrom, err := storage.CleanRelativePath(from)
+	if err != nil || cleanedFrom == "." {
+		return "", ErrNotFile
+	}
+	cleanedTo, err := storage.CleanRelativePath(to)
+	if err != nil || cleanedTo == "." {
+		return "", ErrNotFile
+	}
+	root, readOnly, err := openMountRoot(mount)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	if readOnly {
+		return "", ErrInvalidMountMode
+	}
+	if err := rejectSymlinkPath(root, cleanedFrom); err != nil {
+		return "", err
+	}
+	if err := rejectSymlinkPath(root, path.Dir(cleanedTo)); err != nil {
+		return "", err
+	}
+	if _, err := root.Lstat(cleanedTo); err == nil {
+		return "", fmt.Errorf("%w: target already exists", ErrInvalidMount)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if err := root.Rename(cleanedFrom, cleanedTo); err != nil {
+		return "", err
+	}
+	return cleanedTo, nil
+}
+
+// Delete removes a file or directory (and its contents, if any) from the
+// mount. It refuses to delete the mount root itself.
+func (Service) Delete(mount Mount, relativePath string) error {
+	cleaned, err := storage.CleanRelativePath(relativePath)
+	if err != nil || cleaned == "." {
+		return ErrNotFile
+	}
+	root, readOnly, err := openMountRoot(mount)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if readOnly {
+		return ErrInvalidMountMode
+	}
+	if err := rejectSymlinkPath(root, cleaned); err != nil {
+		return err
+	}
+	info, err := root.Lstat(cleaned)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return root.RemoveAll(cleaned)
+	}
+	return root.Remove(cleaned)
+}
+
 func (Service) OpenFile(mount Mount, relativePath string) (*os.File, os.FileInfo, error) {
 	cleaned, err := storage.CleanRelativePath(relativePath)
 	if err != nil || cleaned == "." {

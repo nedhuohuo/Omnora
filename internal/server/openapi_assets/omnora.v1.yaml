@@ -1,0 +1,1417 @@
+openapi: 3.1.0
+info:
+  title: Omnora REST API
+  version: 0.1.0-starter
+  summary: Starter OpenAPI contract for the first Omnora version.
+  description: >
+    This document captures the intended first-version REST surface for client
+    generation and implementation alignment. It is not a promise that a runnable
+    server already exists.
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+servers:
+  - url: /api/v1
+x-omnora-route-groups:
+  - admin_web
+  - member_web
+  - share
+  - rest
+  - mcp
+  - openapi
+security:
+  - bearerAuth: []
+  - cookieSession: []
+tags:
+  - name: System
+  - name: Identity
+  - name: Spaces
+  - name: Files
+  - name: Search
+  - name: Transfers
+  - name: Shares
+  - name: AI Tokens
+  - name: Admin
+  - name: Audit
+  - name: MCP
+paths:
+  /health:
+    get:
+      tags: [System]
+      summary: Return process health.
+      x-omnora-route-group: rest
+      security: []
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /route-groups:
+    get:
+      tags: [System]
+      summary: Return route group exposure state visible to the caller.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Route group state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [groups]
+                properties:
+                  groups:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RouteGroupState"
+  /auth/session:
+    get:
+      tags: [Identity]
+      summary: Return the current browser session subject.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Current session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Identity]
+      summary: Create a browser session after password and required TOTP checks.
+      x-omnora-route-group: rest
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "201":
+          description: Session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      tags: [Identity]
+      summary: Revoke the current browser session.
+      x-omnora-route-group: rest
+      responses:
+        "204":
+          description: Session revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /account/totp/setup:
+    post:
+      tags: [Identity]
+      summary: Create an encrypted TOTP secret for the current account.
+      description: Requires OMNORA_TOTP_ENCRYPTION_KEY and returns the setup secret only once.
+      x-omnora-route-group: rest
+      responses:
+        "201":
+          description: TOTP setup material.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TOTPSetup"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /account/totp/confirm:
+    post:
+      tags: [Identity]
+      summary: Confirm the current TOTP secret and require TOTP on future login.
+      x-omnora-route-group: rest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TOTPConfirmRequest"
+      responses:
+        "200":
+          description: TOTP enabled.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /spaces:
+    get:
+      tags: [Spaces]
+      summary: List spaces available to the current subject.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Spaces.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Space"
+                  nextCursor:
+                    type: string
+  /spaces/{spaceId}:
+    get:
+      tags: [Spaces]
+      summary: Read one space and the caller's effective role.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: Space.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Space"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /spaces/{spaceId}/acl:
+    get:
+      tags: [Spaces]
+      summary: List space ACL entries.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: ACL entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SpaceAclEntry"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      tags: [Spaces]
+      summary: Replace space ACL entries.
+      description: Requires manager role in the target space; does not grant mount administration.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/SpaceAclEntry"
+      responses:
+        "200":
+          description: ACL updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SpaceAclEntry"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /spaces/{spaceId}/mounts:
+    get:
+      tags: [Spaces]
+      summary: List mounts in a space.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: Mounts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Mount"
+  /spaces/{spaceId}/mounts/{mountId}/children:
+    get:
+      tags: [Files]
+      summary: List files and directories below a mount-relative directory.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - $ref: "#/components/parameters/MountId"
+        - $ref: "#/components/parameters/Path"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Directory listing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DirectoryListing"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /spaces/{spaceId}/mounts/{mountId}/download:
+    get:
+      tags: [Transfers]
+      summary: Download a mount-relative file, including HTTP Range requests.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - $ref: "#/components/parameters/MountId"
+        - $ref: "#/components/parameters/Path"
+        - name: Range
+          in: header
+          schema:
+            type: string
+            example: bytes=0-1023
+      responses:
+        "200":
+          description: Complete file body.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: Partial file body.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "416":
+          $ref: "#/components/responses/RangeNotSatisfiable"
+  /spaces/{spaceId}/search:
+    get:
+      tags: [Search]
+      summary: Search indexed metadata within an authorized space.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [file, directory, image, pdf, text, markdown, audio, video, office, other]
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Search results and excluded mounts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResultPage"
+  /files/{objectId}:
+    get:
+      tags: [Files]
+      summary: Read current metadata for one file object.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/ObjectId"
+      responses:
+        "200":
+          description: File object metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileObject"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /files/{objectId}/text:
+    get:
+      tags: [Files]
+      summary: Read bounded text or Markdown preview content.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/ObjectId"
+        - name: maxBytes
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1048576
+            default: 65536
+      responses:
+        "200":
+          description: Bounded text content.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TextPreview"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+  /files/{objectId}/download-ticket:
+    post:
+      tags: [Transfers]
+      summary: Create a short-lived download ticket for a single object.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/ObjectId"
+      responses:
+        "201":
+          description: Download ticket.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadTicket"
+  /downloads/{ticketId}:
+    get:
+      tags: [Transfers]
+      summary: Download content by short-lived ticket, including Range requests.
+      x-omnora-route-group: rest
+      security: []
+      parameters:
+        - name: ticketId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Range
+          in: header
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Complete file body.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: Partial file body.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /uploads:
+    post:
+      tags: [Transfers]
+      summary: Create a resumable upload session.
+      description: AI Tokens require an explicit upload scope and current write permission.
+      x-omnora-route-group: rest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUploadRequest"
+      responses:
+        "201":
+          description: Upload session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadSession"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /uploads/{uploadId}/parts/{partNumber}:
+    put:
+      tags: [Transfers]
+      summary: Upload one part of a resumable upload session.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/UploadId"
+        - name: partNumber
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "204":
+          description: Part accepted.
+  /uploads/{uploadId}/complete:
+    post:
+      tags: [Transfers]
+      summary: Complete an upload after all required parts have been received.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/UploadId"
+      responses:
+        "200":
+          description: Created file object.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileObject"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /uploads/{uploadId}:
+    get:
+      tags: [Transfers]
+      summary: Resume a resumable upload session and list accepted parts.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/UploadId"
+      responses:
+        "200":
+          description: Upload session state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadSession"
+    delete:
+      tags: [Transfers]
+      summary: Cancel an upload session and release reserved quota.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/UploadId"
+      responses:
+        "204":
+          description: Upload canceled.
+  /shares:
+    get:
+      tags: [Shares]
+      summary: List shares visible to the caller.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Shares.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Share"
+    post:
+      tags: [Shares]
+      summary: Create a share for a file or folder.
+      description: Requires current manager role in the target space. The returned secret is shown once.
+      x-omnora-route-group: rest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateShareRequest"
+      responses:
+        "201":
+          description: Share created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateShareResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /shares/{shareId}:
+    get:
+      tags: [Shares]
+      summary: Read share metadata.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/ShareId"
+      responses:
+        "200":
+          description: Share metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Share"
+    patch:
+      tags: [Shares]
+      summary: Update share limits or revoke state.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/ShareId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateShareRequest"
+      responses:
+        "200":
+          description: Share updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Share"
+    delete:
+      tags: [Shares]
+      summary: Revoke a share.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/ShareId"
+      responses:
+        "204":
+          description: Share revoked.
+  /share-sessions:
+    post:
+      tags: [Shares]
+      summary: Exchange a share URL fragment secret for a short-lived share session.
+      description: The secret is accepted only in this POST body, never in path, query, or Referer.
+      x-omnora-route-group: share
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateShareSessionRequest"
+      responses:
+        "201":
+          description: Share session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShareSession"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /ai-tokens:
+    get:
+      tags: [AI Tokens]
+      summary: List AI Token metadata for the current member.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Token metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AiToken"
+    post:
+      tags: [AI Tokens]
+      summary: Create an AI Token with explicit scopes and directory boundaries.
+      x-omnora-route-group: rest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAiTokenRequest"
+      responses:
+        "201":
+          description: Token created. The secret is shown once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateAiTokenResponse"
+  /ai-tokens/{tokenId}:
+    delete:
+      tags: [AI Tokens]
+      summary: Revoke an AI Token.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/TokenId"
+      responses:
+        "204":
+          description: Token revoked.
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: List users.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Users.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/User"
+    post:
+      tags: [Admin]
+      summary: Create a member account and its personal space.
+      x-omnora-route-group: rest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+      responses:
+        "201":
+          description: User created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+  /admin/mounts:
+    post:
+      tags: [Admin]
+      summary: Register a predeclared container path as a space mount.
+      description: Only system administrators can register mounts; unverifiable identity returns mount_identity_unverifiable.
+      x-omnora-route-group: rest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMountRequest"
+      responses:
+        "201":
+          description: Mount registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Mount"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /admin/index-jobs:
+    get:
+      tags: [Admin]
+      summary: List indexing and reconciliation jobs.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Jobs.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Job"
+    post:
+      tags: [Admin]
+      summary: Queue a catalog scan job for one mount.
+      x-omnora-route-group: rest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mountId]
+              properties:
+                mountId:
+                  $ref: "#/components/schemas/OpaqueId"
+      responses:
+        "201":
+          description: Job queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+  /admin/index-jobs/{jobId}/run:
+    post:
+      tags: [Admin]
+      summary: Claim and run one queued catalog scan job inline.
+      x-omnora-route-group: rest
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/OpaqueId"
+      responses:
+        "200":
+          description: Catalog scan batch result.
+          content:
+            application/json:
+              schema:
+                type: object
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /audit/events:
+    get:
+      tags: [Audit]
+      summary: List audit events visible to the caller.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Audit events.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditEvent"
+                  nextCursor:
+                    type: string
+  /mcp:
+    post:
+      tags: [MCP]
+      summary: Streamable HTTP MCP endpoint.
+      description: MCP exposes only the first-version AI capabilities and must not inline large binary files.
+      x-omnora-route-group: mcp
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: MCP JSON response or stream envelope.
+          content:
+            application/json:
+              schema:
+                type: object
+        "403":
+          $ref: "#/components/responses/Forbidden"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: AI Token or session-bound API token
+    cookieSession:
+      type: apiKey
+      in: cookie
+      name: omnora_session
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Path:
+      name: path
+      in: query
+      schema:
+        type: string
+        default: ""
+      description: Normalized mount-relative directory path. Absolute paths are rejected.
+    SpaceId:
+      name: spaceId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/OpaqueId"
+    MountId:
+      name: mountId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/OpaqueId"
+    ObjectId:
+      name: objectId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/OpaqueId"
+    UploadId:
+      name: uploadId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/OpaqueId"
+    ShareId:
+      name: shareId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/OpaqueId"
+    TokenId:
+      name: tokenId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/OpaqueId"
+  responses:
+    Unauthorized:
+      description: Authentication failed or credentials are not currently valid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: The current authorization formula denies this operation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: The object does not exist or is not visible to the caller.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: The requested state conflicts with current system state.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnsupportedMediaType:
+      description: The requested preview type is not supported.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RangeNotSatisfiable:
+      description: Requested byte range is outside the current file size.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    OpaqueId:
+      type: string
+      minLength: 8
+      maxLength: 128
+      description: Opaque, non-host-path identifier.
+    Error:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        code:
+          type: string
+          enum:
+            - unauthorized
+            - forbidden
+            - route_group_disabled
+            - not_found
+            - invalid_cursor
+            - quota_exceeded
+            - rate_limited
+            - mount_identity_unverifiable
+            - mount_conflict
+            - mount_offline
+            - readonly_mount
+            - object_changed
+            - preview_not_supported
+            - share_password_required
+            - share_invalid
+            - upload_conflict
+        detail:
+          type: string
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    RouteGroupState:
+      type: object
+      required: [name, enabled]
+      properties:
+        name:
+          type: string
+          enum: [admin_web, member_web, share, rest, mcp, openapi]
+        enabled:
+          type: boolean
+    Session:
+      type: object
+      required: [userId, expiresAt]
+      properties:
+        userId:
+          $ref: "#/components/schemas/OpaqueId"
+        expiresAt:
+          type: string
+          format: date-time
+        requiresTotpEnrollment:
+          type: boolean
+    CreateSessionRequest:
+      type: object
+      required: [login, password]
+      properties:
+        login:
+          type: string
+        password:
+          type: string
+          format: password
+        totpCode:
+          type: string
+          minLength: 6
+          maxLength: 8
+    TOTPSetup:
+      type: object
+      required: [secret, otpauthUri]
+      properties:
+        secret:
+          type: string
+          description: One-time TOTP secret for authenticator enrollment.
+        otpauthUri:
+          type: string
+          format: uri
+    TOTPConfirmRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          minLength: 6
+          maxLength: 8
+    User:
+      type: object
+      required: [id, displayName, role, status]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [admin, member]
+        status:
+          type: string
+          enum: [active, disabled]
+    CreateUserRequest:
+      type: object
+      required: [displayName, initialPassword]
+      properties:
+        displayName:
+          type: string
+        initialPassword:
+          type: string
+          format: password
+    Space:
+      type: object
+      required: [id, type, name, role]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        type:
+          type: string
+          enum: [personal, shared]
+        name:
+          type: string
+        role:
+          type: string
+          enum: [viewer, editor, manager]
+    SpaceAclEntry:
+      type: object
+      required: [userId, role]
+      properties:
+        userId:
+          $ref: "#/components/schemas/OpaqueId"
+        role:
+          type: string
+          enum: [viewer, editor, manager]
+    Mount:
+      type: object
+      required: [id, spaceId, name, mode, indexMode, status]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        spaceId:
+          $ref: "#/components/schemas/OpaqueId"
+        name:
+          type: string
+        mode:
+          type: string
+          enum: [read_only, read_write]
+        indexMode:
+          type: string
+          enum: [disabled, enabled, paused]
+        status:
+          type: string
+          enum: [active, offline, readonly_drift, identity_drift, identity_unverifiable, conflict, disabled]
+    CreateMountRequest:
+      type: object
+      required: [spaceId, name, containerPath, mode, indexMode]
+      properties:
+        spaceId:
+          $ref: "#/components/schemas/OpaqueId"
+        name:
+          type: string
+        containerPath:
+          type: string
+          description: Absolute path under the predeclared mount root inside the container.
+        mode:
+          type: string
+          enum: [read_only, read_write]
+        indexMode:
+          type: string
+          enum: [disabled, enabled]
+    FileObject:
+      type: object
+      required: [id, spaceId, mountId, name, kind, size, modifiedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        spaceId:
+          $ref: "#/components/schemas/OpaqueId"
+        mountId:
+          $ref: "#/components/schemas/OpaqueId"
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [file, directory]
+        mediaType:
+          type: string
+        size:
+          type: integer
+          minimum: 0
+        modifiedAt:
+          type: string
+          format: date-time
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [browse, preview, download, upload, copy, move, rename, delete, share]
+    DirectoryListing:
+      type: object
+      required: [mount, path, items]
+      properties:
+        mount:
+          $ref: "#/components/schemas/Mount"
+        path:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileObject"
+        nextCursor:
+          type: string
+    SearchResultPage:
+      type: object
+      required: [items, excludedMounts]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileObject"
+        excludedMounts:
+          type: array
+          items:
+            type: object
+            required: [mountId, reason]
+            properties:
+              mountId:
+                $ref: "#/components/schemas/OpaqueId"
+              reason:
+                type: string
+                enum: [index_disabled, index_paused, offline, initial_scan_incomplete, identity_unverifiable]
+        nextCursor:
+          type: string
+    TextPreview:
+      type: object
+      required: [objectId, content, truncated]
+      properties:
+        objectId:
+          $ref: "#/components/schemas/OpaqueId"
+        content:
+          type: string
+        truncated:
+          type: boolean
+        renderedMarkdown:
+          type: boolean
+    DownloadTicket:
+      type: object
+      required: [ticketId, expiresAt, url]
+      properties:
+        ticketId:
+          $ref: "#/components/schemas/OpaqueId"
+        expiresAt:
+          type: string
+          format: date-time
+        url:
+          type: string
+          format: uri-reference
+    CreateUploadRequest:
+      type: object
+      required: [spaceId, mountId, parentPath, fileName, size]
+      properties:
+        spaceId:
+          $ref: "#/components/schemas/OpaqueId"
+        mountId:
+          $ref: "#/components/schemas/OpaqueId"
+        parentPath:
+          type: string
+        fileName:
+          type: string
+        size:
+          type: integer
+          minimum: 0
+    UploadSession:
+      type: object
+      required: [id, expiresAt, partSize]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        targetPath:
+          type: string
+        expectedSize:
+          type: integer
+          minimum: 0
+        receivedSize:
+          type: integer
+          minimum: 0
+        parts:
+          type: array
+          items:
+            type: object
+            required: [number, size]
+            properties:
+              number:
+                type: integer
+                minimum: 1
+              size:
+                type: integer
+                minimum: 0
+        expiresAt:
+          type: string
+          format: date-time
+        partSize:
+          type: integer
+          minimum: 1
+    Share:
+      type: object
+      required: [id, targetObjectId, status, allowPreview, allowDownload]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        targetObjectId:
+          $ref: "#/components/schemas/OpaqueId"
+        status:
+          type: string
+          enum: [active, expired, revoked, invalidated]
+        allowPreview:
+          type: boolean
+        allowDownload:
+          type: boolean
+        expiresAt:
+          type: string
+          format: date-time
+    CreateShareRequest:
+      type: object
+      required: [targetObjectId, allowPreview, allowDownload]
+      properties:
+        targetObjectId:
+          $ref: "#/components/schemas/OpaqueId"
+        password:
+          type: string
+          format: password
+        expiresAt:
+          type: string
+          format: date-time
+        allowPreview:
+          type: boolean
+        allowDownload:
+          type: boolean
+        maxAccesses:
+          type: integer
+          minimum: 1
+        maxDownloads:
+          type: integer
+          minimum: 1
+    CreateShareResponse:
+      type: object
+      required: [share, publicId, fragmentSecret]
+      properties:
+        share:
+          $ref: "#/components/schemas/Share"
+        publicId:
+          type: string
+        fragmentSecret:
+          type: string
+          description: One-time returned secret intended for the URL fragment.
+    UpdateShareRequest:
+      type: object
+      properties:
+        expiresAt:
+          type: string
+          format: date-time
+        allowPreview:
+          type: boolean
+        allowDownload:
+          type: boolean
+        maxAccesses:
+          type: integer
+          minimum: 1
+        maxDownloads:
+          type: integer
+          minimum: 1
+        revoked:
+          type: boolean
+    CreateShareSessionRequest:
+      type: object
+      required: [publicId, fragmentSecret]
+      properties:
+        publicId:
+          type: string
+        fragmentSecret:
+          type: string
+        password:
+          type: string
+          format: password
+    ShareSession:
+      type: object
+      required: [shareId, expiresAt]
+      properties:
+        shareId:
+          $ref: "#/components/schemas/OpaqueId"
+        expiresAt:
+          type: string
+          format: date-time
+    AiToken:
+      type: object
+      required: [id, name, scopes, expiresAt, status]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: ["spaces:read", "files:list", "files:metadata", "files:text", "files:download_ticket", "search:read", "uploads:create"]
+        expiresAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [active, revoked, expired]
+    CreateAiTokenRequest:
+      type: object
+      required: [name, scopes, boundaries, expiresAt]
+      properties:
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: ["spaces:read", "files:list", "files:metadata", "files:text", "files:download_ticket", "search:read", "uploads:create"]
+        boundaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/DirectoryBoundary"
+        expiresAt:
+          type: string
+          format: date-time
+    CreateAiTokenResponse:
+      type: object
+      required: [token, secret, bearerToken]
+      properties:
+        token:
+          $ref: "#/components/schemas/AiToken"
+        secret:
+          type: string
+          description: One-time returned token secret.
+        bearerToken:
+          type: string
+          description: One-time returned Authorization bearer value.
+    DirectoryBoundary:
+      type: object
+      required: [spaceId, mountId, path]
+      properties:
+        spaceId:
+          $ref: "#/components/schemas/OpaqueId"
+        mountId:
+          $ref: "#/components/schemas/OpaqueId"
+        path:
+          type: string
+    Job:
+      type: object
+      required: [id, type, status]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        type:
+          type: string
+          enum: [initial_scan, reconciliation, cleanup, upload_finalize]
+        status:
+          type: string
+          enum: [queued, running, paused, failed, complete]
+        mountId:
+          $ref: "#/components/schemas/OpaqueId"
+        lastError:
+          type: string
+    AuditEvent:
+      type: object
+      required: [id, occurredAt, category, actorType, action]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        occurredAt:
+          type: string
+          format: date-time
+        category:
+          type: string
+          enum: [identity, access, mount, file, share, token, mcp, rest, recovery]
+        actorType:
+          type: string
+          enum: [user, share, token, system]
+        action:
+          type: string
+        redacted:
+          type: boolean
