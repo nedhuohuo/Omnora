@@ -50,6 +50,23 @@ func TestCreateAndRestoreBackup(t *testing.T) {
 	if created.Status != "completed" || created.Path == "" || created.Notes != "sqlite online backup" {
 		t.Fatalf("created backup = %#v", created)
 	}
+	if created.CreatedBy != admin.ID || created.CreatedByLabel != "Admin" || created.CreatedByEmail != admin.Email {
+		t.Fatalf("created backup creator = %#v, want readable admin labels", created)
+	}
+
+	listRec := authorizedAPITestRequest(t, handler, "/api/v1/admin/backups", adminCookie)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list backups status = %d, body = %s", listRec.Code, listRec.Body.String())
+	}
+	var listed struct {
+		Items []backupDTO `json:"items"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode listed backups: %v", err)
+	}
+	if len(listed.Items) == 0 || listed.Items[0].CreatedByLabel != "Admin" || listed.Items[0].CreatedByEmail != admin.Email {
+		t.Fatalf("listed backup creator = %#v, want readable admin labels", listed.Items)
+	}
 
 	restoreBody, err := json.Marshal(map[string]string{"confirmPhrase": "RESTORE"})
 	if err != nil {

@@ -13,6 +13,7 @@ import {
   createAdminBackup,
   createAdminSpace,
   createAdminUser,
+  deleteAdminAiToken,
   disableAdminUser,
   enableAdminUser,
   getAdminOverview,
@@ -25,7 +26,6 @@ import {
   putSpaceMember,
   removeSpaceMember,
   restoreAdminBackup,
-  revokeAdminAiToken,
   revokeAdminShare,
   revokeAdminUserSessions,
 } from '../api';
@@ -88,6 +88,16 @@ function tokenOwnerLabel(token: AiTokenListItem) {
   return {
     primary: displayName || email || '--',
     secondary: displayName && email && displayName !== email ? email : '',
+  };
+}
+
+function backupCreatorLabel(backup: BackupPayload) {
+  const label = readableLabel(backup.createdByLabel);
+  const displayName = readableLabel(backup.createdByDisplayName);
+  const email = readableLabel(backup.createdByEmail);
+  return {
+    primary: label || displayName || email || '--',
+    secondary: email && email !== label && email !== displayName ? email : '',
   };
 }
 
@@ -587,11 +597,11 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
     void load();
   }, [load]);
 
-  async function onRevoke(token: AiTokenListItem) {
+  async function onDelete(token: AiTokenListItem) {
     setLoading(true);
     setError('');
     try {
-      await revokeAdminAiToken(token.id);
+      await deleteAdminAiToken(token.id);
       await load();
     } catch (caught) {
       setError(describeError(caught));
@@ -617,7 +627,7 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
                 <td>{owner.primary}{owner.secondary && <small>{owner.secondary}</small>}</td>
                 <td>{(token.scopes ?? []).join(', ') || '--'}</td>
                 <td>{tokenStatusLabel(token.status, text)}</td>
-                <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onRevoke(token)} disabled={loading}>{text.tokenRevoke}</button></td>
+                <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onDelete(token)} disabled={loading}>{text.tokenRevoke}</button></td>
               </tr>
             );
           })}</tbody>
@@ -702,25 +712,29 @@ export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
       {notice && <div className="member-readonly member-page-error">{notice}</div>}
       {loading ? <div className="member-loading">{text.loading}</div> : backups.length === 0 ? <div className="member-empty">{text.backupNoBackups}</div> : (
         <table className="member-admin-table">
-          <thead><tr><th>{text.backupColumnCreated}</th><th>{text.backupColumnPath}</th><th>{text.backupColumnStatus}</th><th>{text.backupColumnNotes}</th><th>{text.actions}</th></tr></thead>
-          <tbody>{backups.map((backup) => (
-            <tr key={backup.id}>
-              <td>{formatDate(backup.createdAt, locale)}</td>
-              <td>{backup.path ?? '--'}</td>
-              <td>{backup.status}</td>
-              <td>{backup.notes ?? '--'}</td>
-              <td>
-                <button
-                  className="member-table-action"
-                  type="button"
-                  disabled={backup.status !== 'completed' || !backup.path}
-                  onClick={() => { setRestoreTarget(backup); setConfirmPhrase(''); }}
-                >
-                  {text.backupRestore}
-                </button>
-              </td>
-            </tr>
-          ))}</tbody>
+          <thead><tr><th>{text.backupColumnCreated}</th><th>{text.backupColumnCreator}</th><th>{text.backupColumnPath}</th><th>{text.backupColumnStatus}</th><th>{text.backupColumnNotes}</th><th>{text.actions}</th></tr></thead>
+          <tbody>{backups.map((backup) => {
+            const creator = backupCreatorLabel(backup);
+            return (
+              <tr key={backup.id}>
+                <td>{formatDate(backup.createdAt, locale)}</td>
+                <td>{creator.primary}{creator.secondary && <small>{creator.secondary}</small>}</td>
+                <td>{backup.path ?? '--'}</td>
+                <td>{backup.status}</td>
+                <td>{backup.notes ?? '--'}</td>
+                <td>
+                  <button
+                    className="member-table-action"
+                    type="button"
+                    disabled={backup.status !== 'completed' || !backup.path}
+                    onClick={() => { setRestoreTarget(backup); setConfirmPhrase(''); }}
+                  >
+                    {text.backupRestore}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}</tbody>
         </table>
       )}
       {restoreTarget && (

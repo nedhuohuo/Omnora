@@ -244,6 +244,33 @@ export function ShareCreatedResult({ text, result, onClose }: { text: LocaleText
   );
 }
 
+function ShareLinkViewer({ text, share, onClose }: { text: LocaleText; share: SharePayload; onClose: () => void }) {
+  const url = share.fragment ? buildShareURL(share.fragment) : '';
+  const [copied, setCopied] = useState<'url' | 'failed' | null>(null);
+
+  return (
+    <div className="member-modal-backdrop">
+      <div className="member-modal member-share-result">
+        <h2>{text.shareLinkTitle}</h2>
+        <p className="member-modal-hint"><strong>{displaySharePath(share.relativePath, text)}</strong></p>
+        {url ? (
+          <>
+            <p className="member-modal-hint">{text.shareLinkHint}</p>
+            <code className="member-share-url">{url}</code>
+            <div className="member-share-result-actions">
+              <button type="button" onClick={() => void copyText(url).then((ok) => setCopied(ok ? 'url' : 'failed'))}>{text.shareCopyUrl}</button>
+            </div>
+            {copied === 'url' ? <p className="member-admin-notice">{text.shareUrlCopied}</p> : copied === 'failed' ? <p className="member-error">{text.shareCopyFailed}</p> : null}
+          </>
+        ) : (
+          <p className="member-error">{text.shareLinkUnavailable}</p>
+        )}
+        <div><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
+      </div>
+    </div>
+  );
+}
+
 type ShareCreateModalProps = {
   text: LocaleText;
   spaceId: string;
@@ -301,6 +328,7 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
   const [error, setError] = useState('');
   const [createdResult, setCreatedResult] = useState<CreateShareResponse | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<SharePayload | null>(null);
+  const [linkTarget, setLinkTarget] = useState<SharePayload | null>(null);
 
   const managerSpaces = spaces.filter((space) => space.role === 'manager');
 
@@ -396,7 +424,10 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
                 <td>{formatDate(share.expiresAt, locale, text)}</td>
                 <td>{share.usedVisits ?? 0}{share.maxVisits ? ` / ${share.maxVisits}` : ''}</td>
                 <td>{share.usedDownloads ?? 0}{share.maxDownloads ? ` / ${share.maxDownloads}` : ''}</td>
-                <td><button className="member-table-action member-table-danger" type="button" onClick={() => setRevokeTarget(share)} disabled={loading}>{text.shareRevoke}</button></td>
+                <td><div className="member-admin-table-actions">
+                  <button className="member-table-action" type="button" onClick={() => setLinkTarget(share)} disabled={loading}>{text.shareViewLink}</button>
+                  <button className="member-table-action member-table-danger" type="button" onClick={() => setRevokeTarget(share)} disabled={loading}>{text.shareRevoke}</button>
+                </div></td>
               </tr>
             );
           })}</tbody>
@@ -418,6 +449,7 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
       )}
 
       {createdResult && <ShareCreatedResult text={text} result={createdResult} onClose={() => setCreatedResult(null)} />}
+      {linkTarget && <ShareLinkViewer text={text} share={linkTarget} onClose={() => setLinkTarget(null)} />}
 
       {revokeTarget && (
         <div className="member-modal-backdrop">

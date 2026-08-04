@@ -134,6 +134,8 @@ export type JobPayload = {
   id?: string;
   status?: string;
   kind?: string;
+  spaceName?: string;
+  mountName?: string;
   priority?: number;
   payload?: Record<string, unknown>;
   checkpoint?: Record<string, unknown>;
@@ -186,10 +188,14 @@ export type HostDirectorySuggestions = {
 export type AuditEventPayload = {
   occurredAt: string;
   actor: string;
+  actorEmail?: string;
+  actorDisplayName?: string;
+  actorLabel?: string;
   routeGroup: string;
   action: string;
   targetType: string;
   targetId: string;
+  targetLabel?: string;
   metadata: string;
 };
 
@@ -202,6 +208,7 @@ export type ShareStatus = 'active' | 'expired' | 'revoked';
 export type SharePayload = {
   id: string;
   publicId: string;
+  fragment?: string;
   spaceId: string;
   spaceName?: string;
   mountId: string;
@@ -357,6 +364,9 @@ export type BackupPayload = {
   status: string;
   path?: string;
   createdBy?: string;
+  createdByEmail?: string;
+  createdByDisplayName?: string;
+  createdByLabel?: string;
   createdAt: string;
   completedAt?: string;
   notes?: string;
@@ -635,12 +645,14 @@ export function listAiTokens(signal?: AbortSignal) {
   return requestJson<{ items?: AiTokenListItem[] }>('/api/v1/ai-tokens', { signal });
 }
 
-export function revokeAiToken(tokenId: string, signal?: AbortSignal) {
+export function deleteAiToken(tokenId: string, signal?: AbortSignal) {
   return requestJson<void>(`/api/v1/ai-tokens/${encodeURIComponent(tokenId)}`, {
     method: 'DELETE',
     signal,
   });
 }
+
+export const revokeAiToken = deleteAiToken;
 
 export function createUpload(payload: CreateUploadPayload, signal?: AbortSignal) {
   return requestJson<UploadSessionPayload>('/api/v1/uploads', {
@@ -1004,12 +1016,14 @@ export function listAdminAiTokens(signal?: AbortSignal) {
   return requestJson<{ items?: AiTokenListItem[] }>('/api/v1/admin/ai-tokens', { signal });
 }
 
-export function revokeAdminAiToken(tokenId: string, signal?: AbortSignal) {
+export function deleteAdminAiToken(tokenId: string, signal?: AbortSignal) {
   return requestJson<void>(`/api/v1/admin/ai-tokens/${encodeURIComponent(tokenId)}`, {
     method: 'DELETE',
     signal,
   });
 }
+
+export const revokeAdminAiToken = deleteAdminAiToken;
 
 // -- Admin: backups ------------------------------------------------------------------
 

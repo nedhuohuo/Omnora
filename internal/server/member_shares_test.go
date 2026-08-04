@@ -38,10 +38,12 @@ func TestListAndRevokeShares(t *testing.T) {
 		t.Fatalf("create share status = %d, body = %s", createRec.Code, createRec.Body.String())
 	}
 	var created struct {
-		ID string `json:"id"`
+		ID       string `json:"id"`
+		PublicID string `json:"publicId"`
+		Fragment string `json:"fragment"`
 	}
-	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil || created.ID == "" {
-		t.Fatalf("decode created share: id = %q, err = %v, body = %s", created.ID, err, createRec.Body.String())
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil || created.ID == "" || created.PublicID == "" || created.Fragment == "" {
+		t.Fatalf("decode created share: created = %#v, err = %v, body = %s", created, err, createRec.Body.String())
 	}
 
 	listRec := authorizedAPITestRequest(t, handler, "/api/v1/shares", adminCookie)
@@ -62,6 +64,9 @@ func TestListAndRevokeShares(t *testing.T) {
 	}
 	if listed.Items[0].Status != "active" {
 		t.Fatalf("listed share status = %q, want active", listed.Items[0].Status)
+	}
+	if listed.Items[0].Fragment != created.Fragment {
+		t.Fatalf("listed share fragment = %q, want %q", listed.Items[0].Fragment, created.Fragment)
 	}
 	if listed.Items[0].SpaceName != "Test Space" || listed.Items[0].MountName != "Docs" {
 		t.Fatalf("listed share location = %q / %q, want Test Space / Docs", listed.Items[0].SpaceName, listed.Items[0].MountName)

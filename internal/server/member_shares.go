@@ -11,6 +11,7 @@ import (
 type shareRecordDTO struct {
 	ID                 string `json:"id"`
 	PublicID           string `json:"publicId"`
+	Fragment           string `json:"fragment,omitempty"`
 	SpaceID            string `json:"spaceId"`
 	SpaceName          string `json:"spaceName,omitempty"`
 	MountID            string `json:"mountId"`
@@ -38,10 +39,10 @@ func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
-SELECT sh.id, sh.public_id, sh.space_id, sh.mount_id, sh.relative_path,
-       sh.allow_preview, sh.allow_download, sh.max_visits, sh.used_visits,
-       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, ''),
-       COALESCE(sp.name, ''), COALESCE(m.display_name, ''), COALESCE(a.email, ''), COALESCE(a.display_name, '')
+	SELECT sh.id, sh.public_id, COALESCE(sh.fragment_secret, ''), sh.space_id, sh.mount_id, sh.relative_path,
+	       sh.allow_preview, sh.allow_download, sh.max_visits, sh.used_visits,
+	       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, ''),
+	       COALESCE(sp.name, ''), COALESCE(m.display_name, ''), COALESCE(a.email, ''), COALESCE(a.display_name, '')
 FROM shares sh
 JOIN spaces sp ON sp.id = sh.space_id
 JOIN mounts m ON m.id = sh.mount_id
@@ -139,15 +140,19 @@ WHERE sm.account_id = ? AND sm.space_id = ? AND sm.permission = 'manager' AND sp
 
 func scanShareRecordDTO(rows *sql.Rows) (shareRecordDTO, error) {
 	var item shareRecordDTO
+	var fragmentSecret string
 	var allowPreview, allowDownload int
 	var maxVisits, maxDownloads sql.NullInt64
 	if err := rows.Scan(
-		&item.ID, &item.PublicID, &item.SpaceID, &item.MountID, &item.RelativePath,
+		&item.ID, &item.PublicID, &fragmentSecret, &item.SpaceID, &item.MountID, &item.RelativePath,
 		&allowPreview, &allowDownload, &maxVisits, &item.UsedVisits,
 		&maxDownloads, &item.UsedDownloads, &item.ExpiresAt, &item.RevokedAt,
 		&item.SpaceName, &item.MountName, &item.CreatorEmail, &item.CreatorDisplayName,
 	); err != nil {
 		return shareRecordDTO{}, err
+	}
+	if fragmentSecret != "" {
+		item.Fragment = item.PublicID + "." + fragmentSecret
 	}
 	item.AllowPreview = allowPreview == 1
 	item.AllowDownload = allowDownload == 1

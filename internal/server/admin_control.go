@@ -439,10 +439,10 @@ func (s *Server) listAdminShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
-SELECT sh.id, sh.public_id, sh.space_id, sh.mount_id, sh.relative_path,
-       sh.allow_preview, sh.allow_download, sh.max_visits, sh.used_visits,
-       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, ''),
-       COALESCE(sp.name, ''), COALESCE(m.display_name, ''), COALESCE(a.email, ''), COALESCE(a.display_name, '')
+	SELECT sh.id, sh.public_id, COALESCE(sh.fragment_secret, ''), sh.space_id, sh.mount_id, sh.relative_path,
+	       sh.allow_preview, sh.allow_download, sh.max_visits, sh.used_visits,
+	       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, ''),
+	       COALESCE(sp.name, ''), COALESCE(m.display_name, ''), COALESCE(a.email, ''), COALESCE(a.display_name, '')
 FROM shares sh
 JOIN spaces sp ON sp.id = sh.space_id
 JOIN mounts m ON m.id = sh.mount_id
@@ -556,13 +556,16 @@ UPDATE ai_tokens SET revoked_at = ?, updated_at = ? WHERE id = ? AND revoked_at 
 // ---- Backups ----
 
 type backupDTO struct {
-	ID          string `json:"id"`
-	Status      string `json:"status"`
-	Path        string `json:"path,omitempty"`
-	CreatedBy   string `json:"createdBy,omitempty"`
-	CreatedAt   string `json:"createdAt"`
-	CompletedAt string `json:"completedAt,omitempty"`
-	Notes       string `json:"notes,omitempty"`
+	ID                   string `json:"id"`
+	Status               string `json:"status"`
+	Path                 string `json:"path,omitempty"`
+	CreatedBy            string `json:"createdBy,omitempty"`
+	CreatedByEmail       string `json:"createdByEmail,omitempty"`
+	CreatedByDisplayName string `json:"createdByDisplayName,omitempty"`
+	CreatedByLabel       string `json:"createdByLabel,omitempty"`
+	CreatedAt            string `json:"createdAt"`
+	CompletedAt          string `json:"completedAt,omitempty"`
+	Notes                string `json:"notes,omitempty"`
 }
 
 func (s *Server) listBackups(w http.ResponseWriter, r *http.Request) {
@@ -570,9 +573,12 @@ func (s *Server) listBackups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
-SELECT id, status, COALESCE(path, ''), COALESCE(created_by, ''), created_at, COALESCE(completed_at, ''), notes
-FROM backups
-ORDER BY created_at DESC
+SELECT b.id, b.status, COALESCE(b.path, ''), COALESCE(b.created_by, ''),
+       COALESCE(a.email, ''), COALESCE(a.display_name, ''),
+       b.created_at, COALESCE(b.completed_at, ''), b.notes
+FROM backups b
+LEFT JOIN accounts a ON a.id = b.created_by
+ORDER BY b.created_at DESC
 LIMIT ?
 `, parseIntDefault(r.URL.Query().Get("limit"), 100))
 	if err != nil {
@@ -583,10 +589,11 @@ LIMIT ?
 	items := []backupDTO{}
 	for rows.Next() {
 		var item backupDTO
-		if err := rows.Scan(&item.ID, &item.Status, &item.Path, &item.CreatedBy, &item.CreatedAt, &item.CompletedAt, &item.Notes); err != nil {
+		if err := rows.Scan(&item.ID, &item.Status, &item.Path, &item.CreatedBy, &item.CreatedByEmail, &item.CreatedByDisplayName, &item.CreatedAt, &item.CompletedAt, &item.Notes); err != nil {
 			writeDBError(w, r, err)
 			return
 		}
+		item.CreatedByLabel = auditActorLabel(item.CreatedBy, item.CreatedByEmail, item.CreatedByDisplayName)
 		items = append(items, item)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -595,17 +602,21 @@ LIMIT ?
 func (s *Server) loadLatestBackup(r *http.Request) (*backupDTO, error) {
 	var item backupDTO
 	err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT id, status, COALESCE(path, ''), COALESCE(created_by, ''), created_at, COALESCE(completed_at, ''), notes
-FROM backups
-ORDER BY created_at DESC
+SELECT b.id, b.status, COALESCE(b.path, ''), COALESCE(b.created_by, ''),
+       COALESCE(a.email, ''), COALESCE(a.display_name, ''),
+       b.created_at, COALESCE(b.completed_at, ''), b.notes
+FROM backups b
+LEFT JOIN accounts a ON a.id = b.created_by
+ORDER BY b.created_at DESC
 LIMIT 1
-`).Scan(&item.ID, &item.Status, &item.Path, &item.CreatedBy, &item.CreatedAt, &item.CompletedAt, &item.Notes)
+`).Scan(&item.ID, &item.Status, &item.Path, &item.CreatedBy, &item.CreatedByEmail, &item.CreatedByDisplayName, &item.CreatedAt, &item.CompletedAt, &item.Notes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	item.CreatedByLabel = auditActorLabel(item.CreatedBy, item.CreatedByEmail, item.CreatedByDisplayName)
 	return &item, nil
 }
 
@@ -658,10 +669,29 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 		return
 	}
 	_ = s.recordAudit(r, "admin_backup_create", "backup", id, "{}")
+	createdByEmail, createdByDisplayName := s.accountDisplayFields(r, session.AccountID)
 	httpx.WriteJSON(w, http.StatusCreated, backupDTO{
 		ID: id, Status: status, Path: backupPath, CreatedBy: session.AccountID,
-		CreatedAt: now.Format(time.RFC3339Nano), CompletedAt: stringOrEmpty(completedAt), Notes: notes,
+		CreatedByEmail: createdByEmail, CreatedByDisplayName: createdByDisplayName,
+		CreatedByLabel: auditActorLabel(session.AccountID, createdByEmail, createdByDisplayName),
+		CreatedAt:      now.Format(time.RFC3339Nano), CompletedAt: stringOrEmpty(completedAt), Notes: notes,
 	})
+}
+
+func (s *Server) accountDisplayFields(r *http.Request, accountID string) (string, string) {
+	if strings.TrimSpace(accountID) == "" {
+		return "", ""
+	}
+	var email, displayName string
+	err := s.sqlDB().QueryRowContext(r.Context(), `
+SELECT email, display_name
+FROM accounts
+WHERE id = ?
+`, accountID).Scan(&email, &displayName)
+	if err != nil {
+		return "", ""
+	}
+	return email, displayName
 }
 
 func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {

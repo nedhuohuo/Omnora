@@ -150,3 +150,65 @@ SELECT permission FROM space_members WHERE space_id = 'shared-acl' AND account_i
 		t.Fatalf("put member into missing space status = %d, want %d, body = %s", missingSpaceRec.Code, http.StatusNotFound, missingSpaceRec.Body.String())
 	}
 }
+
+func TestAuditEventsReturnReadableActorAndTargetLabels(t *testing.T) {
+	db, handler := newAPITestServer(t)
+	admin, member := createAPITestAccounts(t, db)
+	adminCookie := issueAPITestSession(t, db, admin.ID)
+	ctx := context.Background()
+
+	if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO backups(id, status, path, created_by, created_at, notes)
+VALUES ('bkp-readable', 'failed', NULL, ?, '2026-08-04T15:00:00Z', 'sqlite online backup')
+`, admin.ID); err != nil {
+		t.Fatalf("insert backup: %v", err)
+	}
+	if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO audit_events(actor_account_id, route_group, action, target_type, target_id, metadata_json)
+VALUES
+	(?, 'rest', 'admin_user_disable', 'account', ?, '{}'),
+	(NULL, 'rest', 'route_group_update', 'route_group', 'mcp', '{}'),
+	(?, 'rest', 'admin_backup_create', 'backup', 'bkp-readable', '{}')
+`, admin.ID, member.ID, admin.ID); err != nil {
+		t.Fatalf("insert audit events: %v", err)
+	}
+
+	rec := authorizedAPITestRequest(t, handler, "/api/v1/audit/events?limit=10", adminCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list audit status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var listed struct {
+		Items []auditEventDTO `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode audit events: %v", err)
+	}
+	if len(listed.Items) < 2 {
+		t.Fatalf("audit events = %#v, want inserted rows", listed.Items)
+	}
+	var accountEvent auditEventDTO
+	var systemEvent auditEventDTO
+	var backupEvent auditEventDTO
+	for _, item := range listed.Items {
+		switch item.Action {
+		case "admin_user_disable":
+			accountEvent = item
+		case "route_group_update":
+			systemEvent = item
+		case "admin_backup_create":
+			backupEvent = item
+		}
+	}
+	if accountEvent.Actor != admin.ID || accountEvent.ActorLabel != "Admin" || accountEvent.ActorEmail != admin.Email || accountEvent.ActorDisplayName != admin.DisplayName {
+		t.Fatalf("account audit actor fields = %#v, want readable admin labels", accountEvent)
+	}
+	if accountEvent.TargetID != member.ID || accountEvent.TargetLabel != "Member" {
+		t.Fatalf("account audit target fields = %#v, want member target label", accountEvent)
+	}
+	if systemEvent.ActorLabel != "system" || systemEvent.TargetLabel != "mcp" {
+		t.Fatalf("system audit labels = %#v, want system / mcp", systemEvent)
+	}
+	if backupEvent.TargetID != "bkp-readable" || backupEvent.TargetLabel != "backup 2026-08-04T15:00:00Z" {
+		t.Fatalf("backup audit target fields = %#v, want readable backup label", backupEvent)
+	}
+}

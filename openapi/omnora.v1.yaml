@@ -2276,6 +2276,9 @@ components:
       properties:
         id:
           $ref: "#/components/schemas/OpaqueId"
+        fragment:
+          type: string
+          description: Full URL fragment that can be opened under /share# when the link secret is available.
         targetObjectId:
           $ref: "#/components/schemas/OpaqueId"
         status:
@@ -2420,36 +2423,49 @@ components:
           type: string
     Job:
       type: object
-      required: [id, type, status]
+      required: [id, kind, status]
       properties:
         id:
           $ref: "#/components/schemas/OpaqueId"
-        type:
+        kind:
           type: string
-          enum: [initial_scan, reconciliation, cleanup, upload_finalize]
+          enum: [catalog_scan]
         status:
           type: string
-          enum: [queued, running, paused, failed, complete]
+          enum: [queued, running, paused, failed, completed, canceled]
+        spaceName:
+          type: string
+        mountName:
+          type: string
         mountId:
           $ref: "#/components/schemas/OpaqueId"
         lastError:
           type: string
     AuditEvent:
       type: object
-      required: [id, occurredAt, category, actorType, action]
+      required: [occurredAt, actor, actorLabel, action, targetType, targetId, targetLabel, metadata]
       properties:
-        id:
-          $ref: "#/components/schemas/OpaqueId"
         occurredAt:
           type: string
           format: date-time
-        category:
+        actor:
           type: string
-          enum: [identity, access, mount, file, share, token, mcp, rest, recovery]
-        actorType:
+        actorEmail:
           type: string
-          enum: [user, share, token, system]
+          format: email
+        actorDisplayName:
+          type: string
+        actorLabel:
+          type: string
+        routeGroup:
+          type: string
         action:
           type: string
-        redacted:
-          type: boolean
+        targetType:
+          type: string
+        targetId:
+          type: string
+        targetLabel:
+          type: string
+        metadata:
+          type: string

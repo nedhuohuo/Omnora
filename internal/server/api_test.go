@@ -245,10 +245,31 @@ VALUES ('indexable', 'shared-active', 'Indexable', ?, 'external', 'read_only', 1
 		t.Fatalf("enqueue status = %d, body = %s", enqueueRec.Code, enqueueRec.Body.String())
 	}
 	var created struct {
-		ID string `json:"ID"`
+		ID        string `json:"id"`
+		SpaceName string `json:"spaceName"`
+		MountName string `json:"mountName"`
 	}
 	if err := json.Unmarshal(enqueueRec.Body.Bytes(), &created); err != nil || created.ID == "" {
 		t.Fatalf("decode created job: id = %q, err = %v, body = %s", created.ID, err, enqueueRec.Body.String())
+	}
+	if created.SpaceName != "All Hands" || created.MountName != "Indexable" {
+		t.Fatalf("created job labels = %#v, want All Hands / Indexable", created)
+	}
+	listRec := authorizedAPITestRequest(t, handler, "/api/v1/admin/index-jobs", cookie)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list index jobs status = %d, body = %s", listRec.Code, listRec.Body.String())
+	}
+	var listed struct {
+		Items []struct {
+			SpaceName string `json:"spaceName"`
+			MountName string `json:"mountName"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode index jobs: %v", err)
+	}
+	if len(listed.Items) == 0 || listed.Items[0].SpaceName != "All Hands" || listed.Items[0].MountName != "Indexable" {
+		t.Fatalf("index job labels = %#v, want All Hands / Indexable", listed.Items)
 	}
 
 	run := func() map[string]any {
@@ -318,7 +339,7 @@ func newAPITestServer(t *testing.T) (*store.DB, http.Handler) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db, New(config.Config{
-		Routes: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+		Routes:            map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
 		RouteEnvOverrides: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
 	}, db)
 }

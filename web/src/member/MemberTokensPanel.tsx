@@ -4,10 +4,10 @@ import {
   type AiTokenListItem,
   ApiError,
   createAiToken,
+  deleteAiToken,
   listAiTokens,
   listMounts,
   listSpaces,
-  revokeAiToken,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
 import type { MemberMount, MemberSpace } from './types';
@@ -74,7 +74,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
   const [createdToken, setCreatedToken] = useState('');
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
-  const [revokeTarget, setRevokeTarget] = useState<AiTokenListItem | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AiTokenListItem | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -174,13 +174,13 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     }
   }
 
-  async function onRevoke() {
-    if (!revokeTarget) return;
+  async function onDelete() {
+    if (!deleteTarget) return;
     setLoading(true);
     setError('');
     try {
-      await revokeAiToken(revokeTarget.id);
-      setRevokeTarget(null);
+      await deleteAiToken(deleteTarget.id);
+      setDeleteTarget(null);
       await load();
     } catch (caught) {
       setError(describeError(caught));
@@ -210,7 +210,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
               <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => boundarySummary(boundary, spaces, mountsBySpace)).join('; ')}</td>
               <td>{formatDate(token.expiresAt, locale, '--')}</td>
               <td>{tokenStatusLabel(token.status, text)}</td>
-              <td><button className="member-table-action member-table-danger" type="button" onClick={() => setRevokeTarget(token)} disabled={loading}>{text.tokenRevoke}</button></td>
+              <td><button className="member-table-action member-table-danger" type="button" onClick={() => setDeleteTarget(token)} disabled={loading}>{text.tokenRevoke}</button></td>
             </tr>
           ))}</tbody>
         </table>
@@ -265,13 +265,13 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
         </div>
       )}
 
-      {revokeTarget && (
+      {deleteTarget && (
         <div className="member-modal-backdrop">
           <div className="member-modal">
             <h2>{text.tokenRevokeConfirmTitle}</h2>
             <p className="member-modal-hint">{text.tokenRevokeConfirmDetail}</p>
-            <p className="member-modal-hint"><strong>{revokeTarget.name}</strong></p>
-            <div><button type="button" onClick={() => setRevokeTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onRevoke()} disabled={loading}>{text.tokenRevoke}</button></div>
+            <p className="member-modal-hint"><strong>{deleteTarget.name}</strong></p>
+            <div><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDelete()} disabled={loading}>{text.tokenRevoke}</button></div>
           </div>
         </div>
       )}
