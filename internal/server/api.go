@@ -306,6 +306,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	issued, err := svc.CreateSession(r.Context(), identity.SessionRequest{
 		AccountID: account.ID,
 		TTL:       8 * time.Hour,
+		Entry:     httpx.Entry(r.Context()),
 	})
 	if err != nil {
 		s.writeIdentityError(w, r, err)
@@ -1819,7 +1820,22 @@ func (s *Server) requireSession(r *http.Request) (identity.Session, error) {
 	if err != nil {
 		return identity.Session{}, identity.ErrSessionInvalid
 	}
-	return identity.New(db, identity.Options{}).VerifySession(r.Context(), cookie.Value)
+	session, err := identity.New(db, identity.Options{}).VerifySession(r.Context(), cookie.Value)
+	if err != nil {
+		return identity.Session{}, err
+	}
+	// Entry isolation: a session issued on one network entry is rejected on
+	// the other. This is what actually prevents a LAN session being reused
+	// over the proxy origin (Secure alone is insufficient — a non-Secure LAN
+	// cookie is still sent over an HTTPS origin).
+	entry := httpx.Entry(r.Context())
+	if entry == "" {
+		entry = identity.DefaultSessionEntry
+	}
+	if session.Entry != entry {
+		return identity.Session{}, identity.ErrSessionInvalid
+	}
+	return session, nil
 }
 
 func (s *Server) requireAIPrincipal(r *http.Request) (aitoken.Principal, error) {
@@ -2371,6 +2387,13 @@ func parseIntDefault(value string, fallback int) int {
 	return parsed
 }
 
+// isSecureRequest reports whether the client connection is considered HTTPS.
+// The proxy_https entry is served as plain HTTP behind a TLS-terminating
+// reverse proxy, so its requests are treated as secure for cookie purposes.
+func isSecureRequest(r *http.Request) bool {
+	return r.TLS != nil || httpx.Entry(r.Context()) == EntryProxy
+}
+
 func sessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {
 	return &http.Cookie{
 		Name:     sessionCookieName,
@@ -2378,7 +2401,7 @@ func sessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Coo
 		Path:     "/",
 		Expires:  expiresAt,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	}
 }
@@ -2390,7 +2413,7 @@ func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -2407,7 +2430,7 @@ func shareSessionCookie(r *http.Request, token string, expiresAt time.Time) *htt
 		Path:     "/",
 		Expires:  expiresAt,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	}
 }

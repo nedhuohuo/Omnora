@@ -562,8 +562,8 @@ ORDER BY name
 			writeDBError(w, r, err)
 			return
 		}
-		if s.binder != nil && item.Name == "lan_http" {
-			item.ActiveBindAddr = s.binder.ActiveAddr()
+		if s.listeners != nil {
+			item.ActiveBindAddr = s.listeners.ActiveAddr(item.Name)
 		}
 		items = append(items, item)
 	}
@@ -624,24 +624,34 @@ ON CONFLICT(name) DO UPDATE SET
 		Name: req.Name, Enabled: req.Enabled, BindAddr: req.BindAddr, CIDRs: req.CIDRs,
 		ExternalHTTPSURL: req.ExternalHTTPSURL, UpdatedAt: now,
 	}
-	if s.binder != nil && dto.Name == "lan_http" {
-		dto.ActiveBindAddr = s.binder.ActiveAddr()
+	if s.listeners != nil {
+		dto.ActiveBindAddr = s.listeners.ActiveAddr(dto.Name)
 	}
-	if req.Name == "lan_http" && req.Enabled {
+	if req.Enabled {
 		target := strings.TrimSpace(req.BindAddr)
 		if target == "" {
-			target = strings.TrimSpace(s.cfg.HTTP.Addr)
+			if dto.Name == EntryProxy {
+				target = strings.TrimSpace(s.cfg.HTTP.ProxyHTTPSListen)
+			} else {
+				target = strings.TrimSpace(s.cfg.HTTP.Addr)
+			}
 		}
-		if s.binder == nil {
+		if s.listeners == nil {
 			dto.RestartRequired = target != "" && target != dto.ActiveBindAddr
-		} else if target != "" && target != s.binder.ActiveAddr() {
-			if err := s.binder.Rebind(target); err != nil {
+		} else if target != "" && target != dto.ActiveBindAddr {
+			if err := s.listeners.Start(dto.Name, target, s.HandlerFor(dto.Name)); err != nil {
 				dto.RestartRequired = true
 				dto.RebindError = err.Error()
 			} else {
 				dto.Rebound = true
-				dto.ActiveBindAddr = s.binder.ActiveAddr()
+				dto.ActiveBindAddr = s.listeners.ActiveAddr(dto.Name)
 			}
+		}
+	} else if dto.Name == EntryProxy && s.listeners != nil {
+		// Disabling the proxy entry stops its listener (fail-closed at the
+		// socket). Disabling lan_http keeps the control-plane listener open.
+		if err := s.listeners.Stop(dto.Name); err != nil {
+			dto.RebindError = err.Error()
 		}
 	}
 	_ = s.recordAudit(r, "admin_network_entry_update", "network_entry", req.Name, fmt.Sprintf(`{"by":%q,"rebound":%t,"restartRequired":%t}`, session.AccountID, dto.Rebound, dto.RestartRequired))

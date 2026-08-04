@@ -14,6 +14,8 @@ import (
 type networkPolicy struct {
 	LANEnabled     bool
 	LANCIDRs       []*net.IPNet
+	ProxyEnabled   bool
+	ProxyBindAddr  string
 	TrustedProxies []*net.IPNet
 	ActiveBindHint string
 }
@@ -60,6 +62,8 @@ FROM network_entries
 			policy.LANCIDRs = cidrs
 			policy.ActiveBindHint = strings.TrimSpace(bindAddr)
 		case "proxy_https":
+			policy.ProxyEnabled = enabled == 1
+			policy.ProxyBindAddr = strings.TrimSpace(bindAddr)
 			policy.TrustedProxies = cidrs
 		}
 	}
@@ -99,30 +103,56 @@ func (s *Server) currentNetworkPolicy() networkPolicy {
 	return s.network.policy
 }
 
-func (s *Server) networkGate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		policy := s.currentNetworkPolicy()
-		if !policy.LANEnabled {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if len(policy.LANCIDRs) == 0 {
-			// Enabled but misconfigured: fail closed rather than open the
-			// listener to every client address.
-			httpx.WriteError(w, r, http.StatusForbidden, "network_entry_unconfigured", "LAN entry is enabled but has no allowed CIDRs")
-			return
-		}
-		ip := clientIP(r, policy.TrustedProxies)
-		if ip == nil || !ipInNetworks(ip, policy.LANCIDRs) {
-			httpx.WriteError(w, r, http.StatusForbidden, "network_entry_denied", "client address is outside the allowed LAN CIDRs")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// lanGate admits the direct peer when the LAN entry is enabled and its
+// address falls inside the allowed CIDRs. The LAN listener is served directly
+// (no reverse proxy in front), so forwarded headers are never trusted.
+func (s *Server) lanGate(w http.ResponseWriter, r *http.Request) bool {
+	policy := s.currentNetworkPolicy()
+	if !policy.LANEnabled {
+		return true
+	}
+	if len(policy.LANCIDRs) == 0 {
+		// Enabled but misconfigured: fail closed rather than open the
+		// listener to every client address.
+		httpx.WriteError(w, r, http.StatusForbidden, "network_entry_unconfigured", "LAN entry is enabled but has no allowed CIDRs")
+		return false
+	}
+	ip := clientIP(r, nil)
+	if ip == nil || !ipInNetworks(ip, policy.LANCIDRs) {
+		httpx.WriteError(w, r, http.StatusForbidden, "network_entry_denied", "client address is outside the allowed LAN CIDRs")
+		return false
+	}
+	return true
+}
+
+// proxyGate admits a request only when the proxy entry is enabled, has
+// trusted proxy CIDRs configured, and the direct peer is one of them. The
+// direct peer is the reverse proxy itself; clientIP then recovers the real
+// client from forwarded headers.
+func (s *Server) proxyGate(w http.ResponseWriter, r *http.Request) bool {
+	policy := s.currentNetworkPolicy()
+	if !policy.ProxyEnabled {
+		httpx.WriteError(w, r, http.StatusForbidden, "network_entry_disabled", "proxy entry is not enabled")
+		return false
+	}
+	if len(policy.TrustedProxies) == 0 {
+		// Enabled but no trusted proxies configured: fail closed.
+		httpx.WriteError(w, r, http.StatusForbidden, "network_entry_unconfigured", "proxy entry has no trusted proxy CIDRs")
+		return false
+	}
+	peer := clientIP(r, nil)
+	if peer == nil || !ipInNetworks(peer, policy.TrustedProxies) {
+		httpx.WriteError(w, r, http.StatusForbidden, "network_entry_denied", "direct peer is not a trusted proxy")
+		return false
+	}
+	return true
+}
+
+// ProxyEntryState reports the configured state of the proxy_https entry so
+// startup can decide whether to bind its listener.
+func (s *Server) ProxyEntryState() (enabled bool, bindAddr string) {
+	policy := s.currentNetworkPolicy()
+	return policy.ProxyEnabled, policy.ProxyBindAddr
 }
 
 func clientIP(r *http.Request, trustedProxies []*net.IPNet) net.IP {
