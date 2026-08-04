@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	crand "crypto/rand"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -48,6 +50,7 @@ type mountDTO struct {
 	ID     string `json:"id,omitempty"`
 	Name   string `json:"name"`
 	Space  string `json:"space"`
+	Kind   string `json:"kind,omitempty"`
 	Mode   string `json:"mode"`
 	Index  string `json:"index"`
 	Health string `json:"health"`
@@ -130,9 +133,54 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("GET /api/v1/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listSpaces)))
 	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMounts)))
 	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts/{mountId}/children", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listChildren)))
+	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/directories", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createDirectory)))
 	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts/{mountId}/download", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.downloadFile)))
 	s.mux.Handle("GET /api/v1/spaces/{spaceId}/search", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.searchSpace)))
+	s.mux.Handle("GET /api/v1/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listShares)))
 	s.mux.Handle("POST /api/v1/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createShare)))
+	s.mux.Handle("DELETE /api/v1/shares/{shareId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeShare)))
+	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/rename", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.renameObject)))
+	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/move", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.moveObject)))
+	s.mux.Handle("DELETE /api/v1/spaces/{spaceId}/mounts/{mountId}/object", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteObject)))
+	s.mux.Handle("GET /api/v1/account", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.getAccount)))
+	s.mux.Handle("PATCH /api/v1/account/password", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.changeAccountPassword)))
+	s.mux.Handle("GET /api/v1/account/sessions", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAccountSessions)))
+	s.mux.Handle("DELETE /api/v1/account/sessions/{sessionId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAccountSession)))
+	s.mux.Handle("POST /api/v1/account/totp/disable", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.disableAccountTOTP)))
+	s.mux.Handle("GET /api/v1/account/preferences", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.getAccountPreferences)))
+	s.mux.Handle("PUT /api/v1/account/preferences", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putAccountPreferences)))
+	s.mux.Handle("GET /api/v1/share/current", s.gate(domain.RouteGroupShare, http.HandlerFunc(s.shareCurrent)))
+	s.mux.Handle("GET /api/v1/share/children", s.gate(domain.RouteGroupShare, http.HandlerFunc(s.shareChildren)))
+	s.mux.Handle("GET /api/v1/share/download", s.gate(domain.RouteGroupShare, http.HandlerFunc(s.shareDownload)))
+	s.mux.Handle("GET /api/v1/admin/overview", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.adminOverview)))
+	s.mux.Handle("GET /api/v1/admin/users", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminUsers)))
+	s.mux.Handle("POST /api/v1/admin/users", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createAdminUser)))
+	s.mux.Handle("POST /api/v1/admin/users/{userId}/disable", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.disableAdminUser)))
+	s.mux.Handle("POST /api/v1/admin/users/{userId}/enable", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.enableAdminUser)))
+	s.mux.Handle("POST /api/v1/admin/users/{userId}/revoke-sessions", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAdminUserSessions)))
+	s.mux.Handle("GET /api/v1/admin/spaces/{spaceId}/members", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminSpaceMembers)))
+	s.mux.Handle("PUT /api/v1/admin/spaces/{spaceId}/members/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putAdminSpaceMember)))
+	s.mux.Handle("DELETE /api/v1/admin/spaces/{spaceId}/members/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteAdminSpaceMember)))
+	s.mux.Handle("POST /api/v1/admin/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createAdminSpace)))
+	s.mux.Handle("POST /api/v1/admin/emergency-access", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createEmergencyAccess)))
+	s.mux.Handle("GET /api/v1/admin/emergency-access", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listEmergencyAccess)))
+	s.mux.Handle("POST /api/v1/admin/emergency-access/{id}/revoke", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeEmergencyAccess)))
+	s.mux.Handle("GET /api/v1/admin/network-entries", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listNetworkEntries)))
+	s.mux.Handle("PUT /api/v1/admin/network-entries", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putNetworkEntry)))
+	s.mux.Handle("GET /api/v1/admin/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminShares)))
+	s.mux.Handle("DELETE /api/v1/admin/shares/{shareId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAdminShare)))
+	s.mux.Handle("GET /api/v1/admin/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminAITokens)))
+	s.mux.Handle("DELETE /api/v1/admin/ai-tokens/{tokenId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAdminAIToken)))
+	s.mux.Handle("GET /api/v1/admin/backups", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listBackups)))
+	s.mux.Handle("POST /api/v1/admin/backups", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createBackup)))
+	s.mux.Handle("POST /api/v1/admin/backups/{backupId}/restore", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.restoreBackup)))
+	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/cross-mount-copy", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.crossMountCopy)))
+	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/cross-mount-move", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.crossMountMove)))
+	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts/{mountId}/trash", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listTrash)))
+	s.mux.Handle("DELETE /api/v1/spaces/{spaceId}/mounts/{mountId}/trash", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.emptyTrash)))
+	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/trash/{trashId}/restore", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.restoreTrash)))
+	s.mux.Handle("DELETE /api/v1/spaces/{spaceId}/mounts/{mountId}/trash/{trashId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.purgeTrash)))
+	s.registerOpenAPIRoutes()
 	s.mux.Handle("GET /api/v1/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAITokens)))
 	s.mux.Handle("POST /api/v1/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createAIToken)))
 	s.mux.Handle("DELETE /api/v1/ai-tokens/{tokenId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAIToken)))
@@ -141,10 +189,18 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("PUT /api/v1/uploads/{uploadId}/parts/{partNumber}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.uploadPart)))
 	s.mux.Handle("POST /api/v1/uploads/{uploadId}/complete", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.completeUpload)))
 	s.mux.Handle("DELETE /api/v1/uploads/{uploadId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.cancelUpload)))
+	s.mux.Handle("GET /api/v1/admin/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminSpaces)))
+	s.mux.Handle("GET /api/v1/admin/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminMounts)))
+	s.mux.Handle("GET /api/v1/admin/host-directories", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminHostDirectories)))
 	s.mux.Handle("POST /api/v1/admin/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createMount)))
+	s.mux.Handle("PATCH /api/v1/admin/mounts/{mountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.renameMount)))
+	s.mux.Handle("POST /api/v1/admin/mounts/{mountId}/reverify", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.reverifyMount)))
+	s.mux.Handle("DELETE /api/v1/admin/mounts/{mountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteMount)))
 	s.mux.Handle("GET /api/v1/admin/index-jobs", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listIndexJobs)))
 	s.mux.Handle("POST /api/v1/admin/index-jobs", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.enqueueIndexJob)))
 	s.mux.Handle("POST /api/v1/admin/index-jobs/{jobId}/run", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.runIndexJob)))
+	s.mux.Handle("GET /api/v1/admin/route-groups", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminRouteGroups)))
+	s.mux.Handle("PATCH /api/v1/admin/route-groups/{groupId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.updateAdminRouteGroup)))
 	s.mux.Handle("GET /api/v1/audit/events", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAuditEvents)))
 	s.mux.Handle("POST /api/v1/share-sessions", s.gate(domain.RouteGroupShare, http.HandlerFunc(s.createShareSession)))
 	s.mux.Handle("POST /mcp", s.gate(domain.RouteGroupMCP, http.HandlerFunc(s.handleMCP)))
@@ -250,6 +306,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	issued, err := svc.CreateSession(r.Context(), identity.SessionRequest{
 		AccountID: account.ID,
 		TTL:       8 * time.Hour,
+		Entry:     httpx.Entry(r.Context()),
 	})
 	if err != nil {
 		s.writeIdentityError(w, r, err)
@@ -260,6 +317,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"userId":    account.ID,
 		"expiresAt": issued.Session.ExpiresAt,
+		"isAdmin":   s.isAdmin(r, account.ID),
 	})
 }
 
@@ -272,6 +330,7 @@ func (s *Server) currentSession(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"userId":    session.AccountID,
 		"expiresAt": session.ExpiresAt,
+		"isAdmin":   s.isAdmin(r, session.AccountID),
 	})
 }
 
@@ -393,12 +452,14 @@ ORDER BY sp.kind, sp.name
 	defer rows.Close()
 
 	items := make([]map[string]string, 0)
+	seen := map[string]struct{}{}
 	for rows.Next() {
 		var id, kind, name, permission string
 		if err := rows.Scan(&id, &kind, &name, &permission); err != nil {
 			writeDBError(w, r, err)
 			return
 		}
+		seen[id] = struct{}{}
 		items = append(items, map[string]string{
 			"id": id, "type": kind, "name": name, "role": permission,
 		})
@@ -407,7 +468,130 @@ ORDER BY sp.kind, sp.name
 		writeDBError(w, r, err)
 		return
 	}
+
+	emergencyRows, err := s.sqlDB().QueryContext(r.Context(), `
+SELECT sp.id, sp.kind, sp.name
+FROM emergency_access ea
+JOIN spaces sp ON sp.id = ea.target_space_id
+WHERE ea.admin_account_id = ?
+  AND ea.session_id = ?
+  AND ea.revoked_at IS NULL
+  AND ea.expires_at > ?
+  AND sp.status = 'active'
+ORDER BY sp.kind, sp.name
+`, session.AccountID, session.ID, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer emergencyRows.Close()
+	for emergencyRows.Next() {
+		var id, kind, name string
+		if err := emergencyRows.Scan(&id, &kind, &name); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		items = append(items, map[string]string{
+			"id": id, "type": kind, "name": name, "role": string(domain.SpacePermissionViewer),
+		})
+	}
+	if err := emergencyRows.Err(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) listAdminSpaces(w http.ResponseWriter, r *http.Request) {
+	session, err := s.requireSession(r)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	if !s.isAdmin(r, session.AccountID) {
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "only system administrators can list spaces")
+		return
+	}
+
+	rows, err := s.sqlDB().QueryContext(r.Context(), `
+SELECT id, kind, name
+FROM spaces
+WHERE status = 'active'
+ORDER BY kind, name, id
+`)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer rows.Close()
+
+	items := make([]map[string]string, 0)
+	for rows.Next() {
+		var id, kind, name string
+		if err := rows.Scan(&id, &kind, &name); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		items = append(items, map[string]string{"id": id, "type": kind, "name": name})
+	}
+	if err := rows.Err(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) listAdminMounts(w http.ResponseWriter, r *http.Request) {
+	session, err := s.requireSession(r)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	if !s.isAdmin(r, session.AccountID) {
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "only system administrators can list mounts")
+		return
+	}
+
+	rows, err := s.sqlDB().QueryContext(r.Context(), `
+SELECT m.id, m.display_name, sp.name, m.kind, m.mode, m.index_enabled, m.status
+FROM mounts m
+JOIN spaces sp ON sp.id = m.space_id
+WHERE m.status <> 'deleted'
+ORDER BY sp.kind, sp.name, m.display_name, m.id
+`)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer rows.Close()
+	items, err := scanMountDTOs(rows)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) listAdminHostDirectories(w http.ResponseWriter, r *http.Request) {
+	session, err := s.requireSession(r)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	if !s.isAdmin(r, session.AccountID) {
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "only system administrators can browse host directories")
+		return
+	}
+
+	suggestions, err := s.suggestHostDirectories(r.URL.Query().Get("path"))
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, suggestions)
 }
 
 func (s *Server) listMounts(w http.ResponseWriter, r *http.Request) {
@@ -442,12 +626,7 @@ func (s *Server) listChildren(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if errors.Is(err, sql.ErrNoRows) {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "mount was not found")
-		return
-	}
-	if err != nil {
-		writeDBError(w, r, err)
+	if writeMountLoadError(w, r, err) {
 		return
 	}
 	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
@@ -479,12 +658,7 @@ func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if errors.Is(err, sql.ErrNoRows) {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "mount was not found")
-		return
-	}
-	if err != nil {
-		writeDBError(w, r, err)
+	if writeMountLoadError(w, r, err) {
 		return
 	}
 	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
@@ -496,22 +670,25 @@ func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", "download path is invalid")
 		return
 	}
-	filePath := filepath.Join(mount.Root, filepath.FromSlash(relativePath))
-	metadata, err := transfer.StatDownloadMetadata(filePath)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "file was not found")
-		return
-	}
-	file, err := os.Open(filePath)
+	file, info, err := files.NewService().OpenFile(files.Mount{Root: mount.Root, Mode: mount.Mode}, relativePath)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "file was not found")
 		return
 	}
 	defer file.Close()
+	metadata, err := transfer.DownloadMetadataFromFileInfo(info)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "file was not found")
+		return
+	}
 
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("ETag", metadata.ETag)
-	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(filepath.Base(relativePath)))
+	disposition := "attachment"
+	if r.URL.Query().Get("inline") == "1" || strings.EqualFold(r.URL.Query().Get("disposition"), "inline") {
+		disposition = "inline"
+	}
+	w.Header().Set("Content-Disposition", disposition+"; filename="+strconv.Quote(filepath.Base(relativePath)))
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
 		byteRange, err := transfer.ParseByteRange(rangeHeader, metadata.Size)
 		if err != nil {
@@ -530,6 +707,50 @@ func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeContent(w, r, filepath.Base(relativePath), metadata.ModTime, file)
+}
+
+func (s *Server) createDirectory(w http.ResponseWriter, r *http.Request) {
+	session, err := s.requireSession(r)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	spaceID := r.PathValue("spaceId")
+	mountID := r.PathValue("mountId")
+	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "creating a directory requires editor permission")
+		return
+	}
+	var req struct {
+		ParentPath string `json:"parentPath"`
+		Name       string `json:"name"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
+	if writeMountLoadError(w, r, err) {
+		return
+	}
+	if mount.Mode != domain.MountModeReadWrite {
+		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
+		return
+	}
+	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
+		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
+		return
+	}
+	created, err := files.NewService().CreateDirectory(files.Mount{Root: mount.Root, Mode: mount.Mode}, req.ParentPath, req.Name)
+	if err != nil {
+		if isReadOnlyFilesystem(err) {
+			httpx.WriteError(w, r, http.StatusConflict, "mount_not_writable", "mount root is not writable at the container filesystem layer")
+			return
+		}
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
+		return
+	}
+	_ = s.recordAudit(r, "directory_create", "directory", created, "{}")
+	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"relativePath": created})
 }
 
 func (s *Server) searchSpace(w http.ResponseWriter, r *http.Request) {
@@ -577,8 +798,7 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mount, err := loadMountForListing(r, s.sqlDB(), req.SpaceID, req.MountID)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "mount was not found")
+	if writeMountLoadError(w, r, err) {
 		return
 	}
 	if mount.Mode != domain.MountModeReadWrite {
@@ -590,14 +810,23 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	targetPath := pathJoinForUpload(req.ParentPath, req.FileName)
+	if err := files.NewService().ValidateWritableTarget(files.Mount{Root: mount.Root, Mode: mount.Mode}, targetPath); err != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
+		return
+	}
 	service, err := transfer.NewService(transfer.Options{
 		MountRoot: mount.Root,
 		TempRoot:  filepath.Join(mount.Root, ".omnora", "tmp", "uploads"),
 	})
 	if err != nil {
+		if isReadOnlyFilesystem(err) {
+			httpx.WriteError(w, r, http.StatusConflict, "mount_not_writable", "mount root is not writable at the container filesystem layer")
+			return
+		}
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
 		return
 	}
+	defer service.Close()
 	upload, err := service.CreateUploadSession(transfer.CreateUploadSessionRequest{
 		TargetPath:   targetPath,
 		ExpectedSize: req.Size,
@@ -638,6 +867,7 @@ func (s *Server) getUpload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
 		return
 	}
+	defer service.Close()
 	resumed, err := service.ResumeUploadSession(upload.ID)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
@@ -678,6 +908,7 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
 		return
 	}
+	defer service.Close()
 	part, err := service.WritePart(upload.ID, partNumber, r.Body)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
@@ -710,6 +941,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
 		return
 	}
+	defer service.Close()
 	completed, err := service.CompleteUpload(upload.ID)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
@@ -737,6 +969,7 @@ func (s *Server) cancelUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if service, err := transfer.NewService(transfer.Options{MountRoot: mount.Root, TempRoot: upload.TempDir}); err == nil {
 		_ = service.CancelUpload(upload.ID)
+		_ = service.Close()
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, _ = s.sqlDB().ExecContext(r.Context(), "UPDATE upload_sessions SET status = 'canceled', canceled_at = ? WHERE id = ?", now, upload.ID)
@@ -821,6 +1054,23 @@ func (s *Server) enqueueIndexJob(w http.ResponseWriter, r *http.Request) {
 	if req.MountID == "" {
 		req.MountID = req.MountIDAlt
 	}
+	if strings.TrimSpace(req.MountID) == "" {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_mount", "mountId is required")
+		return
+	}
+	mount, err := s.loadCatalogMount(r, req.MountID)
+	if errors.Is(err, sql.ErrNoRows) {
+		httpx.WriteError(w, r, http.StatusNotFound, "mount_not_found", "mount was not found")
+		return
+	}
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if mount.Status != catalog.MountStatusActive || !mount.IndexEnabled {
+		httpx.WriteError(w, r, http.StatusConflict, "mount_not_indexable", "mount must be active with indexing enabled")
+		return
+	}
 	payload, _ := json.Marshal(map[string]string{"mount_id": req.MountID})
 	job, err := jobs.NewStore(s.sqlDB()).Enqueue(r.Context(), jobs.EnqueueOptions{
 		Kind:        "catalog_scan",
@@ -867,7 +1117,7 @@ func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
 		return
 	}
-	claimed, err := store.Claim(r.Context(), "inline-http-worker")
+	claimed, err := store.ClaimByID(r.Context(), job.ID, "inline-http-worker")
 	if err != nil {
 		writeDBError(w, r, err)
 		return
@@ -876,7 +1126,18 @@ func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "job_not_claimed", "another job is running or this job is not queued")
 		return
 	}
-	result, err := catalog.NewService(s.sqlDB()).ScanBatch(r.Context(), mount, catalog.ScanOptions{BatchSize: catalog.DefaultBatchSize})
+	var checkpoint struct {
+		Cursor string `json:"cursor"`
+	}
+	if err := json.Unmarshal([]byte(claimed.CheckpointJSON), &checkpoint); err != nil {
+		_ = store.Fail(r.Context(), claimed.ID, err)
+		httpx.WriteError(w, r, http.StatusConflict, "invalid_job", "job checkpoint is invalid")
+		return
+	}
+	result, err := catalog.NewService(s.sqlDB()).ScanBatch(r.Context(), mount, catalog.ScanOptions{
+		BatchSize: catalog.DefaultBatchSize,
+		Cursor:    checkpoint.Cursor,
+	})
 	if err != nil {
 		_ = store.Fail(r.Context(), job.ID, err)
 		httpx.WriteError(w, r, http.StatusConflict, "index_failed", err.Error())
@@ -884,10 +1145,12 @@ func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if !result.Done {
 		checkpoint, _ := json.Marshal(map[string]string{"cursor": result.NextCursor})
-		_ = store.SaveCheckpoint(r.Context(), job.ID, string(checkpoint))
-		_ = store.Fail(r.Context(), job.ID, errors.New("batch yielded"))
+		if err := store.Requeue(r.Context(), claimed.ID, string(checkpoint)); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
 	} else {
-		_ = store.Complete(r.Context(), job.ID)
+		_ = store.Complete(r.Context(), claimed.ID)
 	}
 	_ = s.recordAudit(r, "index_job_run", "job", job.ID, "{}")
 	httpx.WriteJSON(w, http.StatusOK, result)
@@ -944,7 +1207,9 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch req.Method {
 	case "tools/list":
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{"tools": []string{"spaces.list", "files.search"}})
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"tools": []string{
+			"spaces.list", "files.search", "files.list", "files.metadata", "files.read_text",
+		}})
 	case "spaces.list":
 		if !principal.HasScope(aitoken.ScopeSpacesRead) {
 			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "scope is not allowed")
@@ -967,9 +1232,139 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpx.WriteJSON(w, http.StatusOK, result)
+	case "files.list":
+		if !principal.HasScope(aitoken.ScopeFilesList) {
+			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "scope is not allowed")
+			return
+		}
+		mount, cleaned, err := s.resolveAIPrincipalPath(r, principal, req.Params)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", err.Error())
+			return
+		}
+		listing, err := files.NewService().ListDirectory(files.Mount{Root: mount.Root, Mode: mount.Mode}, cleaned)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, listing)
+	case "files.metadata":
+		if !principal.HasScope(aitoken.ScopeFilesMetadata) {
+			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "scope is not allowed")
+			return
+		}
+		mount, cleaned, err := s.resolveAIPrincipalPath(r, principal, req.Params)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", err.Error())
+			return
+		}
+		entry, err := lookupMountEntry(files.Mount{Root: mount.Root, Mode: mount.Mode}, cleaned)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "path was not found")
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, entry)
+	case "files.read_text":
+		if !principal.HasScope(aitoken.ScopeFilesText) {
+			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "scope is not allowed")
+			return
+		}
+		mount, cleaned, err := s.resolveAIPrincipalPath(r, principal, req.Params)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", err.Error())
+			return
+		}
+		maxBytes := 65536
+		if raw, ok := req.Params["maxBytes"].(float64); ok && raw > 0 {
+			maxBytes = int(raw)
+		}
+		if maxBytes > 1<<20 {
+			maxBytes = 1 << 20
+		}
+		file, _, err := files.NewService().OpenFile(files.Mount{Root: mount.Root, Mode: mount.Mode}, cleaned)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "file was not found")
+			return
+		}
+		defer file.Close()
+		data, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
+		if err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		truncated := len(data) > maxBytes
+		if truncated {
+			data = data[:maxBytes]
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"path":      cleaned,
+			"content":   string(data),
+			"truncated": truncated,
+		})
 	default:
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "MCP method is not available")
 	}
+}
+
+// resolveAIPrincipalPath validates that an MCP request's spaceId/mountId/path
+// parameters fall within one of the AI token's directory boundaries and
+// returns the mount to operate on plus the cleaned mount-relative path.
+func (s *Server) resolveAIPrincipalPath(r *http.Request, principal aitoken.Principal, params map[string]any) (mountForListing, string, error) {
+	spaceID, _ := params["spaceId"].(string)
+	mountID, _ := params["mountId"].(string)
+	requestedPath, _ := params["path"].(string)
+	if !s.canReadSpace(r, principal.AccountID, spaceID) || !s.mountBelongsToSpace(r, spaceID, mountID) {
+		return mountForListing{}, "", fmt.Errorf("space or mount is not authorized for this token")
+	}
+	cleaned, err := storage.CleanRelativePath(requestedPath)
+	if err != nil {
+		return mountForListing{}, "", err
+	}
+	matched := false
+	for _, boundary := range principal.Boundaries {
+		if boundary.SpaceID != spaceID || boundary.MountID != mountID {
+			continue
+		}
+		boundaryPath := boundary.RelativePath
+		if boundaryPath == "" {
+			boundaryPath = "."
+		}
+		if boundaryPath == "." || cleaned == boundaryPath || strings.HasPrefix(cleaned, boundaryPath+"/") {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return mountForListing{}, "", fmt.Errorf("path is outside this token's directory boundaries")
+	}
+	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
+	if err != nil {
+		return mountForListing{}, "", err
+	}
+	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
+		return mountForListing{}, "", err
+	}
+	return mount, cleaned, nil
+}
+
+// lookupMountEntry resolves metadata for a single mount-relative path by
+// listing its parent directory, since files.Service does not expose a
+// direct single-entry stat primitive.
+func lookupMountEntry(mount files.Mount, relativePath string) (files.Entry, error) {
+	if relativePath == "." {
+		return files.Entry{Name: ".", RelativePath: ".", Kind: files.EntryKindDir}, nil
+	}
+	listing, err := files.NewService().ListDirectory(mount, path.Dir(relativePath))
+	if err != nil {
+		return files.Entry{}, err
+	}
+	base := path.Base(relativePath)
+	for _, entry := range listing.Entries {
+		if entry.Name == base {
+			return entry, nil
+		}
+	}
+	return files.Entry{}, os.ErrNotExist
 }
 
 func (s *Server) createMount(w http.ResponseWriter, r *http.Request) {
@@ -1074,6 +1469,8 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		AllowDownload   *bool  `json:"allowDownload"`
 		MaxVisits       *int   `json:"maxVisits"`
 		MaxVisitsAlt    *int   `json:"max_visits"`
+		MaxDownloads    *int   `json:"maxDownloads"`
+		MaxDownloadsAlt *int   `json:"max_downloads"`
 		ExpiresAt       string `json:"expiresAt"`
 		ExpiresAtAlt    string `json:"expires_at"`
 	}
@@ -1092,6 +1489,9 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	if req.MaxVisits == nil {
 		req.MaxVisits = req.MaxVisitsAlt
 	}
+	if req.MaxDownloads == nil {
+		req.MaxDownloads = req.MaxDownloadsAlt
+	}
 	if req.ExpiresAt == "" {
 		req.ExpiresAt = req.ExpiresAtAlt
 	}
@@ -1100,12 +1500,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mount, err := loadMountForListing(r, s.sqlDB(), req.SpaceID, req.MountID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "mount was not found")
-			return
-		}
-		writeDBError(w, r, err)
+	if writeMountLoadError(w, r, err) {
 		return
 	}
 	relativePath, err := s.validateShareTarget(r, mount, req.RelativePath)
@@ -1157,10 +1552,18 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		}
 		maxVisits = *req.MaxVisits
 	}
+	var maxDownloads any
+	if req.MaxDownloads != nil {
+		if *req.MaxDownloads <= 0 {
+			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "maxDownloads must be positive")
+			return
+		}
+		maxDownloads = *req.MaxDownloads
+	}
 	_, err = s.sqlDB().ExecContext(r.Context(), `
-INSERT INTO shares(id, public_id, secret_hash, password_hash, creator_account_id, space_id, mount_id, relative_path, allow_preview, allow_download, max_visits, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, shareID, publicID, share.HashSecret(secret), passwordHash, session.AccountID, req.SpaceID, req.MountID, relativePath, boolInt(allowPreview), boolInt(allowDownload), maxVisits, expiresAt.Format(time.RFC3339Nano))
+INSERT INTO shares(id, public_id, secret_hash, password_hash, creator_account_id, space_id, mount_id, relative_path, allow_preview, allow_download, max_visits, max_downloads, expires_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, shareID, publicID, share.HashSecret(secret), passwordHash, session.AccountID, req.SpaceID, req.MountID, relativePath, boolInt(allowPreview), boolInt(allowDownload), maxVisits, maxDownloads, expiresAt.Format(time.RFC3339Nano))
 	if err != nil {
 		writeDBError(w, r, err)
 		return
@@ -1381,28 +1784,9 @@ func (s *Server) createShareSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) routeGroups() []routeGroupDTO {
-	labels := map[domain.RouteGroup]string{
-		domain.RouteGroupMemberWeb: "Member Web",
-		domain.RouteGroupAdminWeb:  "Admin Web",
-		domain.RouteGroupShare:     "Share",
-		domain.RouteGroupREST:      "REST",
-		domain.RouteGroupMCP:       "MCP",
-		domain.RouteGroupOpenAPI:   "OpenAPI",
-	}
 	items := make([]routeGroupDTO, 0, len(domain.AllRouteGroups))
 	for _, group := range domain.AllRouteGroups {
-		exposed := s.cfg.Routes.Enabled(group)
-		tone := "muted"
-		risk := "closed"
-		entry := "disabled"
-		if exposed {
-			tone = "ok"
-			risk = "enabled by explicit route group"
-			entry = "lan_http"
-		}
-		items = append(items, routeGroupDTO{
-			ID: string(group), Label: labels[group], Exposed: exposed, Entry: entry, Risk: risk, Tone: tone,
-		})
+		items = append(items, s.routeGroupDTO(group))
 	}
 	return items
 }
@@ -1436,7 +1820,22 @@ func (s *Server) requireSession(r *http.Request) (identity.Session, error) {
 	if err != nil {
 		return identity.Session{}, identity.ErrSessionInvalid
 	}
-	return identity.New(db, identity.Options{}).VerifySession(r.Context(), cookie.Value)
+	session, err := identity.New(db, identity.Options{}).VerifySession(r.Context(), cookie.Value)
+	if err != nil {
+		return identity.Session{}, err
+	}
+	// Entry isolation: a session issued on one network entry is rejected on
+	// the other. This is what actually prevents a LAN session being reused
+	// over the proxy origin (Secure alone is insufficient — a non-Secure LAN
+	// cookie is still sent over an HTTPS origin).
+	entry := httpx.Entry(r.Context())
+	if entry == "" {
+		entry = identity.DefaultSessionEntry
+	}
+	if session.Entry != entry {
+		return identity.Session{}, identity.ErrSessionInvalid
+	}
+	return session, nil
 }
 
 func (s *Server) requireAIPrincipal(r *http.Request) (aitoken.Principal, error) {
@@ -1490,6 +1889,32 @@ FROM space_members sm
 JOIN spaces sp ON sp.id = sm.space_id
 WHERE sm.account_id = ? AND sm.space_id = ? AND sp.status = 'active'
 `, accountID, spaceID).Scan(&count)
+	if err == nil && count == 1 {
+		return true
+	}
+	return s.hasEmergencyViewerAccess(r, accountID, spaceID)
+}
+
+// hasEmergencyViewerAccess grants temporary viewer access only for the bound
+// interactive admin browser session. REST/MCP/AI Token callers without that
+// session cookie cannot consume emergency grants.
+func (s *Server) hasEmergencyViewerAccess(r *http.Request, accountID, spaceID string) bool {
+	session, err := s.requireSession(r)
+	if err != nil || session.AccountID != accountID {
+		return false
+	}
+	var count int
+	err = s.sqlDB().QueryRowContext(r.Context(), `
+SELECT COUNT(1)
+FROM emergency_access ea
+JOIN spaces sp ON sp.id = ea.target_space_id
+WHERE ea.admin_account_id = ?
+  AND ea.target_space_id = ?
+  AND ea.session_id = ?
+  AND ea.revoked_at IS NULL
+  AND ea.expires_at > ?
+  AND sp.status = 'active'
+`, accountID, spaceID, session.ID, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&count)
 	return err == nil && count == 1
 }
 
@@ -1643,6 +2068,7 @@ func writeTokenError(w http.ResponseWriter, r *http.Request, err error) {
 var (
 	errMountConflict             = errors.New("mount conflicts with an existing mount")
 	errMountIdentityUnverifiable = errors.New("mount identity is unverifiable")
+	errMountUnavailable          = errors.New("mount is unavailable")
 )
 
 type validatedMount struct {
@@ -1656,9 +2082,13 @@ type validatedMount struct {
 
 func (s *Server) validateMountRequest(r *http.Request, spaceID, displayName, rootPath, kind, mode string) (validatedMount, error) {
 	spaceID = strings.TrimSpace(spaceID)
-	displayName = strings.TrimSpace(displayName)
 	rootPath = strings.TrimSpace(rootPath)
-	if spaceID == "" || displayName == "" || rootPath == "" {
+	normalizedName, err := normalizeMountDisplayName(displayName)
+	if err != nil {
+		return validatedMount{}, err
+	}
+	displayName = normalizedName
+	if spaceID == "" || rootPath == "" {
 		return validatedMount{}, fmt.Errorf("spaceId, displayName, and rootPath are required")
 	}
 	if kind == "" {
@@ -1672,7 +2102,7 @@ func (s *Server) validateMountRequest(r *http.Request, spaceID, displayName, roo
 		return validatedMount{}, fmt.Errorf("mount mode must be read_only or read_write")
 	}
 	var spaceName string
-	err := s.sqlDB().QueryRowContext(r.Context(), `
+	err = s.sqlDB().QueryRowContext(r.Context(), `
 SELECT name
 FROM spaces
 WHERE id = ? AND status = 'active'
@@ -1694,8 +2124,34 @@ WHERE id = ? AND status = 'active'
 		}
 		return validatedMount{}, fmt.Errorf("%w: %v", errMountIdentityUnverifiable, err)
 	}
+	if mountMode == domain.MountModeReadWrite {
+		if err := probeMountWritable(identity.Path); err != nil {
+			return validatedMount{}, err
+		}
+	}
 
 	return validatedMount{SpaceName: spaceName, DisplayName: displayName, RootPath: identity.Path, Kind: kind, Mode: mountMode, Identity: identity}, nil
+}
+
+func probeMountWritable(rootPath string) error {
+	file, err := os.CreateTemp(rootPath, ".omnora-write-probe-*")
+	if err != nil {
+		return fmt.Errorf("mount root is not writable at the container filesystem layer: %w", err)
+	}
+	name := file.Name()
+	_ = file.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("mount root is not writable at the container filesystem layer: %w", err)
+	}
+	return nil
+}
+
+func isReadOnlyFilesystem(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "read-only file system") || strings.Contains(message, "erofs")
 }
 
 func (s *Server) loadMountIdentities(r *http.Request) ([]mountid.Identity, error) {
@@ -1801,7 +2257,7 @@ WHERE id = ? AND status <> 'deleted'
 func pathJoinForUpload(parentPath, fileName string) string {
 	parentPath = strings.Trim(strings.TrimSpace(parentPath), "/")
 	fileName = strings.Trim(strings.TrimSpace(fileName), "/")
-	if parentPath == "" {
+	if parentPath == "" || parentPath == "." {
 		return fileName
 	}
 	return parentPath + "/" + fileName
@@ -1931,6 +2387,13 @@ func parseIntDefault(value string, fallback int) int {
 	return parsed
 }
 
+// isSecureRequest reports whether the client connection is considered HTTPS.
+// The proxy_https entry is served as plain HTTP behind a TLS-terminating
+// reverse proxy, so its requests are treated as secure for cookie purposes.
+func isSecureRequest(r *http.Request) bool {
+	return r.TLS != nil || httpx.Entry(r.Context()) == EntryProxy
+}
+
 func sessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {
 	return &http.Cookie{
 		Name:     sessionCookieName,
@@ -1938,7 +2401,7 @@ func sessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Coo
 		Path:     "/",
 		Expires:  expiresAt,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	}
 }
@@ -1950,19 +2413,24 @@ func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 }
 
+const shareSessionCookieName = "omnora_share_session"
+
 func shareSessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {
 	return &http.Cookie{
-		Name:     "omnora_share_session",
-		Value:    token,
-		Path:     "/share/",
+		Name:  shareSessionCookieName,
+		Value: token,
+		// Path "/" (rather than "/share/") so both the share portal SPA
+		// (/share/...) and the share portal REST API (/api/v1/share/...)
+		// receive this cookie on every request.
+		Path:     "/",
 		Expires:  expiresAt,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	}
 }
@@ -1993,17 +2461,41 @@ type mountForListing struct {
 	ID           string
 	Root         string
 	Mode         domain.MountMode
+	Kind         string
 	IdentityJSON string
 }
 
 func loadMountForListing(r *http.Request, db *sql.DB, spaceID, mountID string) (mountForListing, error) {
 	var mount mountForListing
+	var status string
 	err := db.QueryRowContext(r.Context(), `
-SELECT id, root_path, mode, COALESCE(mount_identity_json, '')
+SELECT id, root_path, mode, kind, COALESCE(mount_identity_json, ''), status
 FROM mounts
-WHERE id = ? AND space_id = ? AND status = 'active'
-	`, mountID, spaceID).Scan(&mount.ID, &mount.Root, &mount.Mode, &mount.IdentityJSON)
-	return mount, err
+WHERE id = ? AND space_id = ? AND status <> 'deleted'
+	`, mountID, spaceID).Scan(&mount.ID, &mount.Root, &mount.Mode, &mount.Kind, &mount.IdentityJSON, &status)
+	if err != nil {
+		return mountForListing{}, err
+	}
+	if status != "active" {
+		return mountForListing{}, errMountUnavailable
+	}
+	return mount, nil
+}
+
+func writeMountLoadError(w http.ResponseWriter, r *http.Request, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "mount was not found")
+		return true
+	}
+	if errors.Is(err, errMountUnavailable) {
+		httpx.WriteError(w, r, http.StatusConflict, "mount_unavailable", "mount is unavailable and must be re-verified by an administrator")
+		return true
+	}
+	writeDBError(w, r, err)
+	return true
 }
 
 func (s *Server) canContinueUpload(w http.ResponseWriter, r *http.Request, accountID, spaceID string, mount mountForListing) bool {
@@ -2041,6 +2533,9 @@ func (s *Server) verifyLoadedMountIdentity(r *http.Request, mount mountForListin
 		_ = s.markMountUnavailable(r, mount.ID)
 		return fmt.Errorf("%w: mount root identity drifted", errMountIdentityUnverifiable)
 	}
+	if mountIdentityNeedsRefresh(stored, current) {
+		_ = s.refreshMountIdentity(r.Context(), mount.ID, current)
+	}
 	return nil
 }
 
@@ -2048,26 +2543,12 @@ func (s *Server) validateShareTarget(r *http.Request, mount mountForListing, req
 	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
 		return "", err
 	}
-	relativePath, err := storage.CleanRelativePath(requestedPath)
+	relativePath, err := files.NewService().ValidateShareTarget(files.Mount{Root: mount.Root, Mode: mount.Mode}, requestedPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("share target was not found")
+	}
 	if err != nil {
 		return "", err
-	}
-	targetPath := mount.Root
-	if relativePath != "." {
-		targetPath = filepath.Join(mount.Root, filepath.FromSlash(relativePath))
-	}
-	info, err := os.Lstat(targetPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("share target was not found")
-		}
-		return "", err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("share target must not be a symlink")
-	}
-	if !info.IsDir() && !info.Mode().IsRegular() {
-		return "", fmt.Errorf("share target must be a file or directory")
 	}
 	return relativePath, nil
 }
@@ -2084,6 +2565,22 @@ WHERE id = ? AND status = 'active'
 	return err
 }
 
+func (s *Server) refreshMountIdentity(ctx context.Context, mountID string, identity mountid.Identity) error {
+	identityJSON, err := json.Marshal(identity)
+	if err != nil {
+		return err
+	}
+	_, err = s.sqlDB().ExecContext(ctx, `
+UPDATE mounts
+SET mount_identity_json = ?, updated_at = ?
+WHERE id = ? AND status = 'active'
+	`, string(identityJSON), time.Now().UTC().Format(time.RFC3339Nano), mountID)
+	return err
+}
+
+// mountIdentityMatches compares durable filesystem identity.
+// Kernel mount IDs (mountinfo ID / statx mount_id) are intentionally ignored because
+// they change whenever a container or bind mount is recreated, even for the same directory.
 func mountIdentityMatches(stored, current mountid.Identity) bool {
 	if filepath.Clean(stored.Path) != filepath.Clean(current.Path) || stored.Device != current.Device || stored.Inode != current.Inode {
 		return false
@@ -2092,8 +2589,7 @@ func mountIdentityMatches(stored, current mountid.Identity) bool {
 		if stored.Statx.Available != current.Statx.Available ||
 			stored.Statx.DeviceMajor != current.Statx.DeviceMajor ||
 			stored.Statx.DeviceMinor != current.Statx.DeviceMinor ||
-			stored.Statx.Inode != current.Statx.Inode ||
-			stored.Statx.MountID != current.Statx.MountID {
+			stored.Statx.Inode != current.Statx.Inode {
 			return false
 		}
 	}
@@ -2103,17 +2599,26 @@ func mountIdentityMatches(stored, current mountid.Identity) bool {
 	if !stored.Mount.Available {
 		return true
 	}
-	return stored.Mount.ID == current.Mount.ID &&
-		stored.Mount.Device == current.Mount.Device &&
+	return stored.Mount.Device == current.Mount.Device &&
 		stored.Mount.Root == current.Mount.Root &&
 		stored.Mount.Point == current.Mount.Point &&
 		stored.Mount.FSType == current.Mount.FSType &&
 		stored.Mount.Source == current.Mount.Source
 }
 
+func mountIdentityNeedsRefresh(stored, current mountid.Identity) bool {
+	if stored.Statx.MountID != current.Statx.MountID {
+		return true
+	}
+	if stored.Mount.Available && current.Mount.Available && stored.Mount.ID != current.Mount.ID {
+		return true
+	}
+	return false
+}
+
 func queryMounts(r *http.Request, db *sql.DB, accountID, spaceID string) ([]mountDTO, error) {
 	rows, err := db.QueryContext(r.Context(), `
-SELECT m.id, m.display_name, sp.name, m.mode, m.index_enabled, m.status
+SELECT m.id, m.display_name, sp.name, m.kind, m.mode, m.index_enabled, m.status
 FROM mounts m
 JOIN spaces sp ON sp.id = m.space_id
 JOIN space_members sm ON sm.space_id = sp.id
@@ -2132,7 +2637,7 @@ func (s *Server) bootstrapMounts(r *http.Request, db *sql.DB, session identity.S
 		return []mountDTO{}
 	}
 	rows, err := db.QueryContext(r.Context(), `
-SELECT m.id, m.display_name, sp.name, m.mode, m.index_enabled, m.status
+SELECT m.id, m.display_name, sp.name, m.kind, m.mode, m.index_enabled, m.status
 FROM mounts m
 JOIN spaces sp ON sp.id = m.space_id
 JOIN space_members sm ON sm.space_id = sp.id
@@ -2156,7 +2661,7 @@ func scanMountDTOs(rows *sql.Rows) ([]mountDTO, error) {
 		var item mountDTO
 		var mode string
 		var indexEnabled int
-		if err := rows.Scan(&item.ID, &item.Name, &item.Space, &mode, &indexEnabled, &item.Health); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Space, &item.Kind, &mode, &indexEnabled, &item.Health); err != nil {
 			return nil, err
 		}
 		item.Mode = displayMountMode(domain.MountMode(mode))

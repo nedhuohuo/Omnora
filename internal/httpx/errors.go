@@ -10,6 +10,8 @@ import (
 
 type requestIDKey struct{}
 
+type entryKey struct{}
+
 type ErrorResponse struct {
 	Error ErrorBody `json:"error"`
 }
@@ -27,6 +29,22 @@ func WithRequestID(ctx context.Context, requestID string) context.Context {
 func RequestID(ctx context.Context) string {
 	if requestID, ok := ctx.Value(requestIDKey{}).(string); ok {
 		return requestID
+	}
+	return ""
+}
+
+// WithEntry tags a request with the network entry (listener) it arrived on,
+// e.g. "lan_http" or "proxy_https". Entry names are owned by the server
+// package; httpx only carries the opaque string.
+func WithEntry(ctx context.Context, entry string) context.Context {
+	return context.WithValue(ctx, entryKey{}, entry)
+}
+
+// Entry returns the network entry tag from the context, or "" when the
+// request was not tagged.
+func Entry(ctx context.Context) string {
+	if entry, ok := ctx.Value(entryKey{}).(string); ok {
+		return entry
 	}
 	return ""
 }

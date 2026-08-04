@@ -56,6 +56,12 @@ func TestLoadEnvRouteGroups(t *testing.T) {
 	if cfg.Routes.Enabled(domain.RouteGroupAdminWeb) {
 		t.Fatal("admin route group should remain disabled")
 	}
+	if enabled, ok := cfg.RouteEnvOverrides[domain.RouteGroupREST]; !ok || !enabled {
+		t.Fatalf("REST env override = %v, %v", enabled, ok)
+	}
+	if _, ok := cfg.RouteEnvOverrides[domain.RouteGroupAdminWeb]; ok {
+		t.Fatal("admin env override should be absent when unset")
+	}
 }
 
 func TestLoadEnvRejectsInvalidBool(t *testing.T) {

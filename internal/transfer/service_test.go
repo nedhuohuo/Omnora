@@ -169,6 +169,63 @@ func TestCompleteRejectsMissingParts(t *testing.T) {
 	}
 }
 
+func TestUploadRejectsSymlinkedTargetAndTemporaryRoots(t *testing.T) {
+	mountRoot := t.TempDir()
+	tempRoot := filepath.Join(mountRoot, storage.ReservedNamespace, "tmp")
+	mkdir(t, tempRoot)
+	mkdir(t, filepath.Join(mountRoot, "docs"))
+	outside := t.TempDir()
+	service := newTestService(t, mountRoot, tempRoot)
+
+	session, err := service.CreateUploadSession(CreateUploadSessionRequest{TargetPath: "docs/report.txt", ExpectedSize: 4})
+	if err != nil {
+		t.Fatalf("CreateUploadSession() error = %v", err)
+	}
+	if _, err := service.WritePart(session.ID, 1, strings.NewReader("data")); err != nil {
+		t.Fatalf("WritePart() error = %v", err)
+	}
+	if err := os.Remove(filepath.Join(mountRoot, "docs")); err != nil {
+		t.Fatalf("Remove(docs) error = %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(mountRoot, "docs")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := service.CompleteUpload(session.ID); !errors.Is(err, ErrInvalidTargetPath) {
+		t.Fatalf("CompleteUpload() error = %v, want ErrInvalidTargetPath", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "report.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside target exists: %v", err)
+	}
+
+	symlinkRoot := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(symlinkRoot, storage.ReservedNamespace)); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := NewService(Options{MountRoot: symlinkRoot, TempRoot: filepath.Join(symlinkRoot, storage.ReservedNamespace, "tmp")}); !errors.Is(err, ErrInvalidTempRoot) {
+		t.Fatalf("NewService() error = %v, want ErrInvalidTempRoot", err)
+	}
+}
+
+func TestUploadPublishDoesNotOverwriteRacingTarget(t *testing.T) {
+	mountRoot := t.TempDir()
+	tempRoot := filepath.Join(mountRoot, storage.ReservedNamespace, "tmp")
+	mkdir(t, tempRoot)
+	service := newTestService(t, mountRoot, tempRoot)
+
+	session, err := service.CreateUploadSession(CreateUploadSessionRequest{TargetPath: "race.txt", ExpectedSize: 4})
+	if err != nil {
+		t.Fatalf("CreateUploadSession() error = %v", err)
+	}
+	if _, err := service.WritePart(session.ID, 1, strings.NewReader("data")); err != nil {
+		t.Fatalf("WritePart() error = %v", err)
+	}
+	writeFile(t, filepath.Join(mountRoot, "race.txt"), "keep")
+	if _, err := service.CompleteUpload(session.ID); !errors.Is(err, ErrTargetExists) {
+		t.Fatalf("CompleteUpload() error = %v, want ErrTargetExists", err)
+	}
+	assertFileContents(t, filepath.Join(mountRoot, "race.txt"), "keep")
+}
+
 func TestParseByteRange(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -251,6 +308,7 @@ func newTestService(t *testing.T, mountRoot, tempRoot string) *Service {
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
+	t.Cleanup(func() { _ = service.Close() })
 	return service
 }
 

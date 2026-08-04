@@ -85,12 +85,12 @@ cp aliyun-test.env.example aliyun-test.env   # 按需修改密钥与令牌
 # 基础单容器示例
 docker compose -f docker-compose.yml config
 
-# 阿里云测试覆盖（默认绑定 127.0.0.1，建议经 SSH 隧道访问）
+# 阿里云测试覆盖（当前测试机对外暴露 8080，见部署文档）
 docker compose --env-file aliyun-test.env \
   -f docker-compose.yml -f docker-compose.aliyun-test.yml up -d
 ```
 
-正式镜像标签尚未发布；Compose 文件中的 `ghcr.io/omnora/omnora:0.1.0-dev` 为占位。阿里云测试服务器的边界与访问方式见 [阿里云测试服务器](docs/deployment/aliyun-test-server.md)。
+正式镜像标签尚未发布；Compose 文件中的 `ghcr.io/omnora/omnora:0.1.0-dev` 为占位。阿里云测试服务器的边界与访问方式见 [阿里云测试服务器](docs/deployment/aliyun-test-server.md)（外部访问：`http://120.26.88.7:8080`）。
 
 ### 脚手架自检
 

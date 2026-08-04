@@ -16,6 +16,10 @@ var (
 	ErrSessionInvalid            = errors.New("identity: invalid session")
 )
 
+// DefaultSessionEntry is applied to sessions created without an explicit
+// entry, matching the default listener (lan_http).
+const DefaultSessionEntry = "lan_http"
+
 type Account struct {
 	ID           string
 	Email        string
@@ -41,6 +45,7 @@ type Session struct {
 	ID         string
 	AccountID  string
 	TokenHash  string
+	Entry      string
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	LastUsedAt time.Time
@@ -75,6 +80,7 @@ type AccountWithPersonalSpace struct {
 type SessionRequest struct {
 	AccountID string
 	TTL       time.Duration
+	Entry     string
 }
 
 type SessionToken struct {

@@ -1,0 +1,14 @@
+.share-portal { min-height: 100vh; background: #f4f7fb; color: #202936; }
+.share-portal-topbar { display: flex; align-items: center; justify-content: space-between; height: 60px; padding: 0 24px; border-bottom: 1px solid #e2e8f0; background: #fff; }
+.share-portal-stage { display: grid; place-items: start center; min-height: calc(100vh - 60px); padding: 40px 20px; }
+.share-portal-panel { width: min(720px, 100%); padding: 28px; border: 1px solid #e0e7ef; border-radius: 8px; background: #fff; box-shadow: 0 18px 46px rgb(37 58 85 / 0.08); }
+.share-portal-panel h1 { margin: 0 0 12px; font-size: 20px; }
+.share-portal-panel p { margin: 0; color: #718093; font-size: 14px; line-height: 1.6; }
+.share-portal-panel form { display: grid; gap: 14px; margin-top: 16px; }
+.share-portal-panel label { display: grid; gap: 7px; color: #536174; font-size: 13px; }
+.share-portal-panel input { height: 37px; padding: 0 10px; border: 1px solid #d8e0eb; border-radius: 5px; color: #253447; }
+.share-portal-message { color: #718093; font-size: 14px; }
+.share-portal-browser { width: min(960px, 100%); }
+.share-portal-file-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.share-portal-file-actions a { display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border: 1px solid #d5dee9; border-radius: 5px; color: #1264cb; text-decoration: none; font-size: 13px; }
+.share-portal-file-actions a.member-primary { border-color: #1677ff; background: #1677ff; color: #fff; }

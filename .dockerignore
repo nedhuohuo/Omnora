@@ -1,0 +1,10 @@
+.git
+.gitignore
+.superpowers
+deploy/*.env
+deploy/aliyun-test/
+web/node_modules
+web/dist
+**/*.test
+**/*_test.go
+tmp

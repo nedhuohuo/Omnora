@@ -182,6 +182,52 @@ func TestListDirectoryRejectsNonDirectoryAndInvalidMount(t *testing.T) {
 	}
 }
 
+func TestMountRootRejectsIntermediateSymbolicLinks(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	writeFile(t, filepath.Join(outside, "secret.txt"), "secret")
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	mount := Mount{Root: root, Mode: domain.MountModeReadWrite}
+
+	if _, err := NewService().ListDirectory(mount, "linked"); !errors.Is(err, ErrSymlinkPath) {
+		t.Fatalf("ListDirectory() error = %v, want ErrSymlinkPath", err)
+	}
+	if _, _, err := NewService().OpenFile(mount, "linked/secret.txt"); !errors.Is(err, ErrSymlinkPath) {
+		t.Fatalf("OpenFile() error = %v, want ErrSymlinkPath", err)
+	}
+	if err := NewService().ValidateWritableTarget(mount, "linked/new.txt"); !errors.Is(err, ErrSymlinkPath) {
+		t.Fatalf("ValidateWritableTarget() error = %v, want ErrSymlinkPath", err)
+	}
+	if _, err := NewService().ValidateShareTarget(mount, "linked/secret.txt"); !errors.Is(err, ErrSymlinkPath) {
+		t.Fatalf("ValidateShareTarget() error = %v, want ErrSymlinkPath", err)
+	}
+}
+
+func TestCreateDirectoryUsesVerifiedMountRoot(t *testing.T) {
+	root := t.TempDir()
+	mkdir(t, filepath.Join(root, "docs"))
+	mount := Mount{Root: root, Mode: domain.MountModeReadWrite}
+
+	created, err := NewService().CreateDirectory(mount, "docs", "drafts")
+	if err != nil {
+		t.Fatalf("CreateDirectory() error = %v", err)
+	}
+	if created != "docs/drafts" {
+		t.Fatalf("created = %q, want docs/drafts", created)
+	}
+	info, err := os.Stat(filepath.Join(root, "docs", "drafts"))
+	if err != nil || !info.IsDir() {
+		t.Fatalf("created directory stat = %v, info = %#v", err, info)
+	}
+
+	_, err = NewService().CreateDirectory(Mount{Root: root, Mode: domain.MountModeReadOnly}, ".", "blocked")
+	if !errors.Is(err, ErrInvalidMountMode) {
+		t.Fatalf("read-only CreateDirectory() error = %v, want ErrInvalidMountMode", err)
+	}
+}
+
 func writeFile(t *testing.T, name, contents string) {
 	t.Helper()
 	if err := os.WriteFile(name, []byte(contents), 0o644); err != nil {

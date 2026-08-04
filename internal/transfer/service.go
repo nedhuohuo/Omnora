@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -37,7 +39,7 @@ var (
 )
 
 type Service struct {
-	mountRoot  string
+	root       *os.Root
 	tempRoot   string
 	bufferSize int
 	now        func() time.Time
@@ -90,14 +92,30 @@ func NewService(options Options) (*Service, error) {
 	if options.MountRoot == "" || mountRoot == "." {
 		return nil, ErrInvalidMountRoot
 	}
-	if err := ensureDirectory(mountRoot); err != nil {
+	root, err := os.OpenRoot(mountRoot)
+	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidMountRoot, err)
 	}
+	closeRoot := true
+	defer func() {
+		if closeRoot {
+			_ = root.Close()
+		}
+	}()
+
 	tempRoot := filepath.Clean(options.TempRoot)
 	if options.TempRoot == "" || tempRoot == "." {
 		return nil, ErrInvalidTempRoot
 	}
 	if !isPathWithin(mountRoot, tempRoot) {
+		return nil, ErrInvalidTempRoot
+	}
+	tempRelative, err := filepath.Rel(mountRoot, tempRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidTempRoot, err)
+	}
+	tempRelative = filepath.ToSlash(tempRelative)
+	if !isSafeInternalRelativePath(tempRelative) {
 		return nil, ErrInvalidTempRoot
 	}
 
@@ -110,21 +128,38 @@ func NewService(options Options) (*Service, error) {
 		clock = time.Now
 	}
 
-	if err := os.MkdirAll(tempRoot, 0o700); err != nil {
+	if err := ensureRootDirectory(root, tempRelative); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidTempRoot, err)
 	}
 
-	return &Service{
-		mountRoot:  mountRoot,
-		tempRoot:   tempRoot,
+	service := &Service{
+		root:       root,
+		tempRoot:   tempRelative,
 		bufferSize: bufferSize,
 		now:        clock,
-	}, nil
+	}
+	closeRoot = false
+	return service, nil
+}
+
+// Close releases the mount-root descriptor retained by the upload session.
+func (s *Service) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.root == nil {
+		return nil
+	}
+	err := s.root.Close()
+	s.root = nil
+	return err
 }
 
 func (s *Service) CreateUploadSession(req CreateUploadSessionRequest) (UploadSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.root == nil {
+		return UploadSession{}, ErrInvalidMountRoot
+	}
 
 	if req.ExpectedSize < 0 {
 		return UploadSession{}, ErrInvalidTargetPath
@@ -133,15 +168,7 @@ func (s *Service) CreateUploadSession(req CreateUploadSessionRequest) (UploadSes
 	if err != nil {
 		return UploadSession{}, err
 	}
-	targetFile := s.targetFilePath(targetPath)
-	if !req.Overwrite {
-		if _, err := os.Lstat(targetFile); err == nil {
-			return UploadSession{}, ErrTargetExists
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return UploadSession{}, err
-		}
-	}
-	if err := ensureTargetParent(targetFile); err != nil {
+	if err := s.validateTarget(targetPath, req.Overwrite); err != nil {
 		return UploadSession{}, err
 	}
 
@@ -158,11 +185,11 @@ func (s *Service) CreateUploadSession(req CreateUploadSessionRequest) (UploadSes
 		Parts:        map[string]int64{},
 	}
 
-	if err := os.Mkdir(s.sessionDir(id), 0o700); err != nil {
+	if err := s.root.Mkdir(s.sessionDir(id), 0o700); err != nil {
 		return UploadSession{}, err
 	}
 	if err := s.saveManifest(manifest); err != nil {
-		_ = os.RemoveAll(s.sessionDir(id))
+		_ = s.root.RemoveAll(s.sessionDir(id))
 		return UploadSession{}, err
 	}
 	return manifest.session(), nil
@@ -171,6 +198,9 @@ func (s *Service) CreateUploadSession(req CreateUploadSessionRequest) (UploadSes
 func (s *Service) ResumeUploadSession(sessionID string) (UploadSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.root == nil {
+		return UploadSession{}, ErrInvalidMountRoot
+	}
 
 	manifest, err := s.loadManifest(sessionID)
 	if err != nil {
@@ -185,6 +215,9 @@ func (s *Service) ResumeUploadSession(sessionID string) (UploadSession, error) {
 func (s *Service) WritePart(sessionID string, number int, reader io.Reader) (UploadPart, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.root == nil {
+		return UploadPart{}, ErrInvalidMountRoot
+	}
 
 	if number <= 0 {
 		return UploadPart{}, ErrInvalidPartNumber
@@ -196,16 +229,14 @@ func (s *Service) WritePart(sessionID string, number int, reader io.Reader) (Upl
 	oldPartSize := manifest.Parts[strconv.Itoa(number)]
 	availableSize := manifest.ExpectedSize - manifest.receivedSize() + oldPartSize
 
-	sessionDir := s.sessionDir(sessionID)
-	tempFile, err := os.CreateTemp(sessionDir, fmt.Sprintf("part-%08d-", number))
+	tempFile, tempName, err := s.createTempFile(sessionID, fmt.Sprintf("part-%08d-", number))
 	if err != nil {
 		return UploadPart{}, err
 	}
-	tempName := tempFile.Name()
 	removeTemp := true
 	defer func() {
 		if removeTemp {
-			_ = os.Remove(tempName)
+			_ = s.root.Remove(tempName)
 		}
 	}()
 
@@ -219,7 +250,7 @@ func (s *Service) WritePart(sessionID string, number int, reader io.Reader) (Upl
 	}
 
 	partName := s.partPath(sessionID, number)
-	if err := os.Rename(tempName, partName); err != nil {
+	if err := s.root.Rename(tempName, partName); err != nil {
 		return UploadPart{}, err
 	}
 	removeTemp = false
@@ -238,6 +269,9 @@ func (s *Service) WritePart(sessionID string, number int, reader io.Reader) (Upl
 func (s *Service) CompleteUpload(sessionID string) (CompletedUpload, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.root == nil {
+		return CompletedUpload{}, ErrInvalidMountRoot
+	}
 
 	manifest, err := s.loadManifest(sessionID)
 	if err != nil {
@@ -247,28 +281,18 @@ func (s *Service) CompleteUpload(sessionID string) (CompletedUpload, error) {
 		return CompletedUpload{}, err
 	}
 
-	targetFile := s.targetFilePath(manifest.TargetPath)
-	if !manifest.Overwrite {
-		if _, err := os.Lstat(targetFile); err == nil {
-			return CompletedUpload{}, ErrTargetExists
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return CompletedUpload{}, err
-		}
-	}
-	if err := ensureTargetParent(targetFile); err != nil {
+	if err := s.validateTarget(manifest.TargetPath, manifest.Overwrite); err != nil {
 		return CompletedUpload{}, err
 	}
 
-	sessionDir := s.sessionDir(sessionID)
-	finalFile, err := os.CreateTemp(sessionDir, "final-*")
+	finalFile, finalName, err := s.createTempFile(sessionID, "final-")
 	if err != nil {
 		return CompletedUpload{}, err
 	}
-	finalName := finalFile.Name()
 	removeFinal := true
 	defer func() {
 		if removeFinal {
-			_ = os.Remove(finalName)
+			_ = s.root.Remove(finalName)
 		}
 	}()
 
@@ -283,11 +307,11 @@ func (s *Service) CompleteUpload(sessionID string) (CompletedUpload, error) {
 		return CompletedUpload{}, ErrIncompleteUpload
 	}
 
-	if err := os.Rename(finalName, targetFile); err != nil {
+	if err := s.publish(finalName, manifest.TargetPath, manifest.Overwrite); err != nil {
 		return CompletedUpload{}, err
 	}
 	removeFinal = false
-	_ = os.RemoveAll(sessionDir)
+	_ = s.root.RemoveAll(s.sessionDir(sessionID))
 
 	return CompletedUpload{
 		TargetPath: manifest.TargetPath,
@@ -298,11 +322,14 @@ func (s *Service) CompleteUpload(sessionID string) (CompletedUpload, error) {
 func (s *Service) CancelUpload(sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.root == nil {
+		return ErrInvalidMountRoot
+	}
 
 	if err := validateSessionID(sessionID); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(s.sessionDir(sessionID)); err != nil {
+	if err := s.root.RemoveAll(s.sessionDir(sessionID)); err != nil {
 		return err
 	}
 	return nil
@@ -312,7 +339,7 @@ func (s *Service) assembleParts(writer io.Writer, manifest uploadManifest) (int6
 	var written int64
 	buffer := make([]byte, s.bufferSize)
 	for number := 1; number <= len(manifest.Parts); number++ {
-		partFile, err := os.Open(s.partPath(manifest.ID, number))
+		partFile, err := s.root.Open(s.partPath(manifest.ID, number))
 		if err != nil {
 			return written, err
 		}
@@ -359,7 +386,7 @@ func (s *Service) verifyPartFiles(manifest uploadManifest) error {
 		if err != nil || number <= 0 {
 			return ErrInvalidPartNumber
 		}
-		info, err := os.Lstat(s.partPath(manifest.ID, number))
+		info, err := s.root.Lstat(s.partPath(manifest.ID, number))
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return ErrIncompleteUpload
@@ -377,7 +404,7 @@ func (s *Service) loadManifest(sessionID string) (uploadManifest, error) {
 	if err := validateSessionID(sessionID); err != nil {
 		return uploadManifest{}, err
 	}
-	file, err := os.Open(s.manifestPath(sessionID))
+	file, err := s.root.Open(s.manifestPath(sessionID))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return uploadManifest{}, ErrSessionNotFound
@@ -406,15 +433,14 @@ func (s *Service) loadManifest(sessionID string) (uploadManifest, error) {
 }
 
 func (s *Service) saveManifest(manifest uploadManifest) error {
-	tempFile, err := os.CreateTemp(s.sessionDir(manifest.ID), "manifest-*")
+	tempFile, tempName, err := s.createTempFile(manifest.ID, "manifest-")
 	if err != nil {
 		return err
 	}
-	tempName := tempFile.Name()
 	removeTemp := true
 	defer func() {
 		if removeTemp {
-			_ = os.Remove(tempName)
+			_ = s.root.Remove(tempName)
 		}
 	}()
 
@@ -427,27 +453,122 @@ func (s *Service) saveManifest(manifest uploadManifest) error {
 	if err := tempFile.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tempName, s.manifestPath(manifest.ID)); err != nil {
+	if err := s.root.Rename(tempName, s.manifestPath(manifest.ID)); err != nil {
 		return err
 	}
 	removeTemp = false
 	return nil
 }
 
-func (s *Service) targetFilePath(targetPath string) string {
-	return filepath.Join(s.mountRoot, filepath.FromSlash(targetPath))
-}
-
 func (s *Service) sessionDir(sessionID string) string {
-	return filepath.Join(s.tempRoot, sessionID)
+	return path.Join(s.tempRoot, sessionID)
 }
 
 func (s *Service) manifestPath(sessionID string) string {
-	return filepath.Join(s.sessionDir(sessionID), manifestName)
+	return path.Join(s.sessionDir(sessionID), manifestName)
 }
 
 func (s *Service) partPath(sessionID string, number int) string {
-	return filepath.Join(s.sessionDir(sessionID), fmt.Sprintf("part-%08d", number))
+	return path.Join(s.sessionDir(sessionID), fmt.Sprintf("part-%08d", number))
+}
+
+func (s *Service) createTempFile(sessionID, prefix string) (*os.File, string, error) {
+	for range 100 {
+		suffix, err := newSessionID()
+		if err != nil {
+			return nil, "", err
+		}
+		name := path.Join(s.sessionDir(sessionID), prefix+suffix)
+		file, err := s.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return file, name, nil
+		}
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		return nil, "", err
+	}
+	return nil, "", errors.New("could not create unique temporary upload file")
+}
+
+func (s *Service) validateTarget(targetPath string, overwrite bool) error {
+	parent := path.Dir(targetPath)
+	if err := rejectRootSymlinks(s.root, parent); err != nil {
+		return err
+	}
+	info, err := s.root.Stat(parent)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return ErrInvalidTargetPath
+	}
+	info, err = s.root.Lstat(targetPath)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return ErrInvalidTargetPath
+		}
+		if !overwrite {
+			return ErrTargetExists
+		}
+		return nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func (s *Service) publish(source, target string, overwrite bool) error {
+	if overwrite {
+		return s.root.Rename(source, target)
+	}
+	if err := s.root.Link(source, target); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return ErrTargetExists
+		}
+		return err
+	}
+	return s.root.Remove(source)
+}
+
+func ensureRootDirectory(root *os.Root, relativePath string) error {
+	current := "."
+	for _, component := range strings.Split(relativePath, "/") {
+		current = path.Join(current, component)
+		info, err := root.Lstat(current)
+		if errors.Is(err, fs.ErrNotExist) {
+			if err := root.Mkdir(current, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+				return err
+			}
+			info, err = root.Lstat(current)
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return ErrInvalidTempRoot
+		}
+	}
+	return nil
+}
+
+func rejectRootSymlinks(root *os.Root, relativePath string) error {
+	if relativePath == "." {
+		return nil
+	}
+	current := "."
+	for _, component := range strings.Split(relativePath, "/") {
+		current = path.Join(current, component)
+		info, err := root.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return ErrInvalidTargetPath
+		}
+	}
+	return nil
 }
 
 func (m uploadManifest) session() UploadSession {
@@ -537,6 +658,23 @@ func isPathWithin(root, candidate string) bool {
 		return false
 	}
 	return relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func isSafeInternalRelativePath(value string) bool {
+	if value == "" || value == "." || strings.HasPrefix(value, "/") {
+		return false
+	}
+	for _, component := range strings.Split(value, "/") {
+		if component == "" || component == "." || component == ".." {
+			return false
+		}
+		for _, r := range component {
+			if r == 0 || r < 0x20 || r == 0x7f {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func newSessionID() (string, error) {

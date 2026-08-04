@@ -199,28 +199,28 @@ type SearchBoundary struct {
 }
 
 type SearchResult struct {
-	Items          []SearchItem
-	ExcludedMounts []ExcludedMount
-	NextCursor     string
+	Items          []SearchItem    `json:"items"`
+	ExcludedMounts []ExcludedMount `json:"excludedMounts"`
+	NextCursor     string          `json:"nextCursor"`
 }
 
 type SearchItem struct {
-	ID                  string
-	SpaceID             string
-	MountID             string
-	RelativePath        string
-	Name                string
-	Kind                EntryKind
-	PreviewKind         string
-	SizeBytes           int64
-	ModifiedAt          time.Time
-	IdentityFingerprint string
+	ID                  string    `json:"id"`
+	SpaceID             string    `json:"spaceId"`
+	MountID             string    `json:"mountId"`
+	RelativePath        string    `json:"relativePath"`
+	Name                string    `json:"name"`
+	Kind                EntryKind `json:"kind"`
+	PreviewKind         string    `json:"previewKind"`
+	SizeBytes           int64     `json:"sizeBytes"`
+	ModifiedAt          time.Time `json:"modifiedAt"`
+	IdentityFingerprint string    `json:"identityFingerprint"`
 }
 
 type ExcludedMount struct {
-	MountID string
-	Name    string
-	Reason  string
+	MountID string `json:"mountId"`
+	Name    string `json:"name"`
+	Reason  string `json:"reason"`
 }
 
 func (s Service) Search(ctx context.Context, opts SearchOptions) (SearchResult, error) {

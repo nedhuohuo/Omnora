@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -46,24 +45,34 @@ func main() {
 		}
 	}
 
-	srv := &http.Server{
-		Addr:              cfg.HTTP.Addr,
-		Handler:           server.New(cfg, db),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	listeners := server.NewListenerManager()
+	srv := server.NewServer(cfg, db, server.WithListeners(listeners))
+	lanHandler := srv.HandlerFor(server.EntryLAN)
+	proxyHandler := srv.HandlerFor(server.EntryProxy)
 
-	go func() {
-		slog.Info("omnora backend listening", "addr", cfg.HTTP.Addr, "db_configured", cfg.Database.Path != "")
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("http server failed", "error", err)
-			stop()
+	if err := listeners.Start(server.EntryLAN, cfg.HTTP.Addr, lanHandler); err != nil {
+		slog.Error("lan http listener failed to bind", "addr", cfg.HTTP.Addr, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("omnora backend listening", "addr", cfg.HTTP.Addr, "db_configured", cfg.Database.Path != "")
+
+	if enabled, bindAddr := srv.ProxyEntryState(); enabled {
+		if bindAddr == "" {
+			bindAddr = cfg.HTTP.ProxyHTTPSListen
 		}
-	}()
+		// A proxy bind failure is non-fatal: the LAN entry remains the
+		// management surface and the admin can reconcile via the API.
+		if err := listeners.Start(server.EntryProxy, bindAddr, proxyHandler); err != nil {
+			slog.Error("proxy https listener failed to bind", "addr", bindAddr, "error", err)
+		} else {
+			slog.Info("proxy https listener started", "addr", bindAddr)
+		}
+	}
 
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	if err := listeners.Shutdown(shutdownCtx); err != nil {
 		slog.Error("http shutdown failed", "error", err)
 		os.Exit(1)
 	}

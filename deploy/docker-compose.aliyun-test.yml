@@ -8,14 +8,14 @@ services:
       omnora.environment: aliyun-test
       omnora.role: test-server
     ports:
-      # Keep the test instance local to the ECS host by default. Reach it with an SSH tunnel,
-      # or place a TLS reverse proxy in front of 127.0.0.1:8081 after explicitly enabling it.
-      - "${OMNORA_LAN_BIND:-127.0.0.1}:8080:8080"
+      # Aliyun test env sets OMNORA_LAN_BIND=0.0.0.0 for external HTTP on 8080.
+      # Keep proxy_https on 127.0.0.1 unless a TLS reverse proxy is configured.
+      - "${OMNORA_LAN_BIND:-0.0.0.0}:8080:8080"
       - "${OMNORA_PROXY_BIND:-127.0.0.1}:8081:8081"
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
       OMNORA_DEPLOY_ENV: aliyun-test
-      OMNORA_LAN_HTTP_ALLOWED_CIDRS: "${OMNORA_LAN_HTTP_ALLOWED_CIDRS:-127.0.0.1/32,::1/128}"
+      OMNORA_LAN_HTTP_ALLOWED_CIDRS: "${OMNORA_LAN_HTTP_ALLOWED_CIDRS:-0.0.0.0/0,::/0}"
       OMNORA_PROXY_HTTPS_ENABLED: "${OMNORA_PROXY_HTTPS_ENABLED:-false}"
       OMNORA_ROUTE_SHARE_ENABLED: "${OMNORA_ROUTE_SHARE_ENABLED:-false}"
       OMNORA_ROUTE_MCP_ENABLED: "${OMNORA_ROUTE_MCP_ENABLED:-false}"
@@ -23,4 +23,7 @@ services:
       - ./aliyun-test/config:/etc/omnora
       - ./aliyun-test/data:/var/lib/omnora
       - ./aliyun-test/managed:/srv/omnora/managed
-      - ./aliyun-test/mounts:/mnt/omnora:ro
+      # Aliyun test intentionally mounts external dirs read-write so folder create
+      # and upload can be exercised. Production should keep external mounts :ro
+      # unless write access is deliberately required.
+      - ./aliyun-test/mounts:/mnt/omnora

@@ -5,6 +5,8 @@ This checklist is local scaffolding for implementers. It summarizes release chec
 ## Deployment
 
 - The default Compose deployment starts exactly one `omnora` application container.
+- The image build compiles `web/dist` and embeds the production frontend in the Go binary.
+- TOTP encryption and initialization secrets are required at container startup and are never committed.
 - The container does not require PostgreSQL, Redis, OpenSearch, MinIO, Office converters, FFmpeg, GPU, host networking, Docker socket access, or privileged mode.
 - `lan_http` and `proxy_https` are configured as separate entries with explicit binds and CIDR trust settings.
 - Admin Web, Member Web, Share, REST, MCP, and OpenAPI exposure are independently configurable.
@@ -13,7 +15,7 @@ This checklist is local scaffolding for implementers. It summarizes release chec
 ## Aliyun Test Server
 
 - The Aliyun ECS test server is documented as a test-only candidate until ownership, workload, SSH, firewall, and security-group checks pass.
-- The Aliyun test Compose override binds Omnora to host-local addresses by default; testers use an SSH tunnel unless an explicit TLS reverse proxy is configured.
+- The Aliyun test deployment intentionally binds LAN HTTP `8080` to `0.0.0.0` for external browser access; proxy HTTPS `8081` stays on `127.0.0.1`.
 - `deploy/aliyun-test.env` and `deploy/aliyun-test/` runtime data are excluded from Git.
 - Share and MCP route groups stay disabled by default on the test server.
 - Real hostnames, root passwords, private keys, API tokens, initialization tokens, and TOTP encryption keys are not committed.

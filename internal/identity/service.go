@@ -209,17 +209,22 @@ WHERE id = ? AND status = 'active'
 	if err != nil {
 		return SessionToken{}, err
 	}
+	entry := strings.TrimSpace(req.Entry)
+	if entry == "" {
+		entry = DefaultSessionEntry
+	}
 	session := Session{
 		ID:        sessionID,
 		AccountID: req.AccountID,
 		TokenHash: hashSecret(token),
+		Entry:     entry,
 		CreatedAt: now,
 		ExpiresAt: now.Add(req.TTL),
 	}
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO identity_sessions (id, account_id, token_hash, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?)
-`, session.ID, session.AccountID, session.TokenHash, formatTime(session.CreatedAt), formatTime(session.ExpiresAt))
+INSERT INTO identity_sessions (id, account_id, token_hash, entry, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?)
+`, session.ID, session.AccountID, session.TokenHash, session.Entry, formatTime(session.CreatedAt), formatTime(session.ExpiresAt))
 	if err != nil {
 		return SessionToken{}, err
 	}
@@ -279,7 +284,7 @@ func (s *Service) VerifySession(ctx context.Context, token string) (Session, err
 	var createdAt, expiresAt string
 	var lastUsedAt, revokedAt sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-SELECT s.id, s.account_id, s.token_hash, s.created_at, s.expires_at, s.last_used_at, s.revoked_at
+SELECT s.id, s.account_id, s.token_hash, s.entry, s.created_at, s.expires_at, s.last_used_at, s.revoked_at
 FROM identity_sessions s
 JOIN accounts a ON a.id = s.account_id
 WHERE s.token_hash = ?
@@ -289,6 +294,7 @@ WHERE s.token_hash = ?
 		&session.ID,
 		&session.AccountID,
 		&session.TokenHash,
+		&session.Entry,
 		&createdAt,
 		&expiresAt,
 		&lastUsedAt,
