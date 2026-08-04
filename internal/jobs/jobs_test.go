@@ -49,6 +49,43 @@ func TestClaimEnforcesSingleConcurrencyAndPriority(t *testing.T) {
 	}
 }
 
+func TestClaimByIDDoesNotClaimAnotherQueuedJob(t *testing.T) {
+	db := newJobsDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	if _, err := store.Enqueue(ctx, EnqueueOptions{ID: "requested", Kind: "index", Priority: 100}); err != nil {
+		t.Fatalf("enqueue requested: %v", err)
+	}
+	if _, err := store.Enqueue(ctx, EnqueueOptions{ID: "higher-priority", Kind: "index", Priority: 1}); err != nil {
+		t.Fatalf("enqueue higher priority: %v", err)
+	}
+
+	claimed, err := store.ClaimByID(ctx, "requested", "worker-a")
+	if err != nil {
+		t.Fatalf("ClaimByID() error = %v", err)
+	}
+	if claimed == nil || claimed.ID != "requested" || claimed.Status != StatusRunning {
+		t.Fatalf("claimed = %#v, want requested running", claimed)
+	}
+
+	higherPriority, err := store.Get(ctx, "higher-priority")
+	if err != nil {
+		t.Fatalf("get higher priority: %v", err)
+	}
+	if higherPriority.Status != StatusQueued || higherPriority.ClaimedBy.Valid {
+		t.Fatalf("higher priority job = %#v, want queued and unclaimed", higherPriority)
+	}
+
+	second, err := store.ClaimByID(ctx, "higher-priority", "worker-b")
+	if err != nil {
+		t.Fatalf("second ClaimByID() error = %v", err)
+	}
+	if second != nil {
+		t.Fatalf("second claim = %#v, want nil while job is running", second)
+	}
+}
+
 func TestPauseResumeCompleteAndFailLifecycle(t *testing.T) {
 	db := newJobsDB(t)
 	store := NewStore(db)
@@ -120,6 +157,30 @@ func TestPauseResumeCompleteAndFailLifecycle(t *testing.T) {
 	}
 	if failed.Status != StatusFailed || failed.Attempts != 2 || !failed.LastError.Valid {
 		t.Fatalf("failed job = %#v", failed)
+	}
+}
+
+func TestRequeueSavesCheckpointWithoutIncreasingAttempts(t *testing.T) {
+	db := newJobsDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	if _, err := store.Enqueue(ctx, EnqueueOptions{ID: "scan", Kind: "index", MaxAttempts: 2}); err != nil {
+		t.Fatalf("enqueue scan: %v", err)
+	}
+	if _, err := store.ClaimByID(ctx, "scan", "worker-a"); err != nil {
+		t.Fatalf("claim scan: %v", err)
+	}
+	if err := store.Requeue(ctx, "scan", `{"cursor":"file-500.txt"}`); err != nil {
+		t.Fatalf("Requeue() error = %v", err)
+	}
+
+	job, err := store.Get(ctx, "scan")
+	if err != nil {
+		t.Fatalf("get requeued job: %v", err)
+	}
+	if job.Status != StatusQueued || job.Attempts != 0 || job.CheckpointJSON != `{"cursor":"file-500.txt"}` || job.ClaimedBy.Valid {
+		t.Fatalf("requeued job = %#v, want queued, checkpointed, and unclaimed without attempts", job)
 	}
 }
 

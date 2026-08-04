@@ -142,6 +142,8 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("PUT /api/v1/uploads/{uploadId}/parts/{partNumber}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.uploadPart)))
 	s.mux.Handle("POST /api/v1/uploads/{uploadId}/complete", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.completeUpload)))
 	s.mux.Handle("DELETE /api/v1/uploads/{uploadId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.cancelUpload)))
+	s.mux.Handle("GET /api/v1/admin/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminSpaces)))
+	s.mux.Handle("GET /api/v1/admin/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminMounts)))
 	s.mux.Handle("POST /api/v1/admin/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createMount)))
 	s.mux.Handle("GET /api/v1/admin/index-jobs", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listIndexJobs)))
 	s.mux.Handle("POST /api/v1/admin/index-jobs", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.enqueueIndexJob)))
@@ -261,6 +263,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"userId":    account.ID,
 		"expiresAt": issued.Session.ExpiresAt,
+		"isAdmin":   s.isAdmin(r, account.ID),
 	})
 }
 
@@ -273,6 +276,7 @@ func (s *Server) currentSession(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"userId":    session.AccountID,
 		"expiresAt": session.ExpiresAt,
+		"isAdmin":   s.isAdmin(r, session.AccountID),
 	})
 }
 
@@ -405,6 +409,76 @@ ORDER BY sp.kind, sp.name
 		})
 	}
 	if err := rows.Err(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) listAdminSpaces(w http.ResponseWriter, r *http.Request) {
+	session, err := s.requireSession(r)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	if !s.isAdmin(r, session.AccountID) {
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "only system administrators can list spaces")
+		return
+	}
+
+	rows, err := s.sqlDB().QueryContext(r.Context(), `
+SELECT id, kind, name
+FROM spaces
+WHERE status = 'active'
+ORDER BY kind, name, id
+`)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer rows.Close()
+
+	items := make([]map[string]string, 0)
+	for rows.Next() {
+		var id, kind, name string
+		if err := rows.Scan(&id, &kind, &name); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		items = append(items, map[string]string{"id": id, "type": kind, "name": name})
+	}
+	if err := rows.Err(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) listAdminMounts(w http.ResponseWriter, r *http.Request) {
+	session, err := s.requireSession(r)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	if !s.isAdmin(r, session.AccountID) {
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "only system administrators can list mounts")
+		return
+	}
+
+	rows, err := s.sqlDB().QueryContext(r.Context(), `
+SELECT m.id, m.display_name, sp.name, m.mode, m.index_enabled, m.status
+FROM mounts m
+JOIN spaces sp ON sp.id = m.space_id
+WHERE m.status <> 'deleted'
+ORDER BY sp.kind, sp.name, m.display_name, m.id
+`)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer rows.Close()
+	items, err := scanMountDTOs(rows)
+	if err != nil {
 		writeDBError(w, r, err)
 		return
 	}
@@ -875,6 +949,23 @@ func (s *Server) enqueueIndexJob(w http.ResponseWriter, r *http.Request) {
 	if req.MountID == "" {
 		req.MountID = req.MountIDAlt
 	}
+	if strings.TrimSpace(req.MountID) == "" {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_mount", "mountId is required")
+		return
+	}
+	mount, err := s.loadCatalogMount(r, req.MountID)
+	if errors.Is(err, sql.ErrNoRows) {
+		httpx.WriteError(w, r, http.StatusNotFound, "mount_not_found", "mount was not found")
+		return
+	}
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if mount.Status != catalog.MountStatusActive || !mount.IndexEnabled {
+		httpx.WriteError(w, r, http.StatusConflict, "mount_not_indexable", "mount must be active with indexing enabled")
+		return
+	}
 	payload, _ := json.Marshal(map[string]string{"mount_id": req.MountID})
 	job, err := jobs.NewStore(s.sqlDB()).Enqueue(r.Context(), jobs.EnqueueOptions{
 		Kind:        "catalog_scan",
@@ -921,7 +1012,7 @@ func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
 		return
 	}
-	claimed, err := store.Claim(r.Context(), "inline-http-worker")
+	claimed, err := store.ClaimByID(r.Context(), job.ID, "inline-http-worker")
 	if err != nil {
 		writeDBError(w, r, err)
 		return
@@ -930,7 +1021,18 @@ func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "job_not_claimed", "another job is running or this job is not queued")
 		return
 	}
-	result, err := catalog.NewService(s.sqlDB()).ScanBatch(r.Context(), mount, catalog.ScanOptions{BatchSize: catalog.DefaultBatchSize})
+	var checkpoint struct {
+		Cursor string `json:"cursor"`
+	}
+	if err := json.Unmarshal([]byte(claimed.CheckpointJSON), &checkpoint); err != nil {
+		_ = store.Fail(r.Context(), claimed.ID, err)
+		httpx.WriteError(w, r, http.StatusConflict, "invalid_job", "job checkpoint is invalid")
+		return
+	}
+	result, err := catalog.NewService(s.sqlDB()).ScanBatch(r.Context(), mount, catalog.ScanOptions{
+		BatchSize: catalog.DefaultBatchSize,
+		Cursor:    checkpoint.Cursor,
+	})
 	if err != nil {
 		_ = store.Fail(r.Context(), job.ID, err)
 		httpx.WriteError(w, r, http.StatusConflict, "index_failed", err.Error())
@@ -938,10 +1040,12 @@ func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if !result.Done {
 		checkpoint, _ := json.Marshal(map[string]string{"cursor": result.NextCursor})
-		_ = store.SaveCheckpoint(r.Context(), job.ID, string(checkpoint))
-		_ = store.Fail(r.Context(), job.ID, errors.New("batch yielded"))
+		if err := store.Requeue(r.Context(), claimed.ID, string(checkpoint)); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
 	} else {
-		_ = store.Complete(r.Context(), job.ID)
+		_ = store.Complete(r.Context(), claimed.ID)
 	}
 	_ = s.recordAudit(r, "index_job_run", "job", job.ID, "{}")
 	httpx.WriteJSON(w, http.StatusOK, result)

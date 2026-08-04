@@ -7,10 +7,10 @@ function RouteUnavailable({ title, detail }: { title: string; detail: string }) 
 export default function App() {
   const pathname = window.location.pathname;
   if (pathname === '/' || pathname === '/app' || pathname.startsWith('/app/')) {
-    return <MemberFilesApp />;
+    return <MemberFilesApp entry="member" />;
   }
   if (pathname === '/admin' || pathname.startsWith('/admin/')) {
-    return <RouteUnavailable title="管理端独立部署中" detail="管理控制功能不会显示在成员网盘首页。" />;
+    return <MemberFilesApp entry="admin" />;
   }
   if (pathname === '/share' || pathname.startsWith('/share/')) {
     return <RouteUnavailable title="分享页面独立部署中" detail="分享访问不会显示成员空间导航。" />;

@@ -23,6 +23,7 @@ export type ShareExchangePayload = {
 export type SessionPayload = {
   userId?: string;
   expiresAt?: string;
+  isAdmin?: boolean;
 };
 
 export type InitializePayload = {
@@ -133,11 +134,47 @@ export type JobPayload = {
   id?: string;
   status?: string;
   kind?: string;
-  payload?: unknown;
+  priority?: number;
+  payload?: Record<string, unknown>;
+  checkpoint?: Record<string, unknown>;
+  attempts?: number;
+  maxAttempts?: number;
+  claimedAt?: string;
+  claimedBy?: string;
+  lastError?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
+};
+
+export type AdminSpacePayload = {
+  id: string;
+  type: string;
+  name: string;
+};
+
+export type AdminMountListItem = {
+  id: string;
+  name: string;
+  space: string;
+  mode: string;
+  index: string;
+  health: string;
+  tone: string;
+};
+
+export type AuditEventPayload = {
+  occurredAt: string;
+  actor: string;
+  routeGroup: string;
+  action: string;
+  targetType: string;
+  targetId: string;
+  metadata: string;
 };
 
 export type AuditEventsPayload = {
-  items?: unknown[];
+  items?: AuditEventPayload[];
 };
 
 export class ApiError extends Error {
@@ -244,6 +281,14 @@ export function registerAdminMount(payload: AdminMountPayload, signal?: AbortSig
     body: JSON.stringify(payload),
     signal,
   });
+}
+
+export function listAdminSpaces(signal?: AbortSignal) {
+  return requestJson<{ items: AdminSpacePayload[] }>('/api/v1/admin/spaces', { signal });
+}
+
+export function listAdminMounts(signal?: AbortSignal) {
+  return requestJson<{ items: AdminMountListItem[] }>('/api/v1/admin/mounts', { signal });
 }
 
 export function listDirectoryChildren(spaceId: string, mountId: string, path: string, signal?: AbortSignal) {
@@ -390,7 +435,7 @@ export function cancelUpload(uploadId: string, signal?: AbortSignal) {
 }
 
 export function listIndexJobs(signal?: AbortSignal) {
-  return requestJson<{ items?: unknown[] }>('/api/v1/admin/index-jobs', { signal });
+  return requestJson<{ items?: JobPayload[] }>('/api/v1/admin/index-jobs', { signal });
 }
 
 export function enqueueIndexJob(mountId: string, signal?: AbortSignal) {

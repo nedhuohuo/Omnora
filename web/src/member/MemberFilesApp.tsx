@@ -17,6 +17,7 @@ import {
   uploadPart,
 } from '../api';
 import { localeMessages } from './i18n';
+import AdminWorkspace, { type AdminTab } from './AdminWorkspace';
 import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, type MemberSearchResult, type MemberSpace, type TransferItem } from './types';
 import { resumedUploadProgress, uploadStorageKey } from './uploadQueue';
 import { useLocale } from './useLocale';
@@ -46,10 +47,16 @@ function breadcrumbs(relativePath: string) {
   return relativePath === '.' ? [] : relativePath.split('/').filter(Boolean);
 }
 
-export default function MemberFilesApp() {
+type MemberFilesAppProps = {
+  entry?: 'member' | 'admin';
+};
+
+export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps) {
   const { locale, setLocale } = useLocale();
   const text = localeMessages[locale];
   const [sessionState, setSessionState] = useState<SessionState>('checking');
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [activeTab, setActiveTab] = useState<'files' | AdminTab>(entry === 'admin' ? 'mounts' : 'files');
   const [loginForm, setLoginForm] = useState({ login: '', password: '', totpCode: '' });
   const [spaces, setSpaces] = useState<MemberSpace[]>([]);
   const [mounts, setMounts] = useState<MemberMount[]>([]);
@@ -110,7 +117,8 @@ export default function MemberFilesApp() {
   useEffect(() => {
     void (async () => {
       try {
-        await getSession();
+        const session = await getSession();
+        setIsAdmin(session.isAdmin === true);
         setSessionState('ready');
         await loadSpaces();
       } catch {
@@ -151,7 +159,8 @@ export default function MemberFilesApp() {
     setLoading(true);
     setError('');
     try {
-      await login({ login: loginForm.login, password: loginForm.password, totpCode: loginForm.totpCode || undefined });
+      const session = await login({ login: loginForm.login, password: loginForm.password, totpCode: loginForm.totpCode || undefined });
+      setIsAdmin(session.isAdmin === true);
       setSessionState('ready');
       await loadSpaces();
     } catch (caught) {
@@ -164,6 +173,7 @@ export default function MemberFilesApp() {
   async function onLogout() {
     await logout().catch(() => undefined);
     setSessionState('signed-out');
+    setIsAdmin(false);
     setSpaces([]);
     setMounts([]);
     setEntries([]);
@@ -331,6 +341,18 @@ export default function MemberFilesApp() {
     );
   }
 
+  if (entry === 'admin' && !isAdmin) {
+    return (
+      <main className="member-app">
+        <header className="member-topbar">
+          <div className="member-brand"><span>O</span>Omnora</div>
+          <div className="member-top-actions"><div className="member-language" aria-label={text.language}><button type="button" onClick={() => setLocale('zh-CN')} aria-pressed={locale === 'zh-CN'}>中文</button><button type="button" onClick={() => setLocale('en-US')} aria-pressed={locale === 'en-US'}>EN</button></div><button className="member-account" type="button" onClick={onLogout}>{text.signOut}</button></div>
+        </header>
+        <section className="member-no-access"><h1>{text.adminAccessDenied}</h1><p>{text.adminAccessDetail}</p><button className="member-primary" type="button" onClick={() => window.location.assign('/app')}>{text.goToFiles}</button></section>
+      </main>
+    );
+  }
+
   const visibleEntries: MemberDirectoryEntry[] = searchResults === null ? entries : searchResults.map((item) => ({
     mountId: item.mountId,
     name: item.name,
@@ -348,17 +370,19 @@ export default function MemberFilesApp() {
     <main className="member-app">
       <header className="member-topbar">
         <div className="member-brand"><span>O</span>Omnora</div>
-        <form className="member-search" onSubmit={onSearch}><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder={text.searchPlaceholder} /><button type="submit">{text.search}</button></form>
+        {activeTab === 'files' && <form className="member-search" onSubmit={onSearch}><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder={text.searchPlaceholder} /><button type="submit">{text.search}</button></form>}
         <div className="member-top-actions"><div className="member-language" aria-label={text.language}><button type="button" onClick={() => setLocale('zh-CN')} aria-pressed={locale === 'zh-CN'}>中文</button><button type="button" onClick={() => setLocale('en-US')} aria-pressed={locale === 'en-US'}>EN</button></div><button className="member-account" type="button" onClick={onLogout}>{text.signOut}</button></div>
       </header>
 
       <div className="member-layout">
         <aside className="member-sidebar">
-          <div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => setActiveSpaceId(space.id)}>{space.name}<small>{space.role}</small></button>)}</div>
-          <div className="member-sidebar-section"><p>{text.mounts}</p>{mounts.map((mount) => <button className={`member-mount ${mount.id === activeMountId ? 'selected' : ''}`} key={mount.id} type="button" onClick={() => setActiveMountId(mount.id)}><span>{mount.name}</span><small>{mount.mode === 'read-only' ? text.readOnly : text.readWrite}</small></button>)}</div>
+          {entry === 'admin' && <nav aria-label="Administrator workspace"><button className={`member-nav ${activeTab === 'files' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('files')}>{text.adminFiles}</button><button className={`member-nav ${activeTab === 'mounts' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('mounts')}>{text.adminMounts}</button><button className={`member-nav ${activeTab === 'index-jobs' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('index-jobs')}>{text.adminIndexJobs}</button><button className={`member-nav ${activeTab === 'audit' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('audit')}>{text.adminAudit}</button></nav>}
+          {activeTab === 'files' && <><div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => setActiveSpaceId(space.id)}>{space.name}<small>{space.role}</small></button>)}</div>
+          <div className="member-sidebar-section"><p>{text.mounts}</p>{mounts.map((mount) => <button className={`member-mount ${mount.id === activeMountId ? 'selected' : ''}`} key={mount.id} type="button" onClick={() => setActiveMountId(mount.id)}><span>{mount.name}</span><small>{mount.mode === 'read-only' ? text.readOnly : text.readWrite}</small></button>)}</div></>}
         </aside>
 
         <section className="member-content">
+          {activeTab === 'files' ? <>
           <div className="member-crumbs"><button type="button" onClick={() => openDirectory('.')}>{activeSpace?.name ?? text.myFiles}</button>{crumbItems.map((part, index) => <span key={`${part}-${index}`}><b>/</b><button type="button" onClick={() => openDirectory(crumbItems.slice(0, index + 1).join('/'))}>{part}</button></span>)}</div>
           <div className="member-heading"><div><h1>{searchResults === null ? text.myFiles : `${text.search}: ${searchQuery}`}</h1><p>{activeMount ? `${activeMount.name} · ${readOnly ? text.readOnly : text.readWrite}` : text.noMount}</p></div><div className="member-view-toggle"><button type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}>{text.list}</button><button type="button" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}>{text.grid}</button></div></div>
           <div className="member-toolbar"><button className="member-primary" type="button" disabled={readOnly || !activeMountId} onClick={() => fileInputRef.current?.click()}>{text.upload}</button><button type="button" disabled={readOnly || !activeMountId} onClick={() => setNewFolderOpen(true)}>{text.newFolder}</button>{searchResults !== null && <button type="button" onClick={() => { setSearchResults(null); setSearchNextCursor(''); setSearchQuery(''); }}>{text.clearSearch}</button>}<span className="member-toolbar-spacer" /><button type="button" onClick={() => void refreshDirectory(activeSpaceId, activeMountId, relativePath)} disabled={loading || !activeMountId}>{text.refresh}</button><input ref={fileInputRef} type="file" multiple hidden onChange={onFileInput} /></div>
@@ -389,6 +413,7 @@ export default function MemberFilesApp() {
             ))}</div>
           )}
           {searchResults !== null && searchNextCursor && <button className="member-load-more" type="button" onClick={() => void loadMoreSearchResults()} disabled={loading}>{text.loadMore}</button>}
+          </> : <AdminWorkspace tab={activeTab} locale={locale} />}
         </section>
       </div>
 

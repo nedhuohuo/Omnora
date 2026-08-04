@@ -162,6 +162,53 @@ WHERE id = ? AND status = 'queued'
 	return &job, nil
 }
 
+// ClaimByID atomically claims the requested queued job when no job is running.
+// It never substitutes a different queued job for the requested ID.
+func (s Store) ClaimByID(ctx context.Context, id, workerID string) (*Job, error) {
+	if err := s.requireDB(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(id) == "" {
+		return nil, errors.New("job id is required")
+	}
+	if strings.TrimSpace(workerID) == "" {
+		return nil, errors.New("worker id is required")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	now := s.now().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `
+UPDATE jobs
+SET status = 'running', claimed_at = ?, claimed_by = ?, updated_at = ?
+WHERE id = ? AND status = 'queued'
+	AND NOT EXISTS (SELECT 1 FROM jobs WHERE status = 'running')
+`, now, workerID, now, id)
+	if err != nil {
+		return nil, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if changed == 0 {
+		return nil, nil
+	}
+
+	job, err := getTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
 func (s Store) SaveCheckpoint(ctx context.Context, id, checkpointJSON string) error {
 	if err := s.requireDB(); err != nil {
 		return err
@@ -177,6 +224,36 @@ SET checkpoint_json = ?, updated_at = ?
 WHERE id = ? AND status = 'running'
 `, checkpoint, now, id)
 	return err
+}
+
+// Requeue saves a checkpoint and releases a running job for its next batch.
+// Yielding after a successful batch is not a failed attempt.
+func (s Store) Requeue(ctx context.Context, id, checkpointJSON string) error {
+	if err := s.requireDB(); err != nil {
+		return err
+	}
+	checkpoint, err := normalizeJSONObject(checkpointJSON)
+	if err != nil {
+		return err
+	}
+	now := s.now().Format(time.RFC3339Nano)
+	result, err := s.db.ExecContext(ctx, `
+UPDATE jobs
+SET status = 'queued', checkpoint_json = ?, claimed_at = NULL, claimed_by = NULL,
+	last_error = NULL, updated_at = ?
+WHERE id = ? AND status = 'running'
+`, checkpoint, now, id)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return errors.New("job is not running")
+	}
+	return nil
 }
 
 func (s Store) Pause(ctx context.Context, id string) error {
