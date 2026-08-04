@@ -580,10 +580,26 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
         )}
       </>}
 
-      {tab === 'audit' && (loading ? <div className="member-loading">{text.loading}</div> : events.length === 0 ? <div className="member-empty">{text.noAuditEvents}</div> : <table className="member-admin-table"><thead><tr><th>{text.time}</th><th>{text.actor}</th><th>{text.event}</th><th>{text.target}</th></tr></thead><tbody>{events.map((event, index) => {
-        const actor = auditActorLabel(event);
-        return <tr key={`${event.occurredAt}-${event.action}-${index}`}><td>{formatDate(event.occurredAt, locale)}</td><td>{actor.primary}{actor.secondary && <small>{actor.secondary}</small>}</td><td>{event.action}</td><td>{auditTargetLabel(event)}</td></tr>;
-      })}</tbody></table>)}
+      {tab === 'audit' && (loading ? <div className="member-loading">{text.loading}</div> : events.length === 0 ? <div className="member-empty">{text.noAuditEvents}</div> : (
+        <table className="member-admin-table">
+          <thead>
+            <tr><th>{text.event}</th><th>{text.actor}</th><th>{text.target}</th><th>{text.time}</th></tr>
+          </thead>
+          <tbody>
+            {events.map((event, index) => {
+              const actor = auditActorLabel(event);
+              return (
+                <tr key={`${event.occurredAt}-${event.action}-${index}`}>
+                  <td>{event.action}</td>
+                  <td>{actor.primary}{actor.secondary && <small>{actor.secondary}</small>}</td>
+                  <td>{auditTargetLabel(event)}</td>
+                  <td>{formatDate(event.occurredAt, locale)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      ))}
     </div>
   );
 }

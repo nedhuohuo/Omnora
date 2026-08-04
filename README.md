@@ -2,11 +2,27 @@
 
 万境是面向个人、家庭和小团队的轻量自托管数字空间。它以 NAS 文件为核心，为成员、访客和 AI 提供统一、受控的文件访问能力。
 
-> **项目状态：** 需求与架构设计已收敛；工程骨架与 OpenAPI / Docker Compose 脚手架已落地。首版业务闭环尚未完成，暂无正式发布版本。
+> **项目状态：** 需求与架构设计已收敛；仓库已包含可运行的 Go 后端、React 前端、OpenAPI 契约和 Docker Compose 示例。成员端、管理端、分享、审计、AI Token 与 MCP 的首版闭环正在实现和验证中，尚无正式发布版本。
+
+## 当前实现状态
+
+已具备的主要工程能力：
+
+- Go 单进程服务：提供 Web 静态资源、REST API、OpenAPI、MCP 入口、文件传输和后台任务。
+- SQLite WAL 数据层：保存账号、空间、挂载、ACL、分享、Token、审计事件和轻量元数据。
+- React 前端：包含初始化 / 登录、成员文件空间、账号安全、分享管理、AI Token、管理员控制台和公开分享入口。
+- 管理控制面：支持成员与空间管理、挂载注册、索引任务、路由组开关、备份入口和审计记录查看。
+- 部署材料：提供本地运行方式、Docker Compose 示例和阿里云测试环境覆盖文件。
+
+仍需按验收标准完成验证的范围：
+
+- 文件系统安全、跨挂载操作、恢复流程、配额和高并发边界。
+- 极空间 NAS 与普通 Linux Docker Compose 的完整部署验收。
+- `linux/amd64` 与 `linux/arm64` 镜像构建、发布和正式版本标记。
 
 ## 特性
 
-- **空间与挂载：** 用空间组织个人文件、共享文件和 NAS 已有目录；一个空间可包含多个挂载。
+- **空间与挂载：** 用空间组织个人文件、共享文件和 NAS 已有目录；一个空间可包含多个挂载，并由 ACL 控制成员访问。
 - **管理员控制面：** 仅系统管理员可添加或修改挂载；添加时明确只读 / 读写，并手动决定是否启用轻量元数据索引。
 - **文件管理：** 账号、空间 ACL、文件浏览、大文件续传、托管挂载回收站与审计。
 - **受控分享：** 支持文件与文件夹分享，可选密码、有效期、访问 / 下载次数限制和主动撤销。
@@ -30,7 +46,7 @@
 | 外部依赖 | 不依赖 GPU、外部数据库、搜索集群、Office 转换器或转码服务 |
 | 索引策略 | 按挂载开启，仅读取文件元数据；未索引挂载仍可逐目录浏览，但不进入全局搜索 |
 
-以上均为首版验收目标，尚未经过可运行产品版本实测。
+以上均为首版验收目标；正式发布前仍需通过 [验收标准](docs/verification/acceptance-criteria.md)。
 
 ### 仓库结构
 
@@ -50,7 +66,7 @@ Omnora/
 ### 环境要求
 
 - Go 1.26+
-- Node.js 20+（仅本地前端开发需要；NAS 运行时不包含 Node.js）
+- Node.js 20+（仅本地前端开发和前端构建需要；NAS 运行时不包含 Node.js）
 - Docker Compose（可选，用于容器化部署验证）
 
 ### 后端
@@ -63,11 +79,14 @@ cd Omnora
 # 运行测试
 go test ./...
 
-# 本地启动（默认监听 127.0.0.1:8080）
+# 本地启动，默认监听 127.0.0.1:8080
 export OMNORA_DB_PATH=./data/omnora.db
 export OMNORA_INITIALIZATION_TOKEN=dev-init-token
+export OMNORA_TOTP_ENCRYPTION_KEY=dev-local-totp-key-at-least-32-chars
 go run ./cmd/omnora
 ```
+
+启动后打开 `http://127.0.0.1:8080`，使用初始化令牌完成首个系统管理员创建。
 
 ### 前端
 
@@ -76,6 +95,8 @@ cd web
 npm install
 npm run dev
 ```
+
+前端开发服务器只用于本地开发；生产构建由 Go 服务嵌入并提供静态资源。
 
 ### Docker Compose
 
@@ -114,6 +135,22 @@ docker compose --env-file aliyun-test.env \
 | [OpenAPI](openapi/omnora.v1.yaml) | REST 契约草案 |
 
 出现冲突时，以许可证、安全模型、领域模型、产品需求、技术架构、Web 设计、验收标准的顺序裁决，详见 [文档地图](docs/README.md)。
+
+## 验证命令
+
+常用本地检查：
+
+```bash
+go test ./...
+cd web && npm run build
+./scripts/verification/verify-scaffolding.sh
+```
+
+Docker Compose 可用时，再执行：
+
+```bash
+docker compose -f deploy/docker-compose.yml config
+```
 
 ## 许可证与贡献
 
