@@ -203,8 +203,12 @@ export type SharePayload = {
   id: string;
   publicId: string;
   spaceId: string;
+  spaceName?: string;
   mountId: string;
+  mountName?: string;
   relativePath: string;
+  creatorEmail?: string;
+  creatorDisplayName?: string;
   allowPreview: boolean;
   allowDownload: boolean;
   maxVisits?: number;
@@ -218,7 +222,9 @@ export type SharePayload = {
 
 export type AiTokenBoundary = {
   spaceId: string;
+  spaceName?: string;
   mountId: string;
+  mountName?: string;
   path: string;
 };
 
@@ -228,6 +234,8 @@ export type AiTokenListItem = {
   id: string;
   publicId?: string;
   accountId?: string;
+  accountEmail?: string;
+  accountDisplayName?: string;
   name: string;
   scopes: string[];
   boundaries?: AiTokenBoundary[];
@@ -342,38 +350,6 @@ export type AdminSpaceMemberPayload = {
   email?: string;
   displayName?: string;
   permission: SpaceMemberRole;
-};
-
-export type EmergencyAccessPayload = {
-  id: string;
-  adminAccountId: string;
-  targetSpaceId: string;
-  reason: string;
-  expiresAt: string;
-  revokedAt?: string;
-  createdAt: string;
-};
-
-export type CreateEmergencyAccessPayload = {
-  spaceId: string;
-  password: string;
-  totpCode: string;
-  reason: string;
-};
-
-export type NetworkEntryId = 'lan_http' | 'proxy_https';
-
-export type NetworkEntryPayload = {
-  name: NetworkEntryId;
-  enabled: boolean;
-  bindAddr: string;
-  cidrs: string[];
-  externalHttpsUrl: string;
-  updatedAt?: string;
-  activeBindAddr?: string;
-  rebound?: boolean;
-  restartRequired?: boolean;
-  rebindError?: string;
 };
 
 export type BackupPayload = {
@@ -1009,41 +985,6 @@ export function removeSpaceMember(spaceId: string, accountId: string, signal?: A
     `/api/v1/admin/spaces/${encodeURIComponent(spaceId)}/members/${encodeURIComponent(accountId)}`,
     { method: 'DELETE', signal },
   );
-}
-
-// -- Admin: emergency access -------------------------------------------------------
-
-export function listEmergencyAccess(signal?: AbortSignal) {
-  return requestJson<{ items?: EmergencyAccessPayload[] }>('/api/v1/admin/emergency-access', { signal });
-}
-
-export function createEmergencyAccess(payload: CreateEmergencyAccessPayload, signal?: AbortSignal) {
-  return requestJson<EmergencyAccessPayload>('/api/v1/admin/emergency-access', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-    signal,
-  });
-}
-
-export function revokeEmergencyAccess(id: string, signal?: AbortSignal) {
-  return requestJson<void>(`/api/v1/admin/emergency-access/${encodeURIComponent(id)}/revoke`, {
-    method: 'POST',
-    signal,
-  });
-}
-
-// -- Admin: network entries -------------------------------------------------------
-
-export function listNetworkEntries(signal?: AbortSignal) {
-  return requestJson<{ items?: NetworkEntryPayload[] }>('/api/v1/admin/network-entries', { signal });
-}
-
-export function putNetworkEntry(payload: NetworkEntryPayload, signal?: AbortSignal) {
-  return requestJson<NetworkEntryPayload>('/api/v1/admin/network-entries', {
-    method: 'PUT',
-    body: JSON.stringify(payload),
-    signal,
-  });
 }
 
 // -- Admin: share and token governance -------------------------------------------

@@ -65,48 +65,6 @@ func TestCreateAndRestoreBackup(t *testing.T) {
 	}
 }
 
-func TestPutNetworkEntryAppliesCIDRPolicy(t *testing.T) {
-	db, handler := newAPITestServer(t)
-	admin, _ := createAPITestAccounts(t, db)
-	adminCookie := issueAPITestSession(t, db, admin.ID)
-
-	body, err := json.Marshal(map[string]any{
-		"name":     "lan_http",
-		"enabled":  true,
-		"bindAddr": "",
-		"cidrs":    []string{"127.0.0.1/32"},
-	})
-	if err != nil {
-		t.Fatalf("marshal network entry: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/network-entries", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(adminCookie)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("put network entry status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-
-	denied := httptest.NewRequest(http.MethodGet, "/api/v1/admin/overview", nil)
-	denied.RemoteAddr = "203.0.113.10:3456"
-	denied.AddCookie(adminCookie)
-	deniedRec := httptest.NewRecorder()
-	handler.ServeHTTP(deniedRec, denied)
-	if deniedRec.Code != http.StatusForbidden {
-		t.Fatalf("denied status = %d, want 403, body = %s", deniedRec.Code, deniedRec.Body.String())
-	}
-
-	allowed := httptest.NewRequest(http.MethodGet, "/api/v1/admin/overview", nil)
-	allowed.RemoteAddr = "127.0.0.1:3456"
-	allowed.AddCookie(adminCookie)
-	allowedRec := httptest.NewRecorder()
-	handler.ServeHTTP(allowedRec, allowed)
-	if allowedRec.Code != http.StatusOK {
-		t.Fatalf("allowed status = %d, body = %s", allowedRec.Code, allowedRec.Body.String())
-	}
-}
-
 func TestManagedSoftDeleteAndTrashRestore(t *testing.T) {
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)

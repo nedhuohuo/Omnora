@@ -17,8 +17,8 @@ var (
 )
 
 // DefaultSessionEntry is applied to sessions created without an explicit
-// entry, matching the default listener (lan_http).
-const DefaultSessionEntry = "lan_http"
+// entry. The column remains for compatibility with existing databases.
+const DefaultSessionEntry = "http"
 
 type Account struct {
 	ID           string

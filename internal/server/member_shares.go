@@ -9,20 +9,24 @@ import (
 )
 
 type shareRecordDTO struct {
-	ID            string `json:"id"`
-	PublicID      string `json:"publicId"`
-	SpaceID       string `json:"spaceId"`
-	MountID       string `json:"mountId"`
-	RelativePath  string `json:"relativePath"`
-	AllowPreview  bool   `json:"allowPreview"`
-	AllowDownload bool   `json:"allowDownload"`
-	MaxVisits     *int64 `json:"maxVisits,omitempty"`
-	UsedVisits    int    `json:"usedVisits"`
-	MaxDownloads  *int64 `json:"maxDownloads,omitempty"`
-	UsedDownloads int    `json:"usedDownloads"`
-	ExpiresAt     string `json:"expiresAt"`
-	RevokedAt     string `json:"revokedAt,omitempty"`
-	Status        string `json:"status"`
+	ID                 string `json:"id"`
+	PublicID           string `json:"publicId"`
+	SpaceID            string `json:"spaceId"`
+	SpaceName          string `json:"spaceName,omitempty"`
+	MountID            string `json:"mountId"`
+	MountName          string `json:"mountName,omitempty"`
+	RelativePath       string `json:"relativePath"`
+	CreatorEmail       string `json:"creatorEmail,omitempty"`
+	CreatorDisplayName string `json:"creatorDisplayName,omitempty"`
+	AllowPreview       bool   `json:"allowPreview"`
+	AllowDownload      bool   `json:"allowDownload"`
+	MaxVisits          *int64 `json:"maxVisits,omitempty"`
+	UsedVisits         int    `json:"usedVisits"`
+	MaxDownloads       *int64 `json:"maxDownloads,omitempty"`
+	UsedDownloads      int    `json:"usedDownloads"`
+	ExpiresAt          string `json:"expiresAt"`
+	RevokedAt          string `json:"revokedAt,omitempty"`
+	Status             string `json:"status"`
 }
 
 // listShares returns shares created by the current account, plus shares in
@@ -36,8 +40,12 @@ func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
 SELECT sh.id, sh.public_id, sh.space_id, sh.mount_id, sh.relative_path,
        sh.allow_preview, sh.allow_download, sh.max_visits, sh.used_visits,
-       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, '')
+       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, ''),
+       COALESCE(sp.name, ''), COALESCE(m.display_name, ''), COALESCE(a.email, ''), COALESCE(a.display_name, '')
 FROM shares sh
+JOIN spaces sp ON sp.id = sh.space_id
+JOIN mounts m ON m.id = sh.mount_id
+JOIN accounts a ON a.id = sh.creator_account_id
 WHERE sh.creator_account_id = ?
    OR sh.space_id IN (
        SELECT space_id FROM space_members WHERE account_id = ? AND permission = 'manager'
@@ -137,6 +145,7 @@ func scanShareRecordDTO(rows *sql.Rows) (shareRecordDTO, error) {
 		&item.ID, &item.PublicID, &item.SpaceID, &item.MountID, &item.RelativePath,
 		&allowPreview, &allowDownload, &maxVisits, &item.UsedVisits,
 		&maxDownloads, &item.UsedDownloads, &item.ExpiresAt, &item.RevokedAt,
+		&item.SpaceName, &item.MountName, &item.CreatorEmail, &item.CreatorDisplayName,
 	); err != nil {
 		return shareRecordDTO{}, err
 	}

@@ -11,7 +11,7 @@ import (
 )
 
 func TestListAndRevokeShares(t *testing.T) {
-	db, handler := newAPITestServer(t)
+	db, handler := newShareAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)
 	root := createTestSpaceAndMount(t, db, "space-1", "mount-1", admin.ID, "read_write")
 	if err := os.WriteFile(filepath.Join(root, "report.pdf"), []byte("hello"), 0o600); err != nil {
@@ -62,6 +62,12 @@ func TestListAndRevokeShares(t *testing.T) {
 	}
 	if listed.Items[0].Status != "active" {
 		t.Fatalf("listed share status = %q, want active", listed.Items[0].Status)
+	}
+	if listed.Items[0].SpaceName != "Test Space" || listed.Items[0].MountName != "Docs" {
+		t.Fatalf("listed share location = %q / %q, want Test Space / Docs", listed.Items[0].SpaceName, listed.Items[0].MountName)
+	}
+	if listed.Items[0].CreatorDisplayName != "Admin" || listed.Items[0].CreatorEmail != "admin@example.test" {
+		t.Fatalf("listed share creator = %q / %q, want Admin / admin@example.test", listed.Items[0].CreatorDisplayName, listed.Items[0].CreatorEmail)
 	}
 
 	memberListRec := authorizedAPITestRequest(t, handler, "/api/v1/shares", memberCookie)

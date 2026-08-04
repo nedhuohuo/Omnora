@@ -21,15 +21,9 @@ type Server struct {
 	mux       *http.ServeMux
 	routesMu  sync.RWMutex
 	listeners *ListenerManager
-	network   networkPolicyStore
 }
 
-const (
-	// EntryLAN and EntryProxy identify the two network listeners a request
-	// can arrive on. Sessions are bound to one of these.
-	EntryLAN   = "lan_http"
-	EntryProxy = "proxy_https"
-)
+const EntryHTTP = "http"
 
 type Option func(*Server)
 
@@ -45,13 +39,13 @@ func WithListeners(listeners *ListenerManager) Option {
 //go:embed static/*
 var staticFiles embed.FS
 
-// New builds a server and returns the default (lan_http) entry handler.
+// New builds a server and returns its HTTP handler.
 func New(cfg config.Config, db *store.DB, opts ...Option) http.Handler {
-	return NewServer(cfg, db, opts...).HandlerFor(EntryLAN)
+	return NewServer(cfg, db, opts...).Handler()
 }
 
-// NewServer constructs the Server, hydrates policy from the database, and
-// registers routes. Entry-specific handlers are built with HandlerFor.
+// NewServer constructs the Server, hydrates route state from the database, and
+// registers routes.
 func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 	s := &Server{
 		cfg: cfg,
@@ -63,42 +57,14 @@ func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 	}
 	if db != nil {
 		_ = s.hydrateRouteGroups(context.Background())
-		s.hydrateNetworkPolicy(context.Background())
 	}
 	s.routes()
 	return s
 }
 
-// HandlerFor returns a fully wrapped handler that tags every request with its
-// network entry and applies that entry's gate.
-func (s *Server) HandlerFor(entry string) http.Handler {
-	return securityHeaders(requestID(s.entryGate(entry, s.mux)))
-}
-
-// entryGate tags the request with the network entry it arrived on, exempts
-// health probes, then applies the entry's access gate.
-func (s *Server) entryGate(entry string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r = r.WithContext(httpx.WithEntry(r.Context(), entry))
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		var allowed bool
-		switch entry {
-		case EntryLAN:
-			allowed = s.lanGate(w, r)
-		case EntryProxy:
-			allowed = s.proxyGate(w, r)
-		default:
-			httpx.WriteError(w, r, http.StatusForbidden, "unknown_network_entry", "unknown network entry")
-			return
-		}
-		if !allowed {
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// Handler returns the fully wrapped HTTP handler.
+func (s *Server) Handler() http.Handler {
+	return securityHeaders(requestID(s.mux))
 }
 
 func (s *Server) routes() {

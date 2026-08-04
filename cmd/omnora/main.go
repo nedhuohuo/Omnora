@@ -47,27 +47,12 @@ func main() {
 
 	listeners := server.NewListenerManager()
 	srv := server.NewServer(cfg, db, server.WithListeners(listeners))
-	lanHandler := srv.HandlerFor(server.EntryLAN)
-	proxyHandler := srv.HandlerFor(server.EntryProxy)
 
-	if err := listeners.Start(server.EntryLAN, cfg.HTTP.Addr, lanHandler); err != nil {
-		slog.Error("lan http listener failed to bind", "addr", cfg.HTTP.Addr, "error", err)
+	if err := listeners.Start(server.EntryHTTP, cfg.HTTP.Addr, srv.Handler()); err != nil {
+		slog.Error("http listener failed to bind", "addr", cfg.HTTP.Addr, "error", err)
 		os.Exit(1)
 	}
 	slog.Info("omnora backend listening", "addr", cfg.HTTP.Addr, "db_configured", cfg.Database.Path != "")
-
-	if enabled, bindAddr := srv.ProxyEntryState(); enabled {
-		if bindAddr == "" {
-			bindAddr = cfg.HTTP.ProxyHTTPSListen
-		}
-		// A proxy bind failure is non-fatal: the LAN entry remains the
-		// management surface and the admin can reconcile via the API.
-		if err := listeners.Start(server.EntryProxy, bindAddr, proxyHandler); err != nil {
-			slog.Error("proxy https listener failed to bind", "addr", bindAddr, "error", err)
-		} else {
-			slog.Info("proxy https listener started", "addr", bindAddr)
-		}
-	}
 
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

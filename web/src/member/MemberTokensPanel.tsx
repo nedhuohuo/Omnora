@@ -13,6 +13,7 @@ import { type MemberLocale, localeMessages } from './i18n';
 import type { MemberMount, MemberSpace } from './types';
 import { createClientId } from './clientId';
 import { copyText } from './clipboard';
+import { joinReadableLabels, readableLabel } from './displayLabels';
 
 // Canonical backend scopes (see internal/aitoken/types.go). The UI presents a
 // simplified "read" / "upload" choice; read expands to the full read-only set.
@@ -48,9 +49,12 @@ function tokenStatusLabel(status: string | undefined, text: LocaleText) {
 
 type BoundaryDraft = { key: string; spaceId: string; mountId: string; path: string };
 
-function boundarySummary(boundary: AiTokenBoundary) {
+function boundarySummary(boundary: AiTokenBoundary, spaces: MemberSpace[], mountsBySpace: Record<string, MemberMount[]>) {
   const path = boundary.path && boundary.path !== '.' ? boundary.path : '/';
-  return `${boundary.spaceId} / ${boundary.mountId} · ${path}`;
+  const spaceName = readableLabel(boundary.spaceName) || spaces.find((space) => space.id === boundary.spaceId)?.name;
+  const mountName = readableLabel(boundary.mountName) || mountsBySpace[boundary.spaceId]?.find((mount) => mount.id === boundary.mountId)?.name;
+  const location = joinReadableLabels([spaceName, mountName]);
+  return location ? `${location} · ${path}` : path;
 }
 
 export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) {
@@ -77,8 +81,21 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setError('');
     try {
       const [tokenResponse, spaceResponse] = await Promise.all([listAiTokens(), listSpaces()]);
-      setTokens(tokenResponse.items ?? []);
+      const nextTokens = tokenResponse.items ?? [];
+      setTokens(nextTokens);
       setSpaces(spaceResponse.items);
+      const tokenSpaceIds = Array.from(new Set(nextTokens.flatMap((token) => (token.boundaries ?? []).map((boundary) => boundary.spaceId)).filter(Boolean)));
+      if (tokenSpaceIds.length > 0) {
+        const mountEntries = await Promise.all(tokenSpaceIds.map(async (spaceId) => {
+          try {
+            const response = await listMounts(spaceId);
+            return [spaceId, response.items] as const;
+          } catch {
+            return [spaceId, []] as const;
+          }
+        }));
+        setMountsBySpace((current) => ({ ...current, ...Object.fromEntries(mountEntries) }));
+      }
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -188,9 +205,9 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
           <thead><tr><th>{text.tokenColumnName}</th><th>{text.tokenColumnScopes}</th><th>{text.tokenColumnBoundary}</th><th>{text.tokenColumnExpires}</th><th>{text.tokenColumnStatus}</th><th>{text.actions}</th></tr></thead>
           <tbody>{tokens.map((token) => (
             <tr key={token.id}>
-              <td>{token.name}<small>{token.publicId ?? token.id}</small></td>
+              <td>{token.name}</td>
               <td>{(token.scopes ?? []).join(', ') || '--'}</td>
-              <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => boundarySummary(boundary)).join('; ')}</td>
+              <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => boundarySummary(boundary, spaces, mountsBySpace)).join('; ')}</td>
               <td>{formatDate(token.expiresAt, locale, '--')}</td>
               <td>{tokenStatusLabel(token.status, text)}</td>
               <td><button className="member-table-action member-table-danger" type="button" onClick={() => setRevokeTarget(token)} disabled={loading}>{text.tokenRevoke}</button></td>

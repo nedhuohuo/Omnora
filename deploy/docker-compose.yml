@@ -18,10 +18,9 @@ services:
     cap_drop:
       - ALL
     ports:
-      # Direct LAN HTTP entry. Bind to a specific private host address in production.
-      - "${OMNORA_LAN_BIND:-127.0.0.1}:8080:8080"
-      # Trusted reverse-proxy backend entry. Keep this reachable only by the proxy.
-      - "${OMNORA_PROXY_BIND:-127.0.0.1}:8081:8081"
+      # Bind to 127.0.0.1 for local/reverse-proxy-only access, or a private/public
+      # host address when the service should be reachable directly.
+      - "${OMNORA_BIND:-127.0.0.1}:8080:8080"
     environment:
       TZ: "${TZ:-UTC}"
       UMASK: "${UMASK:-0027}"
@@ -34,12 +33,6 @@ services:
       OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:?set a TOTP encryption key}"
       OMNORA_MANAGED_STORAGE_DIR: /srv/omnora/managed
       OMNORA_PREDECLARED_MOUNT_ROOT: /mnt/omnora
-      OMNORA_LAN_HTTP_ENABLED: "${OMNORA_LAN_HTTP_ENABLED:-true}"
-      OMNORA_LAN_HTTP_LISTEN: "0.0.0.0:8080"
-      OMNORA_LAN_HTTP_ALLOWED_CIDRS: "${OMNORA_LAN_HTTP_ALLOWED_CIDRS:-192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,fc00::/7}"
-      OMNORA_PROXY_HTTPS_ENABLED: "${OMNORA_PROXY_HTTPS_ENABLED:-false}"
-      OMNORA_PROXY_HTTPS_LISTEN: "0.0.0.0:8081"
-      OMNORA_PROXY_HTTPS_TRUSTED_CIDRS: "${OMNORA_PROXY_HTTPS_TRUSTED_CIDRS:-127.0.0.1/32,::1/128}"
       OMNORA_ROUTE_ADMIN_WEB_ENABLED: "${OMNORA_ROUTE_ADMIN_WEB_ENABLED:-true}"
       OMNORA_ROUTE_MEMBER_WEB_ENABLED: "${OMNORA_ROUTE_MEMBER_WEB_ENABLED:-true}"
       OMNORA_ROUTE_SHARE_ENABLED: "${OMNORA_ROUTE_SHARE_ENABLED:-false}"

@@ -117,32 +117,17 @@ Linux 优先使用 `openat2` 与 `RESOLVE_BENEATH`、`RESOLVE_NO_MAGICLINKS` 等
 
 不可信主动内容不能与认证应用同源直接执行。详细响应头、隔离源和 sandbox 规则由安全模型定义。
 
-## 11. 网络入口
+## 11. HTTP 入口与路由组
 
-`lan_http` 与 `proxy_https` 是可以同时启用的独立入口配置，不是根据请求地址自动切换的全局模式。每个入口使用独立监听器或宿主发布端口；入口未启用、配置无效或请求不满足该入口信任条件时失败关闭。
+Omnora 只启动一个 HTTP 监听地址。是否允许局域网或公网访问由 Docker 端口发布、宿主防火墙、安全组和反向代理配置决定；应用不再提供独立的 LAN 或代理入口开关，也不根据来源 IP、私网地址、Host 或客户端提交的转发头自动判断信任。
 
-### 11.1 `lan_http`
+公网 Web、公开分享、远程 REST 和远程 MCP 应经 Lucky、极空间反向代理、Caddy、Nginx 或等价入口提供 HTTPS。推荐拓扑为：
 
-管理员可以显式启用局域网 HTTP 入口，并配置允许的 IPv4/IPv6 LAN CIDR。该入口：
+`公网 HTTPS:443 -> 反向代理 -> HTTP 127.0.0.1:8080 -> Omnora`
 
-- 只根据 socket 直接对端地址执行 LAN CIDR 准入，忽略 `Forwarded`、`X-Forwarded-*` 和 `X-Real-IP`。
-- 只用于可信局域网，界面持续显示不安全提示。
-- Cookie 使用 `HttpOnly` 与 `SameSite`，但无法使用 `Secure`。
-- 宿主端口只能绑定到明确的 loopback 或私网地址，不允许作为公网入口。
+反向代理后端端口应只对代理可达。公网 `80` 只执行同域名 `301`/`308` HTTPS 跳转，不能直接反向代理 Omnora；未匹配 Host 应拒绝。代理需要保留 Host，并支持流式响应、Range、WebSocket 和 MCP 长连接，不得缓冲完整文件。
 
-### 11.2 `proxy_https`
-
-公网 Web、公开分享、远程 REST 和远程 MCP 必须经 Lucky、极空间反向代理、Caddy、Nginx 或等价入口提供 HTTPS。管理员必须配置可信代理 CIDR、外部 HTTPS URL 和接受的转发头格式。只有 socket 直接对端属于可信代理 CIDR，且该代理声明外部协议为 HTTPS 时，应用才接受认证和文件访问；缺失、冲突或来自非可信来源的转发信息全部拒绝。
-
-Lucky 的推荐拓扑为：
-
-`公网 HTTPS:443 -> Lucky -> HTTP 127.0.0.1:<代理专用端口> -> Omnora proxy_https`
-
-Lucky 在公网终止 TLS 后使用同机 HTTP 后端是允许的，但代理专用端口必须只对 Lucky 可达。公网 `80` 只执行同域名 `301`/`308` HTTPS 跳转，不能直接反向代理 Omnora；未匹配 Host 应拒绝。代理需要保留 Host，传递可信外部协议与客户端地址，并支持流式响应、Range、WebSocket 和 MCP 长连接，不得缓冲完整文件。
-
-### 11.3 路由组
-
-管理端、成员 Web、分享、REST、MCP 和 OpenAPI 具有六个独立暴露开关。网络入口信任检查与路由组开关是正交条件，请求必须同时通过；启用分享不能连带启用其他路由组。默认 Compose 不自动配置 UPnP，不使用 Host 网络或 Docker Socket。
+管理端、成员 Web、分享、REST、MCP 和 OpenAPI 具有六个独立暴露开关。路由组开关只控制应用内路由是否可达；启用分享不能连带启用其他路由组。默认 Compose 不自动配置 UPnP，不使用 Host 网络或 Docker Socket。
 
 ## 12. 资源目标
 

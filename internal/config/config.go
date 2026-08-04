@@ -29,10 +29,6 @@ type StorageConfig struct {
 
 type HTTPConfig struct {
 	Addr string
-	// ProxyHTTPSListen is the default bind address for the proxy_https entry
-	// when its network_entries row does not set one. The entry sits behind an
-	// external HTTPS reverse proxy, so this is a plain HTTP listener.
-	ProxyHTTPSListen string
 }
 
 type DatabaseConfig struct {
@@ -52,8 +48,7 @@ type SecretConfig struct {
 func LoadEnv() (Config, error) {
 	cfg := Config{
 		HTTP: HTTPConfig{
-			Addr:             "127.0.0.1:8080",
-			ProxyHTTPSListen: "127.0.0.1:8081",
+			Addr: "127.0.0.1:8080",
 		},
 		Database: DatabaseConfig{
 			BusyTimeout: 5 * time.Second,
@@ -75,13 +70,6 @@ func LoadEnv() (Config, error) {
 	if _, _, err := net.SplitHostPort(cfg.HTTP.Addr); err != nil {
 		return Config{}, fmt.Errorf("OMNORA_HTTP_ADDR must be host:port: %w", err)
 	}
-	if value := strings.TrimSpace(os.Getenv("OMNORA_PROXY_HTTPS_LISTEN")); value != "" {
-		cfg.HTTP.ProxyHTTPSListen = value
-	}
-	if _, _, err := net.SplitHostPort(cfg.HTTP.ProxyHTTPSListen); err != nil {
-		return Config{}, fmt.Errorf("OMNORA_PROXY_HTTPS_LISTEN must be host:port: %w", err)
-	}
-
 	cfg.Database.Path = strings.TrimSpace(os.Getenv("OMNORA_DB_PATH"))
 	if value := strings.TrimSpace(os.Getenv("OMNORA_SQLITE_BUSY_TIMEOUT")); value != "" {
 		timeout, err := time.ParseDuration(value)

@@ -162,11 +162,6 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("PUT /api/v1/admin/spaces/{spaceId}/members/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putAdminSpaceMember)))
 	s.mux.Handle("DELETE /api/v1/admin/spaces/{spaceId}/members/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteAdminSpaceMember)))
 	s.mux.Handle("POST /api/v1/admin/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createAdminSpace)))
-	s.mux.Handle("POST /api/v1/admin/emergency-access", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createEmergencyAccess)))
-	s.mux.Handle("GET /api/v1/admin/emergency-access", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listEmergencyAccess)))
-	s.mux.Handle("POST /api/v1/admin/emergency-access/{id}/revoke", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeEmergencyAccess)))
-	s.mux.Handle("GET /api/v1/admin/network-entries", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listNetworkEntries)))
-	s.mux.Handle("PUT /api/v1/admin/network-entries", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putNetworkEntry)))
 	s.mux.Handle("GET /api/v1/admin/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminShares)))
 	s.mux.Handle("DELETE /api/v1/admin/shares/{shareId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAdminShare)))
 	s.mux.Handle("GET /api/v1/admin/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminAITokens)))
@@ -306,7 +301,6 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	issued, err := svc.CreateSession(r.Context(), identity.SessionRequest{
 		AccountID: account.ID,
 		TTL:       8 * time.Hour,
-		Entry:     httpx.Entry(r.Context()),
 	})
 	if err != nil {
 		s.writeIdentityError(w, r, err)
@@ -452,14 +446,12 @@ ORDER BY sp.kind, sp.name
 	defer rows.Close()
 
 	items := make([]map[string]string, 0)
-	seen := map[string]struct{}{}
 	for rows.Next() {
 		var id, kind, name, permission string
 		if err := rows.Scan(&id, &kind, &name, &permission); err != nil {
 			writeDBError(w, r, err)
 			return
 		}
-		seen[id] = struct{}{}
 		items = append(items, map[string]string{
 			"id": id, "type": kind, "name": name, "role": permission,
 		})
@@ -469,39 +461,6 @@ ORDER BY sp.kind, sp.name
 		return
 	}
 
-	emergencyRows, err := s.sqlDB().QueryContext(r.Context(), `
-SELECT sp.id, sp.kind, sp.name
-FROM emergency_access ea
-JOIN spaces sp ON sp.id = ea.target_space_id
-WHERE ea.admin_account_id = ?
-  AND ea.session_id = ?
-  AND ea.revoked_at IS NULL
-  AND ea.expires_at > ?
-  AND sp.status = 'active'
-ORDER BY sp.kind, sp.name
-`, session.AccountID, session.ID, time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	defer emergencyRows.Close()
-	for emergencyRows.Next() {
-		var id, kind, name string
-		if err := emergencyRows.Scan(&id, &kind, &name); err != nil {
-			writeDBError(w, r, err)
-			return
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		items = append(items, map[string]string{
-			"id": id, "type": kind, "name": name, "role": string(domain.SpacePermissionViewer),
-		})
-	}
-	if err := emergencyRows.Err(); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -1591,9 +1550,11 @@ func (s *Server) listAITokens(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
 SELECT t.id, t.public_id, t.name, t.scopes, t.created_at, t.expires_at,
        COALESCE(t.last_used_at, ''), COALESCE(t.revoked_at, ''),
-       COALESCE(group_concat(b.space_id || char(31) || b.mount_id || char(31) || b.relative_path, char(30)), '')
+       COALESCE(group_concat(b.space_id || char(31) || COALESCE(sp.name, '') || char(31) || b.mount_id || char(31) || COALESCE(m.display_name, '') || char(31) || b.relative_path, char(30)), '')
 FROM ai_tokens t
 LEFT JOIN ai_token_boundaries b ON b.token_id = t.id
+LEFT JOIN spaces sp ON sp.id = b.space_id
+LEFT JOIN mounts m ON m.id = b.mount_id
 WHERE t.account_id = ?
 GROUP BY t.id
 ORDER BY t.created_at DESC, t.id DESC
@@ -1828,17 +1789,6 @@ func (s *Server) requireSession(r *http.Request) (identity.Session, error) {
 	if err != nil {
 		return identity.Session{}, err
 	}
-	// Entry isolation: a session issued on one network entry is rejected on
-	// the other. This is what actually prevents a LAN session being reused
-	// over the proxy origin (Secure alone is insufficient — a non-Secure LAN
-	// cookie is still sent over an HTTPS origin).
-	entry := httpx.Entry(r.Context())
-	if entry == "" {
-		entry = identity.DefaultSessionEntry
-	}
-	if session.Entry != entry {
-		return identity.Session{}, identity.ErrSessionInvalid
-	}
 	return session, nil
 }
 
@@ -1896,30 +1846,7 @@ WHERE sm.account_id = ? AND sm.space_id = ? AND sp.status = 'active'
 	if err == nil && count == 1 {
 		return true
 	}
-	return s.hasEmergencyViewerAccess(r, accountID, spaceID)
-}
-
-// hasEmergencyViewerAccess grants temporary viewer access only for the bound
-// interactive admin browser session. REST/MCP/AI Token callers without that
-// session cookie cannot consume emergency grants.
-func (s *Server) hasEmergencyViewerAccess(r *http.Request, accountID, spaceID string) bool {
-	session, err := s.requireSession(r)
-	if err != nil || session.AccountID != accountID {
-		return false
-	}
-	var count int
-	err = s.sqlDB().QueryRowContext(r.Context(), `
-SELECT COUNT(1)
-FROM emergency_access ea
-JOIN spaces sp ON sp.id = ea.target_space_id
-WHERE ea.admin_account_id = ?
-  AND ea.target_space_id = ?
-  AND ea.session_id = ?
-  AND ea.revoked_at IS NULL
-  AND ea.expires_at > ?
-  AND sp.status = 'active'
-`, accountID, spaceID, session.ID, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&count)
-	return err == nil && count == 1
+	return false
 }
 
 type accountTOTP struct {
@@ -2327,10 +2254,12 @@ func parseBoundaryList(value string) []map[string]string {
 	items := make([]map[string]string, 0, len(rows))
 	for _, row := range rows {
 		parts := strings.Split(row, string(rune(31)))
-		if len(parts) != 3 {
-			continue
+		switch len(parts) {
+		case 3:
+			items = append(items, map[string]string{"spaceId": parts[0], "mountId": parts[1], "path": parts[2]})
+		case 5:
+			items = append(items, map[string]string{"spaceId": parts[0], "spaceName": parts[1], "mountId": parts[2], "mountName": parts[3], "path": parts[4]})
 		}
-		items = append(items, map[string]string{"spaceId": parts[0], "mountId": parts[1], "path": parts[2]})
 	}
 	return items
 }
@@ -2391,11 +2320,9 @@ func parseIntDefault(value string, fallback int) int {
 	return parsed
 }
 
-// isSecureRequest reports whether the client connection is considered HTTPS.
-// The proxy_https entry is served as plain HTTP behind a TLS-terminating
-// reverse proxy, so its requests are treated as secure for cookie purposes.
+// isSecureRequest reports whether the client connection is HTTPS.
 func isSecureRequest(r *http.Request) bool {
-	return r.TLS != nil || httpx.Entry(r.Context()) == EntryProxy
+	return r.TLS != nil
 }
 
 func sessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {

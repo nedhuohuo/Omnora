@@ -156,7 +156,7 @@ func (s *Server) routeGroupDTO(group domain.RouteGroup) routeGroupDTO {
 	if exposed {
 		tone = "ok"
 		risk = "enabled by explicit route group"
-		entry = "lan_http"
+		entry = EntryHTTP
 	}
 	return routeGroupDTO{
 		ID: string(group), Label: labels[group], Exposed: exposed, Entry: entry, Risk: risk, Tone: tone,

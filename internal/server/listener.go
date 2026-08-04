@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// BindController owns the process HTTP listener so admin network-entry updates
-// can rebind lan_http without requiring a full process restart.
+// BindController owns a process HTTP listener so callers can rebind it without
+// requiring a full process restart.
 type BindController struct {
 	mu       sync.Mutex
 	addr     string
@@ -162,8 +162,8 @@ func (c *BindController) bind(addr string, handler http.Handler) error {
 	return nil
 }
 
-// ListenerManager owns one BindController per named network entry so entries
-// can be started, stopped, or rebound independently at runtime.
+// ListenerManager owns one BindController per named listener so listeners can
+// be started, stopped, or rebound independently at runtime.
 type ListenerManager struct {
 	mu    sync.Mutex
 	ctrls map[string]*BindController

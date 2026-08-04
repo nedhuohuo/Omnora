@@ -24,8 +24,6 @@ import {
 import { type MemberLocale, localeMessages } from './i18n';
 import {
   AdminBackupsPanel,
-  AdminEmergencyPanel,
-  AdminNetworkPanel,
   AdminOverviewPanel,
   AdminShareGovernancePanel,
   AdminSpacesPanel,
@@ -39,8 +37,6 @@ export type AdminTab =
   | 'spaces'
   | 'mounts'
   | 'index-jobs'
-  | 'emergency'
-  | 'network'
   | 'route-groups'
   | 'share-governance'
   | 'token-governance'
@@ -391,8 +387,6 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
   if (tab === 'overview') return <AdminOverviewPanel locale={locale} />;
   if (tab === 'users') return <AdminUsersPanel locale={locale} />;
   if (tab === 'spaces') return <AdminSpacesPanel locale={locale} />;
-  if (tab === 'emergency') return <AdminEmergencyPanel locale={locale} />;
-  if (tab === 'network') return <AdminNetworkPanel locale={locale} />;
   if (tab === 'share-governance') return <AdminShareGovernancePanel locale={locale} />;
   if (tab === 'token-governance') return <AdminTokenGovernancePanel locale={locale} />;
   if (tab === 'backups') return <AdminBackupsPanel locale={locale} />;

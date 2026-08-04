@@ -31,8 +31,7 @@ The current Aliyun test deployment intentionally exposes Member/Admin Web on the
 
 | Entry | Bind | Purpose |
 | --- | --- | --- |
-| LAN HTTP `8080` | `0.0.0.0` | External browser access for testers |
-| Proxy HTTPS `8081` | `127.0.0.1` | Local-only; not for public direct access |
+| HTTP `8080` | `0.0.0.0` | External browser access for testers |
 
 External URL:
 
@@ -43,23 +42,21 @@ http://120.26.88.7:8080
 Matching env values on the host (`deploy/aliyun-test.env`):
 
 ```text
-OMNORA_LAN_BIND=0.0.0.0
-OMNORA_PROXY_BIND=127.0.0.1
-OMNORA_LAN_HTTP_ALLOWED_CIDRS=0.0.0.0/0,::/0
+OMNORA_BIND=0.0.0.0
 ```
 
-This is a disposable test-box choice, not a production security model. Keep Share and MCP route groups disabled unless a specific test requires them. `OMNORA_DEPLOY_ENV=aliyun-test` is an environment label, not a security boundary. The actual boundary remains the bind address, CIDR checks, route-group switches, Aliyun security group, host firewall, and any reverse-proxy policy.
+This is a disposable test-box choice, not a production security model. Keep Share and MCP route groups disabled unless a specific test requires them. `OMNORA_DEPLOY_ENV=aliyun-test` is an environment label, not a security boundary. The actual boundary remains the Docker bind address, route-group switches, Aliyun security group, host firewall, and any reverse-proxy policy.
 
 If Clash/Meta TUN is enabled locally and SSH to the host fails, add `120.26.88.7/32` to the `DIRECT` rules or temporarily disable that TUN route. The operator note records this as a required connectivity condition for SSH operations.
 
-Optional SSH tunnel (only when you deliberately switch `OMNORA_LAN_BIND` back to `127.0.0.1`):
+Optional SSH tunnel (only when you deliberately switch `OMNORA_BIND` back to `127.0.0.1`):
 
 ```bash
 ssh aliyunssh -L 18080:127.0.0.1:8080
 # then open http://127.0.0.1:18080
 ```
 
-If remote HTTPS browser access is required later, put a TLS reverse proxy in front of `127.0.0.1:8081`, keep `OMNORA_PROXY_HTTPS_ENABLED=true`, configure trusted proxy CIDRs explicitly, and keep public route groups disabled unless a specific test requires them.
+If remote HTTPS browser access is required later, put a TLS reverse proxy in front of `127.0.0.1:8080` and keep public route groups disabled unless a specific test requires them.
 
 ## Deployment Files
 

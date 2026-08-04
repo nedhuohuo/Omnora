@@ -204,22 +204,17 @@ Access Policy 统一授权
 
 ## 9. 运行入口
 
-`lan_http` 和 `proxy_https` 分别创建独立的 `http.Server` 与监听地址，但共享同一组应用服务。
+Omnora 创建单一 HTTP 服务和监听地址。局域网或公网访问范围由 Docker 端口发布、宿主防火墙、安全组和反向代理决定，应用内不维护额外 LAN 或代理入口配置。
 
-- `lan_http` 只检查 socket 直接对端是否位于允许的 LAN CIDR，并忽略全部转发头。
-- `proxy_https` 先验证直接对端属于可信代理 CIDR，再按显式格式解析外部 HTTPS 和客户端地址。
-- 两个入口不能依靠中间件猜测请求来源，不能使用宽泛的全局 `trust proxy`。
-- 两个入口使用不同会话 audience，局域网 HTTP 会话不能用于代理 HTTPS 入口。
-- 两个入口使用不同 Cookie 名称；`proxy_https` 使用带 `__Host-` 前缀、`Secure`、Host-only 和 `Path=/` 的 Cookie，`lan_http` 使用不能被代理入口接受的独立 Cookie。
+- 系统不能依靠中间件猜测请求来源，不能使用宽泛的全局 `trust proxy`。
 - 管理端、成员 Web、分享、REST、MCP 和 OpenAPI 六个路由组分别注册和控制。
-- 缺失、冲突或多义的可信代理信息失败关闭。
 
-两个 `http.Server` 都必须设置有限的 `ReadHeaderTimeout`、`IdleTimeout`、`MaxHeaderBytes` 和并发连接上限。每个路由单独设置请求体、结果数、并发和流量上限。流式上传、下载和 MCP 长连接不使用会误杀合法流的短全局 `ReadTimeout` 或 `WriteTimeout`，改用路由上下文、固定缓冲、字节上限、空闲超时和心跳保护。
+HTTP 服务必须设置有限的 `ReadHeaderTimeout`、`IdleTimeout`、`MaxHeaderBytes` 和并发连接上限。每个路由单独设置请求体、结果数、并发和流量上限。流式上传、下载和 MCP 长连接不使用会误杀合法流的短全局 `ReadTimeout` 或 `WriteTimeout`，改用路由上下文、固定缓冲、字节上限、空闲超时和心跳保护。
 
-Lucky 的参考链路保持为：
+反向代理参考链路保持为：
 
 ```text
-公网 HTTPS:443 -> Lucky -> HTTP 127.0.0.1:<代理专用端口> -> proxy_https
+公网 HTTPS:443 -> 反向代理 -> HTTP 127.0.0.1:8080 -> Omnora
 ```
 
 公网 `80` 只执行 HTTPS 跳转。代理专用端口只能由 Lucky 访问，不能公开发布。

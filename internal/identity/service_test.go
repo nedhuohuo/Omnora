@@ -311,37 +311,21 @@ func TestSessionEntryDefaultAndRoundTrip(t *testing.T) {
 		t.Fatalf("CreateAccount() error = %v", err)
 	}
 
-	// An empty entry is normalized to the LAN entry so sessions created
-	// without an explicit entry still work on the default listener.
-	lan, err := svc.CreateSession(ctx, SessionRequest{AccountID: created.Account.ID, TTL: time.Hour})
+	// An empty entry is normalized to the default HTTP entry so sessions
+	// created without an explicit entry remain compatible with the schema.
+	issued, err := svc.CreateSession(ctx, SessionRequest{AccountID: created.Account.ID, TTL: time.Hour})
 	if err != nil {
 		t.Fatalf("CreateSession() default error = %v", err)
 	}
-	if lan.Session.Entry != DefaultSessionEntry {
-		t.Fatalf("default session entry = %q, want %q", lan.Session.Entry, DefaultSessionEntry)
+	if issued.Session.Entry != DefaultSessionEntry {
+		t.Fatalf("default session entry = %q, want %q", issued.Session.Entry, DefaultSessionEntry)
 	}
-	verified, err := svc.VerifySession(ctx, lan.Token)
+	verified, err := svc.VerifySession(ctx, issued.Token)
 	if err != nil {
 		t.Fatalf("VerifySession() error = %v", err)
 	}
 	if verified.Entry != DefaultSessionEntry {
 		t.Fatalf("verified entry = %q, want %q", verified.Entry, DefaultSessionEntry)
-	}
-
-	// An explicit proxy entry is preserved end to end.
-	proxy, err := svc.CreateSession(ctx, SessionRequest{AccountID: created.Account.ID, TTL: time.Hour, Entry: "proxy_https"})
-	if err != nil {
-		t.Fatalf("CreateSession() proxy error = %v", err)
-	}
-	if proxy.Session.Entry != "proxy_https" {
-		t.Fatalf("proxy session entry = %q, want proxy_https", proxy.Session.Entry)
-	}
-	verifiedProxy, err := svc.VerifySession(ctx, proxy.Token)
-	if err != nil {
-		t.Fatalf("VerifySession() proxy error = %v", err)
-	}
-	if verifiedProxy.Entry != "proxy_https" {
-		t.Fatalf("verified proxy entry = %q, want proxy_https", verifiedProxy.Entry)
 	}
 }
 

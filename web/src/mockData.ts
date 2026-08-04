@@ -1,9 +1,9 @@
 import type { AdminRisk, AiToken, AppBootstrap, AuditRow, FileItem, Mount, RouteGroup, ShareItem, Tone, Transfer } from './types';
 
 export const routeGroups: RouteGroup[] = [
-  { id: 'member_web', label: 'Member Web', exposed: true, entry: 'both', risk: 'LAN + trusted proxy', tone: 'ok' },
-  { id: 'admin_web', label: 'Admin Web', exposed: true, entry: 'lan_http', risk: 'not public', tone: 'warn' },
-  { id: 'share_web', label: 'Share', exposed: true, entry: 'proxy_https', risk: 'fragment-only secret', tone: 'ok' },
+  { id: 'member_web', label: 'Member Web', exposed: true, entry: 'http', risk: 'enabled by explicit route group', tone: 'ok' },
+  { id: 'admin_web', label: 'Admin Web', exposed: true, entry: 'http', risk: 'enabled by explicit route group', tone: 'warn' },
+  { id: 'share_web', label: 'Share', exposed: true, entry: 'http', risk: 'fragment-only secret', tone: 'ok' },
   { id: 'rest', label: 'REST', exposed: false, entry: 'disabled', risk: 'closed', tone: 'muted' },
   { id: 'mcp', label: 'MCP', exposed: false, entry: 'disabled', risk: 'closed', tone: 'muted' },
   { id: 'openapi', label: 'OpenAPI', exposed: false, entry: 'disabled', risk: 'closed', tone: 'muted' },

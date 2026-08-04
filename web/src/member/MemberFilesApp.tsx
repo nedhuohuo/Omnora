@@ -30,6 +30,7 @@ import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, t
 import { resumedUploadProgress, uploadStorageKey } from './uploadQueue';
 import { createClientId } from './clientId';
 import { useLocale } from './useLocale';
+import { readableLabel } from './displayLabels';
 import './member-files.css';
 
 type MemberTab = 'files' | 'shares' | 'tokens' | 'account';
@@ -576,7 +577,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     modifiedAt: item.modifiedAt ?? '',
     readOnly: mounts.find((mount) => mount.id === item.mountId)?.mode === 'read-only',
     previewKind: item.previewKind ?? 'unknown',
-    mountName: mounts.find((mount) => mount.id === item.mountId)?.name ?? item.mountId,
+    mountName: readableLabel(mounts.find((mount) => mount.id === item.mountId)?.name),
   }));
   const crumbItems = breadcrumbs(relativePath);
   const previewSrc = preview ? previewURL(activeSpaceId, preview.mountId, preview.relativePath) : '';
@@ -600,8 +601,6 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             <button className={`member-nav ${activeTab === 'spaces' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('spaces')}>{text.adminSpaces}</button>
             <button className={`member-nav ${activeTab === 'mounts' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('mounts')}>{text.adminMounts}</button>
             <button className={`member-nav ${activeTab === 'index-jobs' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('index-jobs')}>{text.adminIndexJobs}</button>
-            <button className={`member-nav ${activeTab === 'emergency' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('emergency')}>{text.adminEmergency}</button>
-            <button className={`member-nav ${activeTab === 'network' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('network')}>{text.adminNetwork}</button>
             <button className={`member-nav ${activeTab === 'route-groups' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('route-groups')}>{text.adminRouteGroups}</button>
             <button className={`member-nav ${activeTab === 'share-governance' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('share-governance')}>{text.adminShareGovernance}</button>
             <button className={`member-nav ${activeTab === 'token-governance' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('token-governance')}>{text.adminTokenGovernance}</button>
@@ -632,7 +631,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
               <thead><tr><th>{text.name}</th><th>{text.size}</th><th>{text.modified}</th><th>{text.actions}</th></tr></thead>
               <tbody>{visibleEntries.map((entry) => (
                 <tr key={`${entry.kind}-${entry.mountId ?? activeMountId}-${entry.relativePath}`}>
-                  <td><div className="member-file-name"><span className={`member-file-icon ${entry.kind}`}>{entry.kind === 'dir' ? 'DIR' : entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{entry.name}</button> : canPreview(entry.previewKind) ? <button type="button" className="member-file-preview" onClick={() => openPreview(entry)}>{entry.name}</button> : <span>{entry.name}</span>}{searchResults !== null && <small>{entry.mountName}</small>}</div></td>
+                  <td><div className="member-file-name"><span className={`member-file-icon ${entry.kind}`}>{entry.kind === 'dir' ? 'DIR' : entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{entry.name}</button> : canPreview(entry.previewKind) ? <button type="button" className="member-file-preview" onClick={() => openPreview(entry)}>{entry.name}</button> : <span>{entry.name}</span>}{searchResults !== null && entry.mountName && <small>{entry.mountName}</small>}</div></td>
                   <td>{entry.kind === 'dir' ? '--' : formatBytes(entry.size, locale)}</td>
                   <td>{formatDate(entry.modifiedAt, locale)}</td>
                   <td><div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{text.open}</button> : <>{canPreview(entry.previewKind) && <button type="button" onClick={() => openPreview(entry)}>{text.preview}</button>}<a href={downloadURL(activeSpaceId, entry.mountId ?? activeMountId, entry.relativePath)}>{text.download}</a></>}{canManageShares && searchResults === null && <button type="button" onClick={() => openShareForEntry(entry)}>{text.shareAction}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openRename(entry)}>{text.rename}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openDelete(entry)}>{text.deleteFile}</button>}</div></td>
@@ -645,7 +644,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
                 <span className={`member-file-icon ${entry.kind}`}>{entry.kind === 'dir' ? 'DIR' : entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>
                 {entry.kind === 'dir' || canPreview(entry.previewKind) ? <button type="button" className={entry.kind === 'file' ? 'member-file-preview' : undefined} onClick={() => entry.kind === 'dir' ? openDirectory(entry.relativePath, entry.mountId) : openPreview(entry)}><strong>{entry.name}</strong></button> : <strong>{entry.name}</strong>}
                 <small>{entry.kind === 'dir' ? '--' : formatBytes(entry.size, locale)}</small>
-                {searchResults !== null && <small>{entry.mountName}</small>}
+                {searchResults !== null && entry.mountName && <small>{entry.mountName}</small>}
                 <div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{text.open}</button> : <>{canPreview(entry.previewKind) && <button type="button" onClick={() => openPreview(entry)}>{text.preview}</button>}<a className="member-grid-download" href={downloadURL(activeSpaceId, entry.mountId ?? activeMountId, entry.relativePath)}>{text.download}</a></>}{canManageShares && searchResults === null && <button type="button" onClick={() => openShareForEntry(entry)}>{text.shareAction}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openRename(entry)}>{text.rename}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openDelete(entry)}>{text.deleteFile}</button>}</div>
               </article>
             ))}</div>

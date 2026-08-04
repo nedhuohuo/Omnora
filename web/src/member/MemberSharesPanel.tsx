@@ -14,6 +14,7 @@ import {
 import { type MemberLocale, localeMessages } from './i18n';
 import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, type MemberSpace } from './types';
 import { copyText } from './clipboard';
+import { joinReadableLabels } from './displayLabels';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
@@ -55,6 +56,10 @@ function normalizeSharePath(path: string) {
 function displaySharePath(path: string, text: LocaleText) {
   const normalized = normalizeSharePath(path);
   return normalized === '.' ? text.shareBrowseRoot : normalized;
+}
+
+function shareLocationLabel(share: SharePayload) {
+  return joinReadableLabels([share.spaceName, share.mountName]);
 }
 
 function browseCrumbs(path: string) {
@@ -382,16 +387,19 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
       {loading ? <div className="member-loading">{text.loading}</div> : shares.length === 0 ? <div className="member-empty">{text.shareListEmpty}</div> : (
         <table className="member-admin-table">
           <thead><tr><th>{text.shareColumnTarget}</th><th>{text.shareColumnStatus}</th><th>{text.shareColumnExpires}</th><th>{text.shareColumnVisits}</th><th>{text.shareColumnDownloads}</th><th>{text.actions}</th></tr></thead>
-          <tbody>{shares.map((share) => (
-            <tr key={share.id}>
-              <td><strong>{share.relativePath}</strong><small>{share.spaceId} · {share.mountId}</small></td>
-              <td>{shareStatusLabel(share.status, text)}</td>
-              <td>{formatDate(share.expiresAt, locale, text)}</td>
-              <td>{share.usedVisits ?? 0}{share.maxVisits ? ` / ${share.maxVisits}` : ''}</td>
-              <td>{share.usedDownloads ?? 0}{share.maxDownloads ? ` / ${share.maxDownloads}` : ''}</td>
-              <td><button className="member-table-action member-table-danger" type="button" onClick={() => setRevokeTarget(share)} disabled={loading}>{text.shareRevoke}</button></td>
-            </tr>
-          ))}</tbody>
+          <tbody>{shares.map((share) => {
+            const location = shareLocationLabel(share);
+            return (
+              <tr key={share.id}>
+                <td><strong>{displaySharePath(share.relativePath, text)}</strong>{location && <small>{location}</small>}</td>
+                <td>{shareStatusLabel(share.status, text)}</td>
+                <td>{formatDate(share.expiresAt, locale, text)}</td>
+                <td>{share.usedVisits ?? 0}{share.maxVisits ? ` / ${share.maxVisits}` : ''}</td>
+                <td>{share.usedDownloads ?? 0}{share.maxDownloads ? ` / ${share.maxDownloads}` : ''}</td>
+                <td><button className="member-table-action member-table-danger" type="button" onClick={() => setRevokeTarget(share)} disabled={loading}>{text.shareRevoke}</button></td>
+              </tr>
+            );
+          })}</tbody>
         </table>
       )}
 
