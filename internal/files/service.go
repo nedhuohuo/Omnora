@@ -37,6 +37,9 @@ var (
 	ErrInvalidMount     = errors.New("invalid mount")
 	ErrInvalidMountMode = errors.New("invalid mount mode")
 	ErrNotDirectory     = errors.New("not a directory")
+	ErrNotFile          = errors.New("not a regular file")
+	ErrNotShareable     = errors.New("not a shareable file or directory")
+	ErrSymlinkPath      = errors.New("symbolic links are not allowed")
 )
 
 type Mount struct {
@@ -72,29 +75,28 @@ func (Service) ListDirectory(mount Mount, relativePath string) (DirectoryListing
 		return DirectoryListing{}, err
 	}
 
-	readOnly, err := mountReadOnly(mount.Mode)
+	root, readOnly, err := openMountRoot(mount)
 	if err != nil {
 		return DirectoryListing{}, err
 	}
-
-	root := strings.TrimSpace(mount.Root)
-	if root == "" {
-		return DirectoryListing{}, ErrInvalidMount
+	defer root.Close()
+	if err := rejectSymlinkPath(root, cleaned); err != nil {
+		return DirectoryListing{}, err
 	}
-
-	directoryPath := filepath.Join(root, filepath.FromSlash(cleaned))
-	info, err := os.Lstat(directoryPath)
+	directory, err := root.Open(cleaned)
+	if err != nil {
+		return DirectoryListing{}, err
+	}
+	defer directory.Close()
+	info, err := directory.Stat()
 	if err != nil {
 		return DirectoryListing{}, err
 	}
 	if !info.IsDir() {
 		return DirectoryListing{}, fmt.Errorf("%w: %s", ErrNotDirectory, cleaned)
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return DirectoryListing{}, fmt.Errorf("%w: %s", ErrNotDirectory, cleaned)
-	}
 
-	dirEntries, err := os.ReadDir(directoryPath)
+	dirEntries, err := directory.ReadDir(-1)
 	if err != nil {
 		return DirectoryListing{}, err
 	}
@@ -107,8 +109,7 @@ func (Service) ListDirectory(mount Mount, relativePath string) (DirectoryListing
 			continue
 		}
 
-		entryPath := filepath.Join(directoryPath, name)
-		entryInfo, err := os.Lstat(entryPath)
+		entryInfo, err := root.Lstat(entryRelativePath)
 		if err != nil {
 			return DirectoryListing{}, err
 		}
@@ -149,6 +150,169 @@ func (Service) ListDirectory(mount Mount, relativePath string) (DirectoryListing
 		ReadOnly:     readOnly,
 		Entries:      entries,
 	}, nil
+}
+
+func (Service) CreateDirectory(mount Mount, parentPath, name string) (string, error) {
+	parent, err := storage.CleanRelativePath(parentPath)
+	if err != nil {
+		return "", err
+	}
+	if err := validateDirectoryName(name); err != nil {
+		return "", err
+	}
+	root, readOnly, err := openMountRoot(mount)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	if readOnly {
+		return "", ErrInvalidMountMode
+	}
+	if err := rejectSymlinkPath(root, parent); err != nil {
+		return "", err
+	}
+	if info, err := root.Stat(parent); err != nil || !info.IsDir() {
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: %s", ErrNotDirectory, parent)
+	}
+	created := joinRelativePath(parent, name)
+	if err := root.Mkdir(created, 0o755); err != nil {
+		return "", err
+	}
+	return created, nil
+}
+
+func (Service) OpenFile(mount Mount, relativePath string) (*os.File, os.FileInfo, error) {
+	cleaned, err := storage.CleanRelativePath(relativePath)
+	if err != nil || cleaned == "." {
+		return nil, nil, ErrNotFile
+	}
+	root, _, err := openMountRoot(mount)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer root.Close()
+	if err := rejectSymlinkPath(root, cleaned); err != nil {
+		return nil, nil, err
+	}
+	file, err := root.Open(cleaned)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		file.Close()
+		return nil, nil, ErrNotFile
+	}
+	return file, info, nil
+}
+
+func (Service) ValidateWritableTarget(mount Mount, relativePath string) error {
+	cleaned, err := storage.CleanRelativePath(relativePath)
+	if err != nil || cleaned == "." {
+		return ErrNotFile
+	}
+	root, readOnly, err := openMountRoot(mount)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if readOnly {
+		return ErrInvalidMountMode
+	}
+	parent := path.Dir(cleaned)
+	if err := rejectSymlinkPath(root, parent); err != nil {
+		return err
+	}
+	info, err := root.Stat(parent)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w: %s", ErrNotDirectory, parent)
+	}
+	if info, err := root.Lstat(cleaned); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return ErrSymlinkPath
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (Service) ValidateShareTarget(mount Mount, relativePath string) (string, error) {
+	cleaned, err := storage.CleanRelativePath(relativePath)
+	if err != nil {
+		return "", err
+	}
+	root, _, err := openMountRoot(mount)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	if err := rejectSymlinkPath(root, cleaned); err != nil {
+		return "", err
+	}
+	info, err := root.Lstat(cleaned)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return "", ErrNotShareable
+	}
+	return cleaned, nil
+}
+
+func openMountRoot(mount Mount) (*os.Root, bool, error) {
+	readOnly, err := mountReadOnly(mount.Mode)
+	if err != nil {
+		return nil, false, err
+	}
+	rootPath := strings.TrimSpace(mount.Root)
+	if rootPath == "" {
+		return nil, false, ErrInvalidMount
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrInvalidMount, err)
+	}
+	return root, readOnly, nil
+}
+
+func rejectSymlinkPath(root *os.Root, relativePath string) error {
+	if relativePath == "." {
+		return nil
+	}
+	parts := strings.Split(relativePath, "/")
+	for index := range parts {
+		current := strings.Join(parts[:index+1], "/")
+		info, err := root.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: %s", ErrSymlinkPath, current)
+		}
+	}
+	return nil
+}
+
+func validateDirectoryName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
+		return errors.New("invalid directory name")
+	}
+	for _, r := range name {
+		if r == 0 || r < 0x20 || r == 0x7f {
+			return errors.New("invalid directory name")
+		}
+	}
+	return nil
 }
 
 func mountReadOnly(mode domain.MountMode) (bool, error) {

@@ -130,6 +130,7 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("GET /api/v1/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listSpaces)))
 	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMounts)))
 	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts/{mountId}/children", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listChildren)))
+	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/directories", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createDirectory)))
 	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts/{mountId}/download", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.downloadFile)))
 	s.mux.Handle("GET /api/v1/spaces/{spaceId}/search", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.searchSpace)))
 	s.mux.Handle("POST /api/v1/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createShare)))
@@ -496,18 +497,17 @@ func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", "download path is invalid")
 		return
 	}
-	filePath := filepath.Join(mount.Root, filepath.FromSlash(relativePath))
-	metadata, err := transfer.StatDownloadMetadata(filePath)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "file was not found")
-		return
-	}
-	file, err := os.Open(filePath)
+	file, info, err := files.NewService().OpenFile(files.Mount{Root: mount.Root, Mode: mount.Mode}, relativePath)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "file was not found")
 		return
 	}
 	defer file.Close()
+	metadata, err := transfer.DownloadMetadataFromFileInfo(info)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "file was not found")
+		return
+	}
 
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("ETag", metadata.ETag)
@@ -530,6 +530,51 @@ func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeContent(w, r, filepath.Base(relativePath), metadata.ModTime, file)
+}
+
+func (s *Server) createDirectory(w http.ResponseWriter, r *http.Request) {
+	session, err := s.requireSession(r)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	spaceID := r.PathValue("spaceId")
+	mountID := r.PathValue("mountId")
+	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "creating a directory requires editor permission")
+		return
+	}
+	var req struct {
+		ParentPath string `json:"parentPath"`
+		Name       string `json:"name"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
+	if errors.Is(err, sql.ErrNoRows) {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "mount was not found")
+		return
+	}
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if mount.Mode != domain.MountModeReadWrite {
+		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
+		return
+	}
+	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
+		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
+		return
+	}
+	created, err := files.NewService().CreateDirectory(files.Mount{Root: mount.Root, Mode: mount.Mode}, req.ParentPath, req.Name)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
+		return
+	}
+	_ = s.recordAudit(r, "directory_create", "directory", created, "{}")
+	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"relativePath": created})
 }
 
 func (s *Server) searchSpace(w http.ResponseWriter, r *http.Request) {
@@ -590,6 +635,10 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	targetPath := pathJoinForUpload(req.ParentPath, req.FileName)
+	if err := files.NewService().ValidateWritableTarget(files.Mount{Root: mount.Root, Mode: mount.Mode}, targetPath); err != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
+		return
+	}
 	service, err := transfer.NewService(transfer.Options{
 		MountRoot: mount.Root,
 		TempRoot:  filepath.Join(mount.Root, ".omnora", "tmp", "uploads"),
@@ -598,6 +647,7 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
 		return
 	}
+	defer service.Close()
 	upload, err := service.CreateUploadSession(transfer.CreateUploadSessionRequest{
 		TargetPath:   targetPath,
 		ExpectedSize: req.Size,
@@ -638,6 +688,7 @@ func (s *Server) getUpload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
 		return
 	}
+	defer service.Close()
 	resumed, err := service.ResumeUploadSession(upload.ID)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
@@ -678,6 +729,7 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
 		return
 	}
+	defer service.Close()
 	part, err := service.WritePart(upload.ID, partNumber, r.Body)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
@@ -710,6 +762,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
 		return
 	}
+	defer service.Close()
 	completed, err := service.CompleteUpload(upload.ID)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
@@ -737,6 +790,7 @@ func (s *Server) cancelUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if service, err := transfer.NewService(transfer.Options{MountRoot: mount.Root, TempRoot: upload.TempDir}); err == nil {
 		_ = service.CancelUpload(upload.ID)
+		_ = service.Close()
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, _ = s.sqlDB().ExecContext(r.Context(), "UPDATE upload_sessions SET status = 'canceled', canceled_at = ? WHERE id = ?", now, upload.ID)
@@ -2048,26 +2102,12 @@ func (s *Server) validateShareTarget(r *http.Request, mount mountForListing, req
 	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
 		return "", err
 	}
-	relativePath, err := storage.CleanRelativePath(requestedPath)
+	relativePath, err := files.NewService().ValidateShareTarget(files.Mount{Root: mount.Root, Mode: mount.Mode}, requestedPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("share target was not found")
+	}
 	if err != nil {
 		return "", err
-	}
-	targetPath := mount.Root
-	if relativePath != "." {
-		targetPath = filepath.Join(mount.Root, filepath.FromSlash(relativePath))
-	}
-	info, err := os.Lstat(targetPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("share target was not found")
-		}
-		return "", err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("share target must not be a symlink")
-	}
-	if !info.IsDir() && !info.Mode().IsRegular() {
-		return "", fmt.Errorf("share target must be a file or directory")
 	}
 	return relativePath, nil
 }

@@ -1,4 +1,5 @@
 import type { AppBootstrap } from './types';
+import type { MemberDirectoryEntry, MemberMount, MemberSearchResult, MemberSpace } from './member/types';
 
 export type HealthPayload = {
   status?: string;
@@ -50,9 +51,14 @@ export type DirectoryChildrenPayload = {
   relativePath?: string;
   path?: string;
   readOnly?: boolean;
-  entries?: unknown[];
-  items?: unknown[];
+  entries?: MemberDirectoryEntry[];
+  items?: MemberDirectoryEntry[];
   nextCursor?: string;
+};
+
+export type CreateDirectoryPayload = {
+  parentPath: string;
+  name: string;
 };
 
 export type CreateSharePayload = {
@@ -118,7 +124,7 @@ export type TOTPSetupResponse = {
 };
 
 export type SearchPayload = {
-  items?: unknown[];
+  items?: MemberSearchResult[];
   excludedMounts?: unknown[];
   nextCursor?: string;
 };
@@ -254,8 +260,31 @@ export function listDirectoryChildren(spaceId: string, mountId: string, path: st
   );
 }
 
-export function searchSpace(spaceId: string, query: string, limit = 20, signal?: AbortSignal) {
+export function listSpaces(signal?: AbortSignal) {
+  return requestJson<{ items: MemberSpace[] }>('/api/v1/spaces', { signal });
+}
+
+export function listMounts(spaceId: string, signal?: AbortSignal) {
+  return requestJson<{ items: MemberMount[] }>(`/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts`, { signal });
+}
+
+export function createDirectory(spaceId: string, mountId: string, payload: CreateDirectoryPayload, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/directories`,
+    { method: 'POST', body: JSON.stringify(payload), signal },
+  );
+}
+
+export function downloadURL(spaceId: string, mountId: string, path: string) {
+  const params = new URLSearchParams({ path });
+  return `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/download?${params.toString()}`;
+}
+
+export function searchSpace(spaceId: string, query: string, limit = 50, cursor?: string, signal?: AbortSignal) {
   const params = new URLSearchParams({ q: query, limit: String(limit) });
+  if (cursor) {
+    params.set('cursor', cursor);
+  }
   return requestJson<SearchPayload>(`/api/v1/spaces/${encodeURIComponent(spaceId)}/search?${params.toString()}`, { signal });
 }
 

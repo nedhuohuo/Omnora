@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,35 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+func TestSearchResultJSONContractUsesCamelCaseFields(t *testing.T) {
+	payload, err := json.Marshal(SearchResult{
+		Items: []SearchItem{{
+			MountID:      "mount-1",
+			RelativePath: "docs/report.pdf",
+			SizeBytes:    128,
+		}},
+		NextCursor: "cursor-1",
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	items, ok := decoded["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items = %#v, want one item", decoded["items"])
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok || item["mountId"] != "mount-1" || item["relativePath"] != "docs/report.pdf" || item["sizeBytes"] != float64(128) {
+		t.Fatalf("search item = %#v, want camelCase member API fields", items[0])
+	}
+	if decoded["nextCursor"] != "cursor-1" {
+		t.Fatalf("nextCursor = %#v, want cursor-1", decoded["nextCursor"])
+	}
+}
 
 func TestScanBatchIndexesMetadataAndSkipsUnsafeEntries(t *testing.T) {
 	db := newCatalogDB(t)

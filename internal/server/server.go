@@ -41,13 +41,24 @@ func (s *Server) routes() {
 
 	s.apiRoutes()
 
-	s.handleGroup(domain.RouteGroupMemberWeb, "/app/")
-	s.handleGroup(domain.RouteGroupAdminWeb, "/admin/")
-	s.handleGroup(domain.RouteGroupShare, "/share/")
-	s.handleGroup(domain.RouteGroupREST, "/api/v1/")
-	s.handleGroup(domain.RouteGroupMCP, "/mcp/")
-	s.handleGroup(domain.RouteGroupOpenAPI, "/openapi/")
-	s.mux.Handle("/", http.HandlerFunc(s.static))
+	s.handleWebGroup(domain.RouteGroupMemberWeb, "/app")
+	s.handleWebGroup(domain.RouteGroupAdminWeb, "/admin")
+	s.handleWebGroup(domain.RouteGroupShare, "/share")
+	s.handleProductGroup(domain.RouteGroupREST, "/api/v1")
+	s.handleProductGroup(domain.RouteGroupMCP, "/mcp")
+	s.handleProductGroup(domain.RouteGroupOpenAPI, "/openapi")
+	s.mux.Handle("/", s.memberRoot())
+}
+
+func (s *Server) memberRoot() http.Handler {
+	spa := s.gate(domain.RouteGroupMemberWeb, http.HandlerFunc(s.serveGroupSPA))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.isStaticAssetRequest(r.URL.Path) {
+			s.static(w, r)
+			return
+		}
+		spa.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) static(w http.ResponseWriter, r *http.Request) {
@@ -57,35 +68,70 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	root, err := fs.Sub(staticFiles, "static")
+	requested := s.staticPath(r.URL.Path)
+	root, err := s.staticRoot()
 	if err != nil {
 		http.Error(w, "static files are unavailable", http.StatusInternalServerError)
 		return
 	}
-
-	requested := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
-	if requested == "" || requested == "." {
-		requested = "index.html"
-	}
 	if _, err := fs.Stat(root, requested); err != nil {
-		if path.Ext(requested) != "" {
-			http.NotFound(w, r)
-			return
-		}
-		requested = "index.html"
+		http.NotFound(w, r)
+		return
+	}
+	s.serveStaticPath(w, r, root, requested)
+}
+
+func (s *Server) serveGroupSPA(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if path.Ext(s.staticPath(r.URL.Path)) != "" {
+		s.static(w, r)
+		return
 	}
 
+	root, err := s.staticRoot()
+	if err != nil {
+		http.Error(w, "static files are unavailable", http.StatusInternalServerError)
+		return
+	}
+	s.serveStaticPath(w, r, root, "index.html")
+}
+
+func (s *Server) isStaticAssetRequest(requestPath string) bool {
+	requested := s.staticPath(requestPath)
+	if requested == "" || requested == "." || requested == "index.html" {
+		return false
+	}
+	return path.Ext(requested) != ""
+}
+
+func (s *Server) staticPath(requestPath string) string {
+	return strings.TrimPrefix(path.Clean("/"+requestPath), "/")
+}
+
+func (s *Server) staticRoot() (fs.FS, error) {
+	return fs.Sub(staticFiles, "static")
+}
+
+func (s *Server) serveStaticPath(w http.ResponseWriter, r *http.Request, root fs.FS, requested string) {
 	http.ServeFileFS(w, r, root, requested)
 }
 
-func (s *Server) handleGroup(group domain.RouteGroup, prefix string) {
+func (s *Server) handleWebGroup(group domain.RouteGroup, routePath string) {
+	handler := s.gate(group, http.HandlerFunc(s.serveGroupSPA))
+	s.mux.Handle(routePath, handler)
+	s.mux.Handle(routePath+"/", handler)
+}
+
+func (s *Server) handleProductGroup(group domain.RouteGroup, routePath string) {
 	handler := s.gate(group, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotImplemented, "not_implemented", "route group is enabled but no product handler is implemented yet")
 	}))
-
-	exact := strings.TrimSuffix(prefix, "/")
-	s.mux.Handle(exact, handler)
-	s.mux.Handle(prefix, handler)
+	s.mux.Handle(routePath, handler)
+	s.mux.Handle(routePath+"/", handler)
 }
 
 func (s *Server) gate(group domain.RouteGroup, next http.Handler) http.Handler {
