@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -46,15 +45,12 @@ func main() {
 		}
 	}
 
-	srv := &http.Server{
-		Addr:              cfg.HTTP.Addr,
-		Handler:           server.New(cfg, db),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	binder := server.NewBindController()
+	handler := server.New(cfg, db, server.WithBinder(binder))
 
 	go func() {
 		slog.Info("omnora backend listening", "addr", cfg.HTTP.Addr, "db_configured", cfg.Database.Path != "")
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := binder.ListenAndServe(cfg.HTTP.Addr, handler); err != nil {
 			slog.Error("http server failed", "error", err)
 			stop()
 		}
@@ -63,7 +59,7 @@ func main() {
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	if err := binder.Shutdown(shutdownCtx); err != nil {
 		slog.Error("http shutdown failed", "error", err)
 		os.Exit(1)
 	}

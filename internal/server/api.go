@@ -50,6 +50,7 @@ type mountDTO struct {
 	ID     string `json:"id,omitempty"`
 	Name   string `json:"name"`
 	Space  string `json:"space"`
+	Kind   string `json:"kind,omitempty"`
 	Mode   string `json:"mode"`
 	Index  string `json:"index"`
 	Health string `json:"health"`
@@ -172,6 +173,11 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("DELETE /api/v1/admin/ai-tokens/{tokenId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAdminAIToken)))
 	s.mux.Handle("GET /api/v1/admin/backups", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listBackups)))
 	s.mux.Handle("POST /api/v1/admin/backups", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createBackup)))
+	s.mux.Handle("POST /api/v1/admin/backups/{backupId}/restore", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.restoreBackup)))
+	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/cross-mount-copy", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.crossMountCopy)))
+	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/cross-mount-move", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.crossMountMove)))
+	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts/{mountId}/trash", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listTrash)))
+	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/trash/{trashId}/restore", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.restoreTrash)))
 	s.registerOpenAPIRoutes()
 	s.mux.Handle("GET /api/v1/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAITokens)))
 	s.mux.Handle("POST /api/v1/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createAIToken)))
@@ -547,7 +553,7 @@ func (s *Server) listAdminMounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
-SELECT m.id, m.display_name, sp.name, m.mode, m.index_enabled, m.status
+SELECT m.id, m.display_name, sp.name, m.kind, m.mode, m.index_enabled, m.status
 FROM mounts m
 JOIN spaces sp ON sp.id = m.space_id
 WHERE m.status <> 'deleted'
@@ -2430,6 +2436,7 @@ type mountForListing struct {
 	ID           string
 	Root         string
 	Mode         domain.MountMode
+	Kind         string
 	IdentityJSON string
 }
 
@@ -2437,10 +2444,10 @@ func loadMountForListing(r *http.Request, db *sql.DB, spaceID, mountID string) (
 	var mount mountForListing
 	var status string
 	err := db.QueryRowContext(r.Context(), `
-SELECT id, root_path, mode, COALESCE(mount_identity_json, ''), status
+SELECT id, root_path, mode, kind, COALESCE(mount_identity_json, ''), status
 FROM mounts
 WHERE id = ? AND space_id = ? AND status <> 'deleted'
-	`, mountID, spaceID).Scan(&mount.ID, &mount.Root, &mount.Mode, &mount.IdentityJSON, &status)
+	`, mountID, spaceID).Scan(&mount.ID, &mount.Root, &mount.Mode, &mount.Kind, &mount.IdentityJSON, &status)
 	if err != nil {
 		return mountForListing{}, err
 	}
@@ -2586,7 +2593,7 @@ func mountIdentityNeedsRefresh(stored, current mountid.Identity) bool {
 
 func queryMounts(r *http.Request, db *sql.DB, accountID, spaceID string) ([]mountDTO, error) {
 	rows, err := db.QueryContext(r.Context(), `
-SELECT m.id, m.display_name, sp.name, m.mode, m.index_enabled, m.status
+SELECT m.id, m.display_name, sp.name, m.kind, m.mode, m.index_enabled, m.status
 FROM mounts m
 JOIN spaces sp ON sp.id = m.space_id
 JOIN space_members sm ON sm.space_id = sp.id
@@ -2605,7 +2612,7 @@ func (s *Server) bootstrapMounts(r *http.Request, db *sql.DB, session identity.S
 		return []mountDTO{}
 	}
 	rows, err := db.QueryContext(r.Context(), `
-SELECT m.id, m.display_name, sp.name, m.mode, m.index_enabled, m.status
+SELECT m.id, m.display_name, sp.name, m.kind, m.mode, m.index_enabled, m.status
 FROM mounts m
 JOIN spaces sp ON sp.id = m.space_id
 JOIN space_members sm ON sm.space_id = sp.id
@@ -2629,7 +2636,7 @@ func scanMountDTOs(rows *sql.Rows) ([]mountDTO, error) {
 		var item mountDTO
 		var mode string
 		var indexEnabled int
-		if err := rows.Scan(&item.ID, &item.Name, &item.Space, &mode, &indexEnabled, &item.Health); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Space, &item.Kind, &mode, &indexEnabled, &item.Health); err != nil {
 			return nil, err
 		}
 		item.Mode = displayMountMode(domain.MountMode(mode))

@@ -4,9 +4,8 @@ info:
   version: 0.1.0-starter
   summary: Starter OpenAPI contract for the first Omnora version.
   description: >
-    This document captures the intended first-version REST surface for client
-    generation and implementation alignment. It is not a promise that a runnable
-    server already exists.
+    Contract aligned to the runnable Omnora control-plane REST surface.
+    Stale starter paths are marked x-omnora-stale and should not be used by new clients.
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 servers:
   - url: /api/v1
@@ -34,6 +33,7 @@ tags:
   - name: MCP
 paths:
   /health:
+    x-omnora-stale: true
     get:
       tags: [System]
       summary: Return process health.
@@ -47,6 +47,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Health"
   /route-groups:
+    x-omnora-stale: true
     get:
       tags: [System]
       summary: Return route group exposure state visible to the caller.
@@ -162,6 +163,7 @@ paths:
                   nextCursor:
                     type: string
   /spaces/{spaceId}:
+    x-omnora-stale: true
     get:
       tags: [Spaces]
       summary: Read one space and the caller's effective role.
@@ -178,6 +180,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
   /spaces/{spaceId}/acl:
+    x-omnora-stale: true
     get:
       tags: [Spaces]
       summary: List space ACL entries.
@@ -335,6 +338,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/SearchResultPage"
   /files/{objectId}:
+    x-omnora-stale: true
     get:
       tags: [Files]
       summary: Read current metadata for one file object.
@@ -351,6 +355,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
   /files/{objectId}/text:
+    x-omnora-stale: true
     get:
       tags: [Files]
       summary: Read bounded text or Markdown preview content.
@@ -374,6 +379,7 @@ paths:
         "415":
           $ref: "#/components/responses/UnsupportedMediaType"
   /files/{objectId}/download-ticket:
+    x-omnora-stale: true
     post:
       tags: [Transfers]
       summary: Create a short-lived download ticket for a single object.
@@ -388,6 +394,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/DownloadTicket"
   /downloads/{ticketId}:
+    x-omnora-stale: true
     get:
       tags: [Transfers]
       summary: Download content by short-lived ticket, including Range requests.
@@ -547,6 +554,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
   /shares/{shareId}:
+    x-omnora-stale: true
     get:
       tags: [Shares]
       summary: Read share metadata.
@@ -691,6 +699,20 @@ paths:
               schema:
                 $ref: "#/components/schemas/User"
   /admin/mounts:
+    get:
+      tags: [Admin]
+      summary: List all mounts across spaces for administrators.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Mount list.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
     post:
       tags: [Admin]
       summary: Register a predeclared container path as a space mount.
@@ -816,6 +838,1073 @@ paths:
                 type: object
         "403":
           $ref: "#/components/responses/Forbidden"
+  /account:
+    get:
+      tags: [Identity]
+      summary: Implemented endpoint GET /account.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /account/password:
+    patch:
+      tags: [Identity]
+      summary: Implemented endpoint PATCH /account/password.
+      x-omnora-route-group: rest
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /account/preferences:
+    get:
+      tags: [Identity]
+      summary: Implemented endpoint GET /account/preferences.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    put:
+      tags: [Identity]
+      summary: Implemented endpoint PUT /account/preferences.
+      x-omnora-route-group: rest
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /account/sessions:
+    get:
+      tags: [Identity]
+      summary: Implemented endpoint GET /account/sessions.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /account/sessions/{sessionId}:
+    delete:
+      tags: [Identity]
+      summary: Implemented endpoint DELETE /account/sessions/sessionId.
+      x-omnora-route-group: rest
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /account/totp/disable:
+    post:
+      tags: [Identity]
+      summary: Implemented endpoint POST /account/totp/disable.
+      x-omnora-route-group: rest
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/ai-tokens:
+    get:
+      tags: [Admin]
+      summary: Implemented endpoint GET /admin/ai-tokens.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/ai-tokens/{tokenId}:
+    delete:
+      tags: [Admin]
+      summary: Implemented endpoint DELETE /admin/ai-tokens/tokenId.
+      x-omnora-route-group: rest
+      parameters:
+        - name: tokenId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/backups:
+    get:
+      tags: [Admin]
+      summary: Implemented endpoint GET /admin/backups.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Admin]
+      summary: Implemented endpoint POST /admin/backups.
+      x-omnora-route-group: rest
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/backups/{backupId}/restore:
+    post:
+      tags: [Admin]
+      summary: Implemented endpoint POST /admin/backups/backupId/restore.
+      x-omnora-route-group: rest
+      parameters:
+        - name: backupId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/emergency-access:
+    get:
+      tags: [Admin]
+      summary: Implemented endpoint GET /admin/emergency-access.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Admin]
+      summary: Implemented endpoint POST /admin/emergency-access.
+      x-omnora-route-group: rest
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/emergency-access/{id}/revoke:
+    post:
+      tags: [Admin]
+      summary: Implemented endpoint POST /admin/emergency-access/id/revoke.
+      x-omnora-route-group: rest
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/host-directories:
+    get:
+      tags: [Admin]
+      summary: Implemented endpoint GET /admin/host-directories.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/mounts/{mountId}:
+    delete:
+      tags: [Admin]
+      summary: Implemented endpoint DELETE /admin/mounts/mountId.
+      x-omnora-route-group: rest
+      parameters:
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    patch:
+      tags: [Admin]
+      summary: Implemented endpoint PATCH /admin/mounts/mountId.
+      x-omnora-route-group: rest
+      parameters:
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/mounts/{mountId}/reverify:
+    post:
+      tags: [Admin]
+      summary: Implemented endpoint POST /admin/mounts/mountId/reverify.
+      x-omnora-route-group: rest
+      parameters:
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/network-entries:
+    get:
+      tags: [Admin]
+      summary: Implemented endpoint GET /admin/network-entries.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    put:
+      tags: [Admin]
+      summary: Implemented endpoint PUT /admin/network-entries.
+      x-omnora-route-group: rest
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/overview:
+    get:
+      tags: [Admin]
+      summary: Implemented endpoint GET /admin/overview.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/route-groups:
+    get:
+      tags: [Admin]
+      summary: Implemented endpoint GET /admin/route-groups.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/route-groups/{groupId}:
+    patch:
+      tags: [Admin]
+      summary: Implemented endpoint PATCH /admin/route-groups/groupId.
+      x-omnora-route-group: rest
+      parameters:
+        - name: groupId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/shares:
+    get:
+      tags: [Admin]
+      summary: Implemented endpoint GET /admin/shares.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/shares/{shareId}:
+    delete:
+      tags: [Admin]
+      summary: Implemented endpoint DELETE /admin/shares/shareId.
+      x-omnora-route-group: rest
+      parameters:
+        - name: shareId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/spaces:
+    get:
+      tags: [Admin]
+      summary: Implemented endpoint GET /admin/spaces.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Admin]
+      summary: Implemented endpoint POST /admin/spaces.
+      x-omnora-route-group: rest
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/spaces/{spaceId}/members:
+    get:
+      tags: [Admin]
+      summary: Implemented endpoint GET /admin/spaces/spaceId/members.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/spaces/{spaceId}/members/{accountId}:
+    delete:
+      tags: [Admin]
+      summary: Implemented endpoint DELETE /admin/spaces/spaceId/members/accountId.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    put:
+      tags: [Admin]
+      summary: Implemented endpoint PUT /admin/spaces/spaceId/members/accountId.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/users/{userId}/disable:
+    post:
+      tags: [Admin]
+      summary: Implemented endpoint POST /admin/users/userId/disable.
+      x-omnora-route-group: rest
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/users/{userId}/enable:
+    post:
+      tags: [Admin]
+      summary: Implemented endpoint POST /admin/users/userId/enable.
+      x-omnora-route-group: rest
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/users/{userId}/revoke-sessions:
+    post:
+      tags: [Admin]
+      summary: Implemented endpoint POST /admin/users/userId/revoke-sessions.
+      x-omnora-route-group: rest
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /bootstrap:
+    get:
+      tags: [Identity]
+      summary: Implemented endpoint GET /bootstrap.
+      x-omnora-route-group: rest
+      security: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /initialize:
+    post:
+      tags: [Identity]
+      summary: Implemented endpoint POST /initialize.
+      x-omnora-route-group: rest
+      security: []
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /share/children:
+    get:
+      tags: [Shares]
+      summary: Implemented endpoint GET /share/children.
+      x-omnora-route-group: share
+      security: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /share/current:
+    get:
+      tags: [Shares]
+      summary: Implemented endpoint GET /share/current.
+      x-omnora-route-group: share
+      security: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /share/download:
+    get:
+      tags: [Shares]
+      summary: Implemented endpoint GET /share/download.
+      x-omnora-route-group: share
+      security: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /spaces/{spaceId}/mounts/{mountId}/cross-mount-copy:
+    post:
+      tags: [Files]
+      summary: Implemented endpoint POST /spaces/spaceId/mounts/mountId/cross-mount-copy.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /spaces/{spaceId}/mounts/{mountId}/cross-mount-move:
+    post:
+      tags: [Files]
+      summary: Implemented endpoint POST /spaces/spaceId/mounts/mountId/cross-mount-move.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /spaces/{spaceId}/mounts/{mountId}/directories:
+    post:
+      tags: [Files]
+      summary: Implemented endpoint POST /spaces/spaceId/mounts/mountId/directories.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /spaces/{spaceId}/mounts/{mountId}/move:
+    post:
+      tags: [Files]
+      summary: Implemented endpoint POST /spaces/spaceId/mounts/mountId/move.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /spaces/{spaceId}/mounts/{mountId}/object:
+    delete:
+      tags: [Files]
+      summary: Implemented endpoint DELETE /spaces/spaceId/mounts/mountId/object.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /spaces/{spaceId}/mounts/{mountId}/rename:
+    post:
+      tags: [Files]
+      summary: Implemented endpoint POST /spaces/spaceId/mounts/mountId/rename.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /spaces/{spaceId}/mounts/{mountId}/trash:
+    get:
+      tags: [Files]
+      summary: Implemented endpoint GET /spaces/spaceId/mounts/mountId/trash.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /spaces/{spaceId}/mounts/{mountId}/trash/{trashId}/restore:
+    post:
+      tags: [Files]
+      summary: Implemented endpoint POST /spaces/spaceId/mounts/mountId/trash/trashId/restore.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: trashId
+          in: path
+          required: true
+          schema:
+            type: string
+requestBody:
+  required: false
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties: true
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
 components:
   securitySchemes:
     bearerAuth:

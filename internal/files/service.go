@@ -45,6 +45,7 @@ var (
 type Mount struct {
 	Root string
 	Mode domain.MountMode
+	Kind string
 }
 
 type DirectoryListing struct {

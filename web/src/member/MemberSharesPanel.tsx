@@ -5,13 +5,14 @@ import {
   type CreateShareResponse,
   createShare,
   deleteShare,
+  listDirectoryChildren,
   listMounts,
   listShares,
   listSpaces,
   type SharePayload,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
-import type { MemberMount, MemberSpace } from './types';
+import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, type MemberSpace } from './types';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
@@ -44,6 +45,23 @@ function shareStatusLabel(status: string | undefined, text: LocaleText) {
   return status ? (labels[status] ?? status) : text.shareStatusActive;
 }
 
+function normalizeSharePath(path: string) {
+  const trimmed = path.trim();
+  if (!trimmed || trimmed === '.' || trimmed === '/') return '.';
+  return trimmed.replace(/^\/+|\/+$/g, '');
+}
+
+function displaySharePath(path: string, text: LocaleText) {
+  const normalized = normalizeSharePath(path);
+  return normalized === '.' ? text.shareBrowseRoot : normalized;
+}
+
+function browseCrumbs(path: string) {
+  const normalized = normalizeSharePath(path);
+  if (normalized === '.') return [];
+  return normalized.split('/').filter(Boolean);
+}
+
 async function copyToClipboard(value: string) {
   try {
     await navigator.clipboard.writeText(value);
@@ -58,8 +76,6 @@ export type ShareOptionsState = {
   expiresAt: string;
   allowPreview: boolean;
   allowDownload: boolean;
-  maxVisits: string;
-  maxDownloads: string;
 };
 
 export const defaultShareOptions: ShareOptionsState = {
@@ -67,8 +83,6 @@ export const defaultShareOptions: ShareOptionsState = {
   expiresAt: '',
   allowPreview: true,
   allowDownload: true,
-  maxVisits: '',
-  maxDownloads: '',
 };
 
 export function ShareOptionFields({
@@ -86,25 +100,19 @@ export function ShareOptionFields({
       <label>{text.shareExpiresAt}<input type="datetime-local" value={value.expiresAt} onChange={(event) => onChange({ ...value, expiresAt: event.target.value })} /><small className="member-path-hint">{text.shareNeverExpires}</small></label>
       <label className="member-admin-checkbox"><input type="checkbox" checked={value.allowPreview} onChange={(event) => onChange({ ...value, allowPreview: event.target.checked })} />{text.shareAllowPreview}</label>
       <label className="member-admin-checkbox"><input type="checkbox" checked={value.allowDownload} onChange={(event) => onChange({ ...value, allowDownload: event.target.checked })} />{text.shareAllowDownload}</label>
-      <label>{text.shareMaxVisits}<input type="number" min={1} value={value.maxVisits} onChange={(event) => onChange({ ...value, maxVisits: event.target.value })} /></label>
-      <label>{text.shareMaxDownloads}<input type="number" min={1} value={value.maxDownloads} onChange={(event) => onChange({ ...value, maxDownloads: event.target.value })} /></label>
     </>
   );
 }
 
 export function buildCreateSharePayload(spaceId: string, mountId: string, relativePath: string, options: ShareOptionsState) {
   const expiresAtIso = options.expiresAt ? new Date(options.expiresAt).toISOString() : undefined;
-  const maxVisits = options.maxVisits.trim() ? Number(options.maxVisits) : undefined;
-  const maxDownloads = options.maxDownloads.trim() ? Number(options.maxDownloads) : undefined;
   return {
     spaceId,
     mountId,
-    relativePath,
+    relativePath: normalizeSharePath(relativePath),
     password: options.password.trim() || undefined,
     allowPreview: options.allowPreview,
     allowDownload: options.allowDownload,
-    maxVisits: Number.isFinite(maxVisits) ? maxVisits : undefined,
-    maxDownloads: Number.isFinite(maxDownloads) ? maxDownloads : undefined,
     expiresAt: expiresAtIso,
   };
 }
@@ -113,6 +121,108 @@ export function resolveShareFragment(result: CreateShareResponse) {
   if (result.fragment) return result.fragment;
   if (result.publicId && result.secret) return `${result.publicId}.${result.secret}`;
   return '';
+}
+
+function ShareTargetPicker({
+  text,
+  spaceId,
+  mountId,
+  selectedPath,
+  onSelect,
+}: {
+  text: LocaleText;
+  spaceId: string;
+  mountId: string;
+  selectedPath: string;
+  onSelect: (path: string) => void;
+}) {
+  const [browsePath, setBrowsePath] = useState('.');
+  const [entries, setEntries] = useState<MemberDirectoryEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!spaceId || !mountId) {
+      setEntries([]);
+      return;
+    }
+    const controller = new AbortController();
+    setLoading(true);
+    setError('');
+    void listDirectoryChildren(spaceId, mountId, browsePath, controller.signal)
+      .then((payload) => {
+        const listing = formatDirectoryChildren(payload);
+        setEntries(listing.entries);
+      })
+      .catch((caught: unknown) => {
+        if (controller.signal.aborted) return;
+        setEntries([]);
+        setError(describeError(caught));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [spaceId, mountId, browsePath]);
+
+  const crumbs = browseCrumbs(browsePath);
+  const selected = normalizeSharePath(selectedPath);
+
+  return (
+    <div className="member-share-picker member-admin-form-wide">
+      <span>{text.shareTargetPath}</span>
+      <div className="member-share-picker-toolbar">
+        <div className="member-share-picker-crumbs">
+          <button type="button" onClick={() => setBrowsePath('.')}>{text.shareBrowseRoot}</button>
+          {crumbs.map((part, index) => {
+            const path = crumbs.slice(0, index + 1).join('/');
+            const isLast = index === crumbs.length - 1;
+            return (
+              <span key={path}>
+                <b>/</b>
+                {isLast ? <strong>{part}</strong> : <button type="button" onClick={() => setBrowsePath(path)}>{part}</button>}
+              </span>
+            );
+          })}
+        </div>
+        <div className="member-share-picker-actions">
+          <button type="button" onClick={() => onSelect(browsePath)}>{text.shareSelectCurrentFolder}</button>
+        </div>
+      </div>
+      <p className="member-path-hint">{text.shareBrowseHint}</p>
+      <p className="member-share-picker-selected">{text.shareSelectedTarget}: {displaySharePath(selected, text)}</p>
+      <div className="member-share-picker-list" role="listbox" aria-label={text.shareTargetPath}>
+        {loading ? <div className="member-share-picker-loading">{text.loading}</div> : error ? <div className="member-share-picker-empty">{error}</div> : entries.length === 0 ? <div className="member-share-picker-empty">{text.shareBrowseEmpty}</div> : entries.map((entry) => {
+          const entryPath = normalizeSharePath(entry.relativePath);
+          const isSelected = selected === entryPath;
+          if (entry.kind === 'dir') {
+            return (
+              <div key={`dir-${entryPath}`} className={`member-share-picker-row${isSelected ? ' selected' : ''}`}>
+                <button type="button" className="member-share-picker-item" onClick={() => setBrowsePath(entryPath)}>
+                  <span className="member-file-icon dir">DIR</span>
+                  <span>{entry.name}</span>
+                </button>
+                <button type="button" className="member-share-picker-select" onClick={() => onSelect(entryPath)}>{text.shareSelectItem}</button>
+              </div>
+            );
+          }
+          return (
+            <button
+              key={`file-${entryPath}`}
+              type="button"
+              className={`member-share-picker-item${isSelected ? ' selected' : ''}`}
+              role="option"
+              aria-selected={isSelected}
+              onClick={() => onSelect(entryPath)}
+            >
+              <span className="member-file-icon file">{entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>
+              <span>{entry.name}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 export function ShareCreatedResult({ text, result, onClose }: { text: LocaleText; result: CreateShareResponse; onClose: () => void }) {
@@ -173,7 +283,7 @@ export function ShareCreateModal({ text, spaceId, mountId, relativePath, targetL
         <p className="member-admin-form-wide member-modal-hint"><strong>{targetLabel}</strong></p>
         <ShareOptionFields text={text} value={options} onChange={setOptions} />
         {error && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {error}</div>}
-        <div className="member-admin-form-wide"><button type="button" onClick={onCancel}>{text.cancel}</button><button className="member-primary" type="submit" disabled={loading}>{text.shareSubmit}</button></div>
+        <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={onCancel}>{text.cancel}</button><button className="member-primary" type="submit" disabled={loading}>{text.shareSubmit}</button></div>
       </form>
     </div>
   );
@@ -186,7 +296,7 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
   const [mounts, setMounts] = useState<MemberMount[]>([]);
   const [formSpaceId, setFormSpaceId] = useState('');
   const [formMountId, setFormMountId] = useState('');
-  const [formPath, setFormPath] = useState('');
+  const [formPath, setFormPath] = useState('.');
   const [options, setOptions] = useState<ShareOptionsState>(defaultShareOptions);
   const [creating, setCreating] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
@@ -227,16 +337,20 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
     }).catch(() => setMounts([]));
   }, [formSpaceId]);
 
+  useEffect(() => {
+    setFormPath('.');
+  }, [formSpaceId, formMountId]);
+
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!formSpaceId || !formMountId) return;
     setCreating(true);
     setError('');
     try {
-      const result = await createShare(buildCreateSharePayload(formSpaceId, formMountId, formPath.trim() || '.', options));
+      const result = await createShare(buildCreateSharePayload(formSpaceId, formMountId, formPath, options));
       setCreatedResult(result);
       setFormOpen(false);
-      setFormPath('');
+      setFormPath('.');
       setOptions(defaultShareOptions);
       await load();
     } catch (caught) {
@@ -295,10 +409,10 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
             <h2 className="member-admin-form-wide">{text.shareCreateTitle}</h2>
             <label>{text.shareTargetSpace}<select value={formSpaceId} onChange={(event) => setFormSpaceId(event.target.value)} required>{managerSpaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select></label>
             <label>{text.shareTargetMount}<select value={formMountId} onChange={(event) => setFormMountId(event.target.value)} required>{mounts.map((mount) => <option key={mount.id} value={mount.id}>{mount.name}</option>)}</select></label>
-            <label className="member-admin-form-wide">{text.shareTargetPath}<input value={formPath} onChange={(event) => setFormPath(event.target.value)} placeholder={text.sharePathPlaceholder} /></label>
+            <ShareTargetPicker key={`${formSpaceId}:${formMountId}`} text={text} spaceId={formSpaceId} mountId={formMountId} selectedPath={formPath} onSelect={setFormPath} />
             <ShareOptionFields text={text} value={options} onChange={setOptions} />
             {error && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {error}</div>}
-            <div className="member-admin-form-wide"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating || !formMountId}>{text.shareSubmit}</button></div>
+            <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating || !formMountId}>{text.shareSubmit}</button></div>
           </form>
         </div>
       )}

@@ -370,6 +370,10 @@ export type NetworkEntryPayload = {
   cidrs: string[];
   externalHttpsUrl: string;
   updatedAt?: string;
+  activeBindAddr?: string;
+  rebound?: boolean;
+  restartRequired?: boolean;
+  rebindError?: string;
 };
 
 export type BackupPayload = {
@@ -380,6 +384,16 @@ export type BackupPayload = {
   createdAt: string;
   completedAt?: string;
   notes?: string;
+};
+
+export type TrashItemPayload = {
+  id: string;
+  originalPath: string;
+  name: string;
+  kind: string;
+  size: number;
+  deletedAt: string;
+  trashRelativePath?: string;
 };
 
 export class ApiError extends Error {
@@ -845,11 +859,60 @@ export function moveObject(spaceId: string, mountId: string, payload: MoveObject
   );
 }
 
-export function deleteObject(spaceId: string, mountId: string, path: string, signal?: AbortSignal) {
+export function deleteObject(spaceId: string, mountId: string, path: string, options?: { permanent?: boolean }, signal?: AbortSignal) {
   const params = new URLSearchParams({ path });
-  return requestJson<void>(
+  if (options?.permanent) {
+    params.set('permanent', 'true');
+  }
+  return requestJson<TrashItemPayload | void>(
     `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/object?${params.toString()}`,
     { method: 'DELETE', signal },
+  );
+}
+
+export function listTrash(spaceId: string, mountId: string, signal?: AbortSignal) {
+  return requestJson<{ items?: TrashItemPayload[] }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/trash`,
+    { signal },
+  );
+}
+
+export function restoreTrashItem(spaceId: string, mountId: string, trashId: string, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/trash/${encodeURIComponent(trashId)}/restore`,
+    { method: 'POST', signal },
+  );
+}
+
+export function crossMountCopy(
+  spaceId: string,
+  mountId: string,
+  payload: { from: string; toSpaceId: string; toMountId: string; toDir?: string },
+  signal?: AbortSignal,
+) {
+  return requestJson<{ relativePath: string; spaceId: string; mountId: string }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/cross-mount-copy`,
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
+    },
+  );
+}
+
+export function crossMountMove(
+  spaceId: string,
+  mountId: string,
+  payload: { from: string; toSpaceId: string; toMountId: string; toDir?: string },
+  signal?: AbortSignal,
+) {
+  return requestJson<{ relativePath: string; spaceId: string; mountId: string }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/cross-mount-move`,
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
+    },
   );
 }
 
@@ -1016,6 +1079,15 @@ export function listAdminBackups(signal?: AbortSignal) {
 export function createAdminBackup(signal?: AbortSignal) {
   return requestJson<BackupPayload>('/api/v1/admin/backups', {
     method: 'POST',
+    signal,
+  });
+}
+
+export function restoreAdminBackup(backupId: string, confirmPhrase: string, signal?: AbortSignal) {
+  return requestJson<{ status: string; backupId: string; notes?: string }>(`/api/v1/admin/backups/${encodeURIComponent(backupId)}/restore`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirmPhrase }),
     signal,
   });
 }

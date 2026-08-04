@@ -408,10 +408,13 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   async function onDeleteConfirmed() {
     if (!deleteTarget) return;
     const mountId = deleteTarget.mountId ?? activeMountId;
+    const mount = mounts.find((item) => item.id === mountId) ?? activeMount;
     setDeleteBusy(true);
     setError('');
     try {
-      await deleteObject(activeSpaceId, mountId, deleteTarget.relativePath);
+      await deleteObject(activeSpaceId, mountId, deleteTarget.relativePath, {
+        permanent: mount?.kind !== 'managed',
+      });
       setDeleteTarget(null);
       await refreshDirectory(activeSpaceId, activeMountId, relativePath);
     } catch (caught) {

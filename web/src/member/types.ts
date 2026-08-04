@@ -11,6 +11,7 @@ export type MemberMount = {
   id: string;
   name: string;
   space: string;
+  kind?: 'external' | 'managed';
   mode: 'read-write' | 'read-only';
   index: string;
   health: string;

@@ -30,6 +30,7 @@ import {
   putNetworkEntry,
   putSpaceMember,
   removeSpaceMember,
+  restoreAdminBackup,
   revokeAdminAiToken,
   revokeAdminShare,
   revokeAdminUserSessions,
@@ -261,7 +262,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
             <label>{text.userPassword}<input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete="new-password" required /></label>
             <label className="member-admin-checkbox"><input type="checkbox" checked={form.role === 'admin'} onChange={(event) => setForm({ ...form, role: event.target.checked ? 'admin' : 'member' })} />{text.userIsAdmin}</label>
             {error && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {error}</div>}
-            <div className="member-admin-form-wide"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.userSubmit}</button></div>
+            <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.userSubmit}</button></div>
           </form>
         </div>
       )}
@@ -542,7 +543,7 @@ export function AdminEmergencyPanel({ locale }: { locale: MemberLocale }) {
             <label>{text.emergencyTotp}<input value={form.totpCode} onChange={(event) => setForm({ ...form, totpCode: event.target.value })} inputMode="numeric" autoComplete="one-time-code" required /></label>
             <label className="member-admin-form-wide">{text.emergencyReason}<input value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })} required /></label>
             {error && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {error}</div>}
-            <div className="member-admin-form-wide"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.emergencySubmit}</button></div>
+            <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.emergencySubmit}</button></div>
           </form>
         </div>
       )}
@@ -557,6 +558,7 @@ export function AdminNetworkPanel({ locale }: { locale: MemberLocale }) {
   const [entries, setEntries] = useState<NetworkEntryPayload[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState('');
 
   const load = useCallback(async () => {
@@ -583,9 +585,15 @@ export function AdminNetworkPanel({ locale }: { locale: MemberLocale }) {
   async function onSave(entry: NetworkEntryPayload) {
     setSaving(entry.name);
     setError('');
+    setNotice('');
     try {
       const updated = await putNetworkEntry(entry);
       setEntries((current) => current.map((item) => (item.name === updated.name ? updated : item)));
+      if (updated.rebound) {
+        setNotice(text.networkRebound);
+      } else if (updated.restartRequired) {
+        setNotice(updated.rebindError ? `${text.networkRestartRequired} (${updated.rebindError})` : text.networkRestartRequired);
+      }
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -603,6 +611,7 @@ export function AdminNetworkPanel({ locale }: { locale: MemberLocale }) {
         <button className="member-secondary-action" type="button" onClick={() => void load()} disabled={loading}>{text.refresh}</button>
       </div>
       {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
+      {notice && <div className="member-readonly member-page-error">{notice}</div>}
       {loading ? <div className="member-loading">{text.loading}</div> : (
         <>
           {lan && (
@@ -611,6 +620,7 @@ export function AdminNetworkPanel({ locale }: { locale: MemberLocale }) {
               <label className="member-admin-checkbox"><input type="checkbox" checked={lan.enabled} onChange={(event) => patchEntry('lan_http', { enabled: event.target.checked })} />{text.networkEnabled}</label>
               <label>{text.networkBindAddress}<input value={lan.bindAddr ?? ''} onChange={(event) => patchEntry('lan_http', { bindAddr: event.target.value })} /></label>
               <label className="member-admin-form-wide">{text.networkAllowedCidrs}<input value={(lan.cidrs ?? []).join(', ')} onChange={(event) => patchEntry('lan_http', { cidrs: event.target.value.split(',').map((value) => value.trim()).filter(Boolean) })} /></label>
+              {lan.activeBindAddr && <p className="member-readonly member-admin-form-wide">{text.networkActiveBind}: {lan.activeBindAddr}</p>}
               {lan.enabled && <p className="member-readonly member-admin-form-wide">{text.networkUnencryptedWarning}</p>}
               <div className="member-admin-form-actions"><button className="member-primary" type="submit" disabled={saving === 'lan_http'}>{text.networkSave}</button></div>
             </form>
@@ -761,7 +771,11 @@ export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
   const [backups, setBackups] = useState<BackupPayload[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [creating, setCreating] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState<BackupPayload | null>(null);
+  const [confirmPhrase, setConfirmPhrase] = useState('');
+  const [restoring, setRestoring] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -783,6 +797,7 @@ export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
   async function onCreate() {
     setCreating(true);
     setError('');
+    setNotice('');
     try {
       await createAdminBackup();
       await load();
@@ -790,6 +805,24 @@ export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
       setError(describeError(caught));
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function onRestore() {
+    if (!restoreTarget) return;
+    setRestoring(true);
+    setError('');
+    setNotice('');
+    try {
+      await restoreAdminBackup(restoreTarget.id, confirmPhrase.trim());
+      setNotice(text.backupRestored);
+      setRestoreTarget(null);
+      setConfirmPhrase('');
+      await load();
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setRestoring(false);
     }
   }
 
@@ -803,17 +836,43 @@ export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
         </div>
       </div>
       {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
+      {notice && <div className="member-readonly member-page-error">{notice}</div>}
       {loading ? <div className="member-loading">{text.loading}</div> : backups.length === 0 ? <div className="member-empty">{text.backupNoBackups}</div> : (
         <table className="member-admin-table">
-          <thead><tr><th>{text.backupColumnCreated}</th><th>{text.backupColumnSize}</th><th>{text.backupColumnStatus}</th></tr></thead>
+          <thead><tr><th>{text.backupColumnCreated}</th><th>{text.backupColumnPath}</th><th>{text.backupColumnStatus}</th><th>{text.backupColumnNotes}</th><th>{text.actions}</th></tr></thead>
           <tbody>{backups.map((backup) => (
             <tr key={backup.id}>
               <td>{formatDate(backup.createdAt, locale)}</td>
               <td>{backup.path ?? '--'}</td>
               <td>{backup.status}</td>
+              <td>{backup.notes ?? '--'}</td>
+              <td>
+                <button
+                  className="member-table-action"
+                  type="button"
+                  disabled={backup.status !== 'completed' || !backup.path}
+                  onClick={() => { setRestoreTarget(backup); setConfirmPhrase(''); }}
+                >
+                  {text.backupRestore}
+                </button>
+              </td>
             </tr>
           ))}</tbody>
         </table>
+      )}
+      {restoreTarget && (
+        <div className="member-modal-backdrop">
+          <form className="member-modal" onSubmit={(event) => { event.preventDefault(); void onRestore(); }}>
+            <h2>{text.backupRestoreConfirmTitle}</h2>
+            <p>{text.backupRestoreConfirmDetail}</p>
+            <p className="member-readonly">{restoreTarget.path}</p>
+            <label>{text.backupRestoreConfirmPhrase}<input value={confirmPhrase} onChange={(event) => setConfirmPhrase(event.target.value)} autoFocus /></label>
+            <div className="member-modal-actions">
+              <button className="member-secondary-action" type="button" onClick={() => setRestoreTarget(null)} disabled={restoring}>{text.cancel}</button>
+              <button className="member-modal-danger" type="submit" disabled={restoring || confirmPhrase.trim() !== 'RESTORE'}>{text.backupRestoreSubmit}</button>
+            </div>
+          </form>
+        </div>
       )}
     </div>
   );

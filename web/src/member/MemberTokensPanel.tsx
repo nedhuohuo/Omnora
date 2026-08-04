@@ -215,14 +215,14 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
                     {(mountsBySpace[boundary.spaceId] ?? []).map((mount) => <option key={mount.id} value={mount.id}>{mount.name}</option>)}
                   </select>
                   <input value={boundary.path} onChange={(event) => updateBoundary(boundary.key, { path: event.target.value })} placeholder={text.tokenBoundaryPath} />
-                  <button type="button" onClick={() => removeBoundary(boundary.key)}>{text.cancel}</button>
+                  <button type="button" onClick={() => removeBoundary(boundary.key)} aria-label={text.tokenBoundaryRemove} title={text.tokenBoundaryRemove}>×</button>
                 </div>
               ))}
-              <button type="button" onClick={addBoundary}>{text.tokenBoundaryPath} +</button>
+              <button type="button" onClick={addBoundary}>{text.tokenAddBoundary}</button>
             </div>
 
             {error && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {error}</div>}
-            <div className="member-admin-form-wide"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.tokenSubmit}</button></div>
+            <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.tokenSubmit}</button></div>
           </form>
         </div>
       )}

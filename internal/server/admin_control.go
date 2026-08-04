@@ -1,11 +1,11 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +15,7 @@ import (
 	"omnora/internal/domain"
 	"omnora/internal/httpx"
 	"omnora/internal/identity"
+	"omnora/internal/store"
 	"omnora/internal/totp"
 )
 
@@ -534,6 +535,10 @@ type networkEntryDTO struct {
 	CIDRs            []string `json:"cidrs"`
 	ExternalHTTPSURL string   `json:"externalHttpsUrl"`
 	UpdatedAt        string   `json:"updatedAt"`
+	ActiveBindAddr   string   `json:"activeBindAddr,omitempty"`
+	Rebound          bool     `json:"rebound,omitempty"`
+	RestartRequired  bool     `json:"restartRequired,omitempty"`
+	RebindError      string   `json:"rebindError,omitempty"`
 }
 
 func (s *Server) listNetworkEntries(w http.ResponseWriter, r *http.Request) {
@@ -556,6 +561,9 @@ ORDER BY name
 		if err != nil {
 			writeDBError(w, r, err)
 			return
+		}
+		if s.binder != nil {
+			item.ActiveBindAddr = s.binder.ActiveAddr()
 		}
 		items = append(items, item)
 	}
@@ -581,6 +589,15 @@ func (s *Server) putNetworkEntry(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "name must be lan_http or proxy_https")
 		return
 	}
+	for _, cidr := range req.CIDRs {
+		if strings.TrimSpace(cidr) == "" {
+			continue
+		}
+		if len(parseCIDRs([]string{cidr})) == 0 {
+			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "invalid CIDR: "+cidr)
+			return
+		}
+	}
 	cidrJSON, err := marshalStrings(req.CIDRs)
 	if err != nil {
 		writeDBError(w, r, err)
@@ -601,10 +618,34 @@ ON CONFLICT(name) DO UPDATE SET
 		writeDBError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "admin_network_entry_update", "network_entry", req.Name, fmt.Sprintf(`{"by":%q}`, session.AccountID))
-	httpx.WriteJSON(w, http.StatusOK, networkEntryDTO{
-		Name: req.Name, Enabled: req.Enabled, BindAddr: req.BindAddr, CIDRs: req.CIDRs, ExternalHTTPSURL: req.ExternalHTTPSURL, UpdatedAt: now,
-	})
+	s.hydrateNetworkPolicy(r.Context())
+
+	dto := networkEntryDTO{
+		Name: req.Name, Enabled: req.Enabled, BindAddr: req.BindAddr, CIDRs: req.CIDRs,
+		ExternalHTTPSURL: req.ExternalHTTPSURL, UpdatedAt: now,
+	}
+	if s.binder != nil {
+		dto.ActiveBindAddr = s.binder.ActiveAddr()
+	}
+	if req.Name == "lan_http" && req.Enabled {
+		target := strings.TrimSpace(req.BindAddr)
+		if target == "" {
+			target = strings.TrimSpace(s.cfg.HTTP.Addr)
+		}
+		if s.binder == nil {
+			dto.RestartRequired = target != "" && target != dto.ActiveBindAddr
+		} else if target != "" && target != s.binder.ActiveAddr() {
+			if err := s.binder.Rebind(target); err != nil {
+				dto.RestartRequired = true
+				dto.RebindError = err.Error()
+			} else {
+				dto.Rebound = true
+				dto.ActiveBindAddr = s.binder.ActiveAddr()
+			}
+		}
+	}
+	_ = s.recordAudit(r, "admin_network_entry_update", "network_entry", req.Name, fmt.Sprintf(`{"by":%q,"rebound":%t,"restartRequired":%t}`, session.AccountID, dto.Rebound, dto.RestartRequired))
+	httpx.WriteJSON(w, http.StatusOK, dto)
 }
 
 func scanNetworkEntry(rows *sql.Rows) (networkEntryDTO, error) {
@@ -796,31 +837,38 @@ func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) {
 	id := "bkp_" + httpx.NewRequestID()
 	now := time.Now().UTC()
 	status := "completed"
-	notes := "logical backup placeholder"
+	notes := "sqlite online backup"
 	backupPath := ""
+	completedAt := any(now.Format(time.RFC3339Nano))
 
-	dbPath := strings.TrimSpace(s.cfg.Database.Path)
-	if dbPath != "" {
+	if s.db == nil || strings.TrimSpace(s.cfg.Database.Path) == "" {
+		status = "failed"
+		notes = "database is not configured"
+		completedAt = nil
+	} else {
 		backupsDir := filepath.Join(strings.TrimSpace(s.cfg.Storage.ManagedDir), "backups")
 		if err := os.MkdirAll(backupsDir, 0o755); err != nil {
 			status = "failed"
 			notes = "could not prepare backups directory: " + err.Error()
+			completedAt = nil
 		} else {
 			target := filepath.Join(backupsDir, fmt.Sprintf("omnora-%s.db", now.Format("20060102T150405Z0700")))
-			if err := copyFile(dbPath, target); err != nil {
+			if err := s.db.BackupTo(r.Context(), target); err != nil {
 				status = "failed"
-				notes = "could not copy sqlite file: " + err.Error()
+				notes = "online backup failed: " + err.Error()
+				completedAt = nil
+				_ = os.Remove(target)
+			} else if err := verifyBackupFile(r.Context(), target); err != nil {
+				status = "failed"
+				notes = "backup integrity check failed: " + err.Error()
+				completedAt = nil
+				_ = os.Remove(target)
 			} else {
 				backupPath = target
-				notes = "sqlite file copy"
 			}
 		}
 	}
 
-	var completedAt any
-	if status == "completed" {
-		completedAt = now.Format(time.RFC3339Nano)
-	}
 	_, err := s.sqlDB().ExecContext(r.Context(), `
 INSERT INTO backups(id, status, path, created_by, created_at, completed_at, notes)
 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -832,25 +880,90 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 	_ = s.recordAudit(r, "admin_backup_create", "backup", id, "{}")
 	httpx.WriteJSON(w, http.StatusCreated, backupDTO{
 		ID: id, Status: status, Path: backupPath, CreatedBy: session.AccountID,
-		CreatedAt: now.Format(time.RFC3339Nano), Notes: notes,
+		CreatedAt: now.Format(time.RFC3339Nano), CompletedAt: stringOrEmpty(completedAt), Notes: notes,
 	})
 }
 
-func copyFile(source, target string) error {
-	in, err := os.Open(source)
+func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	backupID := r.PathValue("backupId")
+	var req struct {
+		ConfirmPhrase string `json:"confirmPhrase"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.ConfirmPhrase) != "RESTORE" {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "confirmPhrase must be RESTORE")
+		return
+	}
+	var item backupDTO
+	err := s.sqlDB().QueryRowContext(r.Context(), `
+SELECT id, status, COALESCE(path, ''), COALESCE(created_by, ''), created_at, COALESCE(completed_at, ''), notes
+FROM backups WHERE id = ?
+`, backupID).Scan(&item.ID, &item.Status, &item.Path, &item.CreatedBy, &item.CreatedAt, &item.CompletedAt, &item.Notes)
+	if errors.Is(err, sql.ErrNoRows) {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "backup was not found")
+		return
+	}
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if item.Status != "completed" || strings.TrimSpace(item.Path) == "" {
+		httpx.WriteError(w, r, http.StatusConflict, "backup_not_restorable", "backup is not a completed file snapshot")
+		return
+	}
+	if _, err := os.Stat(item.Path); err != nil {
+		httpx.WriteError(w, r, http.StatusConflict, "backup_missing", "backup file is missing on disk")
+		return
+	}
+	if err := verifyBackupFile(r.Context(), item.Path); err != nil {
+		httpx.WriteError(w, r, http.StatusConflict, "backup_corrupt", err.Error())
+		return
+	}
+	if s.db == nil {
+		httpx.WriteError(w, r, http.StatusServiceUnavailable, "database_unavailable", "database is required")
+		return
+	}
+	if err := s.db.RestoreFrom(r.Context(), item.Path); err != nil {
+		httpx.WriteError(w, r, http.StatusInternalServerError, "restore_failed", err.Error())
+		return
+	}
+	if err := s.db.IntegrityCheck(r.Context()); err != nil {
+		httpx.WriteError(w, r, http.StatusInternalServerError, "restore_integrity_failed", err.Error())
+		return
+	}
+	s.hydrateNetworkPolicy(r.Context())
+	_ = s.hydrateRouteGroups(r.Context())
+	_ = s.recordAudit(r, "admin_backup_restore", "backup", backupID, fmt.Sprintf(`{"by":%q}`, session.AccountID))
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"status":   "restored",
+		"backupId": backupID,
+		"notes":    "database restored in-place from online backup snapshot; reconnect sessions if auth state drifted",
+	})
+}
+
+func verifyBackupFile(ctx context.Context, path string) error {
+	readonly, err := store.OpenSQLiteReadonly(ctx, path)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	out, err := os.Create(target)
-	if err != nil {
-		return err
+	defer readonly.Close()
+	return readonly.IntegrityCheck(ctx)
+}
+
+func stringOrEmpty(value any) string {
+	if value == nil {
+		return ""
 	}
-	defer out.Close()
-	if _, err := io.Copy(out, in); err != nil {
-		return err
+	if text, ok := value.(string); ok {
+		return text
 	}
-	return out.Sync()
+	return ""
 }
 
 func marshalStrings(values []string) (string, error) {

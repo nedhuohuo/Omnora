@@ -20,6 +20,16 @@ type Server struct {
 	db       *store.DB
 	mux      *http.ServeMux
 	routesMu sync.RWMutex
+	binder   *BindController
+	network  networkPolicyStore
+}
+
+type Option func(*Server)
+
+func WithBinder(binder *BindController) Option {
+	return func(s *Server) {
+		s.binder = binder
+	}
 }
 
 // The Docker build replaces the placeholder with the Vite production bundle.
@@ -28,17 +38,21 @@ type Server struct {
 //go:embed static/*
 var staticFiles embed.FS
 
-func New(cfg config.Config, db *store.DB) http.Handler {
+func New(cfg config.Config, db *store.DB, opts ...Option) http.Handler {
 	s := &Server{
 		cfg: cfg,
 		db:  db,
 		mux: http.NewServeMux(),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
 	if db != nil {
 		_ = s.hydrateRouteGroups(context.Background())
+		s.hydrateNetworkPolicy(context.Background())
 	}
 	s.routes()
-	return securityHeaders(requestID(s.mux))
+	return securityHeaders(requestID(s.networkGate(s.mux)))
 }
 
 func (s *Server) routes() {
