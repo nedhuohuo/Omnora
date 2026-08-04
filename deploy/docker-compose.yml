@@ -2,7 +2,10 @@
 # Replace the image tag with the first published release image when available.
 services:
   omnora:
-    image: ghcr.io/omnora/omnora:0.1.0-dev
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: omnora:aliyun-test
     container_name: omnora
     restart: unless-stopped
     init: true
@@ -26,6 +29,7 @@ services:
       OMNORA_HTTP_ADDR: 0.0.0.0:8080
       OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:?set a one-time local initialization token}"
       OMNORA_INITIALIZATION_TOKEN_TTL: "${OMNORA_INITIALIZATION_TOKEN_TTL:-30m}"
+      OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:?set a TOTP encryption key}"
       OMNORA_MANAGED_STORAGE_DIR: /srv/omnora/managed
       OMNORA_PREDECLARED_MOUNT_ROOT: /mnt/omnora
       OMNORA_LAN_HTTP_ENABLED: "${OMNORA_LAN_HTTP_ENABLED:-true}"

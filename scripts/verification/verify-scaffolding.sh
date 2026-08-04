@@ -3,6 +3,8 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 COMPOSE="$ROOT/deploy/docker-compose.yml"
+DOCKERFILE="$ROOT/Dockerfile"
+STATIC_INDEX="$ROOT/internal/server/static/index.html"
 ALIYUN_TEST_COMPOSE="$ROOT/deploy/docker-compose.aliyun-test.yml"
 ALIYUN_TEST_ENV_EXAMPLE="$ROOT/deploy/aliyun-test.env.example"
 ALIYUN_TEST_DOC="$ROOT/docs/deployment/aliyun-test-server.md"
@@ -20,6 +22,8 @@ pass() {
 }
 
 [ -f "$COMPOSE" ] || fail "missing deploy/docker-compose.yml"
+[ -f "$DOCKERFILE" ] || fail "missing Dockerfile"
+[ -f "$STATIC_INDEX" ] || fail "missing embedded frontend placeholder"
 [ -f "$ALIYUN_TEST_COMPOSE" ] || fail "missing deploy/docker-compose.aliyun-test.yml"
 [ -f "$ALIYUN_TEST_ENV_EXAMPLE" ] || fail "missing deploy/aliyun-test.env.example"
 [ -f "$ALIYUN_TEST_DOC" ] || fail "missing docs/deployment/aliyun-test-server.md"
@@ -27,6 +31,14 @@ pass() {
 [ -f "$CHECKLIST" ] || fail "missing scripts/verification/release-readiness-checklist.md"
 [ -f "$GITIGNORE" ] || fail "missing .gitignore"
 pass "expected scaffold files exist"
+
+grep -Fq 'OMNORA_TOTP_ENCRYPTION_KEY' "$COMPOSE" ||
+  fail "compose file must inject the TOTP encryption key"
+grep -Fq 'COPY --from=web-build' "$DOCKERFILE" ||
+  fail "Dockerfile must build and embed the frontend bundle"
+grep -Fq 'OMNORA_TEST_SERVER_SSH_PORT=22' "$ALIYUN_TEST_ENV_EXAMPLE" ||
+  fail "Aliyun test env example must use the current SSH port"
+pass "deployment image and current Aliyun SSH settings are wired"
 
 grep -Eq '^services:' "$COMPOSE" || fail "compose file must declare services"
 grep -Eq '^  omnora:' "$COMPOSE" || fail "compose file must declare a single omnora service"

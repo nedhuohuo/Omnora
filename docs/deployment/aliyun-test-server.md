@@ -7,13 +7,13 @@ This document designates the Aliyun ECS machine recorded in the private operator
 | Item | Value |
 | --- | --- |
 | Role | Omnora test server |
-| Candidate host | Read from the private operator vault |
-| SSH port | Read from the private operator vault; historical note says non-standard SSH was used |
-| Source note | Obsidian `服务器 IP 维护总表`, entry `lisaSSH 旧机` |
-| Status in operator notes | `archived`; verify before first use |
+| Candidate host | `120.26.88.7` (Obsidian `阿里云SSH`) |
+| SSH port | `22` (key-only; historical `2222` is obsolete) |
+| Source note | Obsidian `服务器 IP 维护总表`, entry `阿里云SSH`（`120.26.88.7`；旧笔记误称 lisaSSH） |
+| Status in operator notes | `active`; verify workload and security group before first use |
 | Production warning | Not the `fundrisk.ggbangs.com` production origin |
 
-Before the first deployment, confirm that the ECS instance is still owned by the operator account, that `2222/tcp` is allowed in the Aliyun security group, and that no existing production workload depends on this host.
+Before the first deployment, confirm that the ECS instance is still owned by the operator account, that `22/tcp` is allowed in the Aliyun security group, and that no existing production workload depends on this host. The host currently runs RustDesk relay services, so use an isolated Compose project and do not reuse their ports or directories.
 
 ## Preflight Checklist
 
@@ -29,8 +29,10 @@ Before the first deployment, confirm that the ECS instance is still owned by the
 The default test configuration binds Omnora to `127.0.0.1` on the ECS host. Test access should go through an SSH tunnel:
 
 ```bash
-ssh -p <ssh-port> -L 18080:127.0.0.1:8080 <ssh-user>@<aliyun-ecs-host>
+ssh aliyunssh -L 18080:127.0.0.1:8080
 ```
+
+If Clash/Meta TUN is enabled locally, add `120.26.88.7/32` to the `DIRECT` rules or temporarily disable that TUN route before opening the tunnel. The operator note records this as a required connectivity condition.
 
 Then open:
 
@@ -46,6 +48,8 @@ Use the base Compose file plus the Aliyun test override:
 
 ```bash
 cp deploy/aliyun-test.env.example deploy/aliyun-test.env
+mkdir -p deploy/aliyun-test/{config,data,managed,mounts}
+sudo chown -R 1000:1000 deploy/aliyun-test
 ```
 
 Edit `deploy/aliyun-test.env` on the server and set fresh values for:

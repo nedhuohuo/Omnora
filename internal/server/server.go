@@ -1,7 +1,10 @@
 package server
 
 import (
+	"embed"
+	"io/fs"
 	"net/http"
+	"path"
 	"strings"
 
 	"omnora/internal/config"
@@ -15,6 +18,12 @@ type Server struct {
 	db  *store.DB
 	mux *http.ServeMux
 }
+
+// The Docker build replaces the placeholder with the Vite production bundle.
+// Keeping the bundle in the Go binary makes the test deployment one service.
+//
+//go:embed static/*
+var staticFiles embed.FS
 
 func New(cfg config.Config, db *store.DB) http.Handler {
 	s := &Server{
@@ -38,6 +47,35 @@ func (s *Server) routes() {
 	s.handleGroup(domain.RouteGroupREST, "/api/v1/")
 	s.handleGroup(domain.RouteGroupMCP, "/mcp/")
 	s.handleGroup(domain.RouteGroupOpenAPI, "/openapi/")
+	s.mux.Handle("/", http.HandlerFunc(s.static))
+}
+
+func (s *Server) static(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	root, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		http.Error(w, "static files are unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	requested := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+	if requested == "" || requested == "." {
+		requested = "index.html"
+	}
+	if _, err := fs.Stat(root, requested); err != nil {
+		if path.Ext(requested) != "" {
+			http.NotFound(w, r)
+			return
+		}
+		requested = "index.html"
+	}
+
+	http.ServeFileFS(w, r, root, requested)
 }
 
 func (s *Server) handleGroup(group domain.RouteGroup, prefix string) {

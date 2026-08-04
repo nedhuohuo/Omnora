@@ -5,6 +5,8 @@ This checklist is local scaffolding for implementers. It summarizes release chec
 ## Deployment
 
 - The default Compose deployment starts exactly one `omnora` application container.
+- The image build compiles `web/dist` and embeds the production frontend in the Go binary.
+- TOTP encryption and initialization secrets are required at container startup and are never committed.
 - The container does not require PostgreSQL, Redis, OpenSearch, MinIO, Office converters, FFmpeg, GPU, host networking, Docker socket access, or privileged mode.
 - `lan_http` and `proxy_https` are configured as separate entries with explicit binds and CIDR trust settings.
 - Admin Web, Member Web, Share, REST, MCP, and OpenAPI exposure are independently configurable.

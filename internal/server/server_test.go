@@ -106,3 +106,30 @@ func TestHealthBypassesRouteGroups(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
+
+func TestStaticRootServesEmbeddedFrontend(t *testing.T) {
+	handler := New(config.Config{Routes: map[domain.RouteGroup]bool{}}, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if rec.Header().Get("Content-Type") == "" {
+		t.Fatal("content type should be set")
+	}
+}
+
+func TestStaticRootFallsBackForClientRoutes(t *testing.T) {
+	handler := New(config.Config{Routes: map[domain.RouteGroup]bool{}}, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/console/mounts", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
