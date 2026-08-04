@@ -859,13 +859,13 @@ paths:
       tags: [Identity]
       summary: Implemented endpoint PATCH /account/password.
       x-omnora-route-group: rest
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -896,13 +896,13 @@ requestBody:
       tags: [Identity]
       summary: Implemented endpoint PUT /account/preferences.
       x-omnora-route-group: rest
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -952,13 +952,13 @@ requestBody:
       tags: [Identity]
       summary: Implemented endpoint POST /account/totp/disable.
       x-omnora-route-group: rest
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1022,13 +1022,13 @@ requestBody:
       tags: [Admin]
       summary: Implemented endpoint POST /admin/backups.
       x-omnora-route-group: rest
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "201":
           description: Success.
@@ -1051,13 +1051,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1088,13 +1088,13 @@ requestBody:
       tags: [Admin]
       summary: Implemented endpoint POST /admin/emergency-access.
       x-omnora-route-group: rest
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "201":
           description: Success.
@@ -1117,13 +1117,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1177,13 +1177,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1206,13 +1206,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1243,13 +1243,13 @@ requestBody:
       tags: [Admin]
       summary: Implemented endpoint PUT /admin/network-entries.
       x-omnora-route-group: rest
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1304,13 +1304,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1374,13 +1374,13 @@ requestBody:
       tags: [Admin]
       summary: Implemented endpoint POST /admin/spaces.
       x-omnora-route-group: rest
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "201":
           description: Success.
@@ -1450,13 +1450,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1479,13 +1479,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1508,13 +1508,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1537,13 +1537,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1578,13 +1578,13 @@ requestBody:
       summary: Implemented endpoint POST /initialize.
       x-omnora-route-group: rest
       security: []
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "201":
           description: Success.
@@ -1663,13 +1663,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1697,13 +1697,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1731,13 +1731,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "201":
           description: Success.
@@ -1765,13 +1765,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1821,13 +1821,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.
@@ -1865,6 +1865,58 @@ requestBody:
                 additionalProperties: true
         "401":
           $ref: "#/components/responses/Unauthorized"
+    delete:
+      tags: [Files]
+      summary: Implemented endpoint DELETE /spaces/spaceId/mounts/mountId/trash.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /spaces/{spaceId}/mounts/{mountId}/trash/{trashId}:
+    delete:
+      tags: [Files]
+      summary: Implemented endpoint DELETE /spaces/spaceId/mounts/mountId/trash/trashId.
+      x-omnora-route-group: rest
+      parameters:
+        - name: spaceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: trashId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: No Content.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /spaces/{spaceId}/mounts/{mountId}/trash/{trashId}/restore:
     post:
@@ -1887,13 +1939,13 @@ requestBody:
           required: true
           schema:
             type: string
-requestBody:
-  required: false
-  content:
-    application/json:
-      schema:
-        type: object
-        additionalProperties: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         "200":
           description: Success.

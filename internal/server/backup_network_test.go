@@ -71,10 +71,10 @@ func TestPutNetworkEntryAppliesCIDRPolicy(t *testing.T) {
 	adminCookie := issueAPITestSession(t, db, admin.ID)
 
 	body, err := json.Marshal(map[string]any{
-		"name":    "lan_http",
-		"enabled": true,
+		"name":     "lan_http",
+		"enabled":  true,
 		"bindAddr": "",
-		"cidrs":   []string{"127.0.0.1/32"},
+		"cidrs":    []string{"127.0.0.1/32"},
 	})
 	if err != nil {
 		t.Fatalf("marshal network entry: %v", err)

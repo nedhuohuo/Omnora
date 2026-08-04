@@ -140,6 +140,7 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 			writeFileOpError(w, r, err)
 			return
 		}
+		_ = s.revokeSharesForPath(r, spaceID, mountID, relativePath)
 		_ = s.recordAudit(r, "object_trash", "file_object", relativePath, fmt.Sprintf(`{"trashId":%q}`, item.ID))
 		httpx.WriteJSON(w, http.StatusOK, item)
 		return
@@ -152,6 +153,7 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 		writeFileOpError(w, r, err)
 		return
 	}
+	_ = s.revokeSharesForPath(r, spaceID, mountID, relativePath)
 	_ = s.recordAudit(r, "object_delete", "file_object", relativePath, `{}`)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -218,6 +220,72 @@ func (s *Server) restoreTrash(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": restored})
 }
 
+func (s *Server) purgeTrash(w http.ResponseWriter, r *http.Request) {
+	session, err := s.requireSession(r)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	spaceID := r.PathValue("spaceId")
+	mountID := r.PathValue("mountId")
+	trashID := r.PathValue("trashId")
+	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "purging trash requires editor permission")
+		return
+	}
+	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
+	if writeMountLoadError(w, r, err) {
+		return
+	}
+	if mount.Mode != domain.MountModeReadWrite {
+		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
+		return
+	}
+	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
+		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
+		return
+	}
+	if err := files.NewService().PurgeTrash(filesMount(mount), trashID); err != nil {
+		writeFileOpError(w, r, err)
+		return
+	}
+	_ = s.recordAudit(r, "object_trash_purge", "file_object", trashID, `{}`)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) emptyTrash(w http.ResponseWriter, r *http.Request) {
+	session, err := s.requireSession(r)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	spaceID := r.PathValue("spaceId")
+	mountID := r.PathValue("mountId")
+	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "emptying trash requires editor permission")
+		return
+	}
+	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
+	if writeMountLoadError(w, r, err) {
+		return
+	}
+	if mount.Mode != domain.MountModeReadWrite {
+		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
+		return
+	}
+	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
+		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
+		return
+	}
+	removed, err := files.NewService().EmptyTrash(filesMount(mount))
+	if err != nil {
+		writeFileOpError(w, r, err)
+		return
+	}
+	_ = s.recordAudit(r, "object_trash_empty", "file_object", mountID, fmt.Sprintf(`{"removed":%d}`, removed))
+	httpx.WriteJSON(w, http.StatusOK, map[string]int{"removed": removed})
+}
+
 func (s *Server) crossMountCopy(w http.ResponseWriter, r *http.Request) {
 	s.handleCrossMount(w, r, false)
 }
@@ -235,10 +303,10 @@ func (s *Server) handleCrossMount(w http.ResponseWriter, r *http.Request, move b
 	sourceSpaceID := r.PathValue("spaceId")
 	sourceMountID := r.PathValue("mountId")
 	var req struct {
-		From          string `json:"from"`
-		ToSpaceID     string `json:"toSpaceId"`
-		ToMountID     string `json:"toMountId"`
-		ToDir         string `json:"toDir"`
+		From      string `json:"from"`
+		ToSpaceID string `json:"toSpaceId"`
+		ToMountID string `json:"toMountId"`
+		ToDir     string `json:"toDir"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -317,8 +385,8 @@ func (s *Server) revokeSharesForPath(r *http.Request, spaceID, mountID, relative
 	_, err = s.sqlDB().ExecContext(r.Context(), `
 UPDATE shares
 SET revoked_at = ?, updated_at = ?
-WHERE space_id = ? AND mount_id = ? AND relative_path = ? AND revoked_at IS NULL
-`, now, now, spaceID, mountID, cleaned)
+WHERE space_id = ? AND mount_id = ? AND (relative_path = ? OR relative_path LIKE ?) AND revoked_at IS NULL
+`, now, now, spaceID, mountID, cleaned, cleaned+"/%")
 	return err
 }
 

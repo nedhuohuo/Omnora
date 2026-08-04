@@ -12,10 +12,10 @@ import (
 )
 
 type networkPolicy struct {
-	LANEnabled      bool
-	LANCIDRs        []*net.IPNet
-	TrustedProxies  []*net.IPNet
-	ActiveBindHint  string
+	LANEnabled     bool
+	LANCIDRs       []*net.IPNet
+	TrustedProxies []*net.IPNet
+	ActiveBindHint string
 }
 
 type networkPolicyStore struct {
@@ -106,8 +106,14 @@ func (s *Server) networkGate(next http.Handler) http.Handler {
 			return
 		}
 		policy := s.currentNetworkPolicy()
-		if !policy.LANEnabled || len(policy.LANCIDRs) == 0 {
+		if !policy.LANEnabled {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if len(policy.LANCIDRs) == 0 {
+			// Enabled but misconfigured: fail closed rather than open the
+			// listener to every client address.
+			httpx.WriteError(w, r, http.StatusForbidden, "network_entry_unconfigured", "LAN entry is enabled but has no allowed CIDRs")
 			return
 		}
 		ip := clientIP(r, policy.TrustedProxies)

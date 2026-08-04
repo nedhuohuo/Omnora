@@ -562,7 +562,7 @@ ORDER BY name
 			writeDBError(w, r, err)
 			return
 		}
-		if s.binder != nil {
+		if s.binder != nil && item.Name == "lan_http" {
 			item.ActiveBindAddr = s.binder.ActiveAddr()
 		}
 		items = append(items, item)
@@ -624,7 +624,7 @@ ON CONFLICT(name) DO UPDATE SET
 		Name: req.Name, Enabled: req.Enabled, BindAddr: req.BindAddr, CIDRs: req.CIDRs,
 		ExternalHTTPSURL: req.ExternalHTTPSURL, UpdatedAt: now,
 	}
-	if s.binder != nil {
+	if s.binder != nil && dto.Name == "lan_http" {
 		dto.ActiveBindAddr = s.binder.ActiveAddr()
 	}
 	if req.Name == "lan_http" && req.Enabled {

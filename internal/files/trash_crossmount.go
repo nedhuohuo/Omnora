@@ -25,13 +25,13 @@ var (
 )
 
 type TrashItem struct {
-	ID               string    `json:"id"`
-	OriginalPath     string    `json:"originalPath"`
-	Name             string    `json:"name"`
-	Kind             EntryKind `json:"kind"`
-	Size             int64     `json:"size"`
-	DeletedAt        time.Time `json:"deletedAt"`
-	TrashRelativePath string   `json:"trashRelativePath"`
+	ID                string    `json:"id"`
+	OriginalPath      string    `json:"originalPath"`
+	Name              string    `json:"name"`
+	Kind              EntryKind `json:"kind"`
+	Size              int64     `json:"size"`
+	DeletedAt         time.Time `json:"deletedAt"`
+	TrashRelativePath string    `json:"trashRelativePath"`
 }
 
 type trashMeta struct {
@@ -156,7 +156,7 @@ func (Service) RestoreTrash(mount Mount, trashID string) (string, error) {
 		return "", err
 	}
 	trashID = strings.TrimSpace(trashID)
-	if trashID == "" || strings.ContainsAny(trashID, "/\\") {
+	if !validTrashID(trashID) {
 		return "", ErrTrashItemNotFound
 	}
 	root, _, err := openMountRoot(mount)
@@ -186,6 +186,78 @@ func (Service) RestoreTrash(mount Mount, trashID string) (string, error) {
 	}
 	_ = root.RemoveAll(trashRoot)
 	return target, nil
+}
+
+// PurgeTrash permanently removes a single soft-deleted item.
+func (Service) PurgeTrash(mount Mount, trashID string) error {
+	if err := requireManagedWritable(mount); err != nil {
+		return err
+	}
+	trashID = strings.TrimSpace(trashID)
+	if !validTrashID(trashID) {
+		return ErrTrashItemNotFound
+	}
+	root, _, err := openMountRoot(mount)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	trashRoot := path.Join(storage.ReservedNamespace, trashDirName, trashID)
+	info, err := root.Lstat(trashRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrTrashItemNotFound
+		}
+		return err
+	}
+	if !info.IsDir() {
+		return ErrTrashItemNotFound
+	}
+	return root.RemoveAll(trashRoot)
+}
+
+// EmptyTrash permanently removes every soft-deleted item on a managed mount.
+func (Service) EmptyTrash(mount Mount) (int, error) {
+	if err := requireManagedWritable(mount); err != nil {
+		return 0, err
+	}
+	root, _, err := openMountRoot(mount)
+	if err != nil {
+		return 0, err
+	}
+	defer root.Close()
+	trashParent := path.Join(storage.ReservedNamespace, trashDirName)
+	directory, err := root.Open(trashParent)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer directory.Close()
+	entries, err := directory.ReadDir(-1)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if err := root.RemoveAll(path.Join(trashParent, entry.Name())); err == nil {
+			removed++
+		}
+	}
+	return removed, nil
+}
+
+// validTrashID rejects IDs that could escape the trash namespace (such as ".."
+// or ".") and anything carrying a path separator.
+func validTrashID(id string) bool {
+	if id == "" || strings.HasPrefix(id, ".") {
+		return false
+	}
+	return !strings.ContainsAny(id, "/\\")
 }
 
 // CopyAcrossMounts streams a file or directory tree from source to dest.
