@@ -7,9 +7,6 @@ services:
     labels:
       omnora.environment: aliyun-test
       omnora.role: test-server
-    ports:
-      # Aliyun test env sets OMNORA_BIND=0.0.0.0 for external HTTP on 8080.
-      - "${OMNORA_BIND:-0.0.0.0}:8080:8080"
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
       OMNORA_DEPLOY_ENV: aliyun-test

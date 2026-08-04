@@ -61,8 +61,8 @@ if grep -Eiq 'docker\.sock|network_mode:[[:space:]]*host|privileged:[[:space:]]*
 fi
 grep -Fq 'omnora.environment: aliyun-test' "$ALIYUN_TEST_COMPOSE" ||
   fail "Aliyun test compose must label the deployment environment"
-grep -Fq 'OMNORA_BIND:-0.0.0.0' "$ALIYUN_TEST_COMPOSE" ||
-  fail "Aliyun test compose must default HTTP bind to 0.0.0.0 for external test access"
+grep -Fq 'OMNORA_BIND=0.0.0.0' "$ALIYUN_TEST_ENV_EXAMPLE" ||
+  fail "Aliyun test env example must default HTTP bind to 0.0.0.0 for external test access"
 grep -Fq 'OMNORA_TEST_SERVER_HOST=replace-with-private-vault-host' "$ALIYUN_TEST_ENV_EXAMPLE" ||
   fail "Aliyun test env example must not commit the real host"
 grep -Fq 'OMNORA_BIND=0.0.0.0' "$ALIYUN_TEST_ENV_EXAMPLE" ||
