@@ -164,6 +164,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     email: '', displayName: '', password: '', role: 'member',
   });
   const [creating, setCreating] = useState(false);
+  const [passwordError, setPasswordError] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -182,8 +183,30 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     void load();
   }, [load]);
 
+  function passwordMeetsRequirements(value: string) {
+    if (value.length < 12) return false;
+    const classes = [/[a-z]/.test(value), /[A-Z]/.test(value), /\d/.test(value), /[^a-zA-Z0-9]/.test(value)].filter(Boolean).length;
+    return classes >= 3;
+  }
+
+  function openForm() {
+    setError('');
+    setPasswordError('');
+    setFormOpen(true);
+  }
+
+  function closeForm() {
+    setPasswordError('');
+    setFormOpen(false);
+  }
+
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setPasswordError('');
+    if (!passwordMeetsRequirements(form.password)) {
+      setPasswordError(text.userPasswordWeak);
+      return;
+    }
     setCreating(true);
     setError('');
     try {
@@ -232,7 +255,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
         <div><h1>{text.usersTitle}</h1><p>{text.usersDetail}</p></div>
         <div className="member-admin-table-actions">
           <button className="member-secondary-action" type="button" onClick={() => void load()} disabled={loading}>{text.refresh}</button>
-          <button className="member-primary" type="button" onClick={() => setFormOpen(true)}>{text.userCreate}</button>
+          <button className="member-primary" type="button" onClick={openForm}>{text.userCreate}</button>
         </div>
       </div>
       {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
@@ -260,9 +283,11 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
             <label>{text.userEmail}<input type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} required /></label>
             <label>{text.userDisplayName}<input value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} required /></label>
             <label>{text.userPassword}<input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete="new-password" required /></label>
+            <small className="member-path-hint member-admin-form-wide">{text.userPasswordHint}</small>
+            {passwordError && <div className="member-error member-admin-form-wide">{text.error}: {passwordError}</div>}
             <label className="member-admin-checkbox"><input type="checkbox" checked={form.role === 'admin'} onChange={(event) => setForm({ ...form, role: event.target.checked ? 'admin' : 'member' })} />{text.userIsAdmin}</label>
             {error && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {error}</div>}
-            <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.userSubmit}</button></div>
+            <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={closeForm}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.userSubmit}</button></div>
           </form>
         </div>
       )}
@@ -583,6 +608,10 @@ export function AdminNetworkPanel({ locale }: { locale: MemberLocale }) {
   }
 
   async function onSave(entry: NetworkEntryPayload) {
+    if (entry.enabled && (entry.cidrs ?? []).filter(Boolean).length === 0) {
+      setError(text.networkCidrRequired);
+      return;
+    }
     setSaving(entry.name);
     setError('');
     setNotice('');
@@ -619,6 +648,7 @@ export function AdminNetworkPanel({ locale }: { locale: MemberLocale }) {
               <h2 className="member-admin-form-wide">{text.networkLanHttp}</h2>
               <label className="member-admin-checkbox"><input type="checkbox" checked={lan.enabled} onChange={(event) => patchEntry('lan_http', { enabled: event.target.checked })} />{text.networkEnabled}</label>
               <label>{text.networkBindAddress}<input value={lan.bindAddr ?? ''} onChange={(event) => patchEntry('lan_http', { bindAddr: event.target.value })} /></label>
+              <p className="member-path-hint member-admin-form-wide">{text.networkBindRebindWarning}</p>
               <label className="member-admin-form-wide">{text.networkAllowedCidrs}<input value={(lan.cidrs ?? []).join(', ')} onChange={(event) => patchEntry('lan_http', { cidrs: event.target.value.split(',').map((value) => value.trim()).filter(Boolean) })} /></label>
               {lan.activeBindAddr && <p className="member-readonly member-admin-form-wide">{text.networkActiveBind}: {lan.activeBindAddr}</p>}
               {lan.enabled && <p className="member-readonly member-admin-form-wide">{text.networkUnencryptedWarning}</p>}

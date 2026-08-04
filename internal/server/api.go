@@ -1457,6 +1457,10 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
+	if !s.routeEnabled(domain.RouteGroupShare) {
+		httpx.WriteError(w, r, http.StatusConflict, "share_route_disabled", "share route group is disabled; enable the Share route group to create share links")
+		return
+	}
 	var req struct {
 		SpaceID         string `json:"spaceId"`
 		SpaceIDAlt      string `json:"space_id"`

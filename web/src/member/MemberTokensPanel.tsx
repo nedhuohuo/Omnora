@@ -12,6 +12,11 @@ import {
 import { type MemberLocale, localeMessages } from './i18n';
 import type { MemberMount, MemberSpace } from './types';
 import { createClientId } from './clientId';
+import { copyText } from './clipboard';
+
+// Canonical backend scopes (see internal/aitoken/types.go). The UI presents a
+// simplified "read" / "upload" choice; read expands to the full read-only set.
+const READ_SCOPES = ['spaces:read', 'files:list', 'files:metadata', 'files:text', 'search:read'];
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
@@ -41,15 +46,6 @@ function tokenStatusLabel(status: string | undefined, text: LocaleText) {
   return status ? (labels[status] ?? status) : text.tokenStatusActive;
 }
 
-async function copyToClipboard(value: string) {
-  try {
-    await navigator.clipboard.writeText(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 type BoundaryDraft = { key: string; spaceId: string; mountId: string; path: string };
 
 function boundarySummary(boundary: AiTokenBoundary) {
@@ -73,6 +69,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
   const [error, setError] = useState('');
   const [createdToken, setCreatedToken] = useState('');
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<AiTokenListItem | null>(null);
 
   const load = useCallback(async () => {
@@ -130,11 +127,19 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setCreating(true);
     setError('');
     try {
-      const scopes = [scopeRead ? 'read' : null, scopeUpload ? 'upload' : null].filter((value): value is string => Boolean(value));
+      const validBoundaries = boundaries.filter((boundary) => boundary.spaceId && boundary.mountId);
+      if (validBoundaries.length === 0) {
+        setError(text.tokenBoundaryRequired);
+        return;
+      }
+      const scopes = [
+        ...(scopeRead ? READ_SCOPES : []),
+        ...(scopeUpload ? ['uploads:create'] : []),
+      ];
       const result = await createAiToken({
         name: name.trim(),
-        scopes: scopes.length > 0 ? scopes : ['read'],
-        boundaries: boundaries.filter((boundary) => boundary.spaceId && boundary.mountId).map((boundary) => ({
+        scopes: scopes.length > 0 ? scopes : READ_SCOPES,
+        boundaries: validBoundaries.map((boundary) => ({
           spaceId: boundary.spaceId,
           mountId: boundary.mountId,
           path: boundary.path.trim() || '.',
@@ -234,10 +239,11 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
             <p className="member-modal-hint">{text.tokenCreatedHint}</p>
             <code className="member-share-url">{createdToken}</code>
             <div className="member-share-result-actions">
-              <button type="button" onClick={() => void copyToClipboard(createdToken).then(setCopied)}>{text.tokenCopy}</button>
+              <button type="button" onClick={() => void copyText(createdToken).then((ok) => { setCopied(ok); setCopyFailed(!ok); })}>{text.tokenCopy}</button>
             </div>
             {copied && <p className="member-admin-notice">{text.tokenCopied}</p>}
-            <div><button className="member-primary" type="button" onClick={() => { setCreatedToken(''); setCopied(false); }}>{text.tokenClose}</button></div>
+            {copyFailed && <p className="member-error">{text.tokenCopyFailed}</p>}
+            <div><button className="member-primary" type="button" onClick={() => { setCreatedToken(''); setCopied(false); setCopyFailed(false); }}>{text.tokenClose}</button></div>
           </div>
         </div>
       )}

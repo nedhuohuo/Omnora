@@ -13,6 +13,7 @@ import {
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
 import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, type MemberSpace } from './types';
+import { copyText } from './clipboard';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
@@ -60,15 +61,6 @@ function browseCrumbs(path: string) {
   const normalized = normalizeSharePath(path);
   if (normalized === '.') return [];
   return normalized.split('/').filter(Boolean);
-}
-
-async function copyToClipboard(value: string) {
-  try {
-    await navigator.clipboard.writeText(value);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export type ShareOptionsState = {
@@ -228,7 +220,7 @@ function ShareTargetPicker({
 export function ShareCreatedResult({ text, result, onClose }: { text: LocaleText; result: CreateShareResponse; onClose: () => void }) {
   const fragment = resolveShareFragment(result);
   const url = fragment ? buildShareURL(fragment) : '';
-  const [copied, setCopied] = useState<'url' | 'secret' | null>(null);
+  const [copied, setCopied] = useState<'url' | 'secret' | 'failed' | null>(null);
 
   return (
     <div className="member-modal-backdrop">
@@ -237,10 +229,10 @@ export function ShareCreatedResult({ text, result, onClose }: { text: LocaleText
         <p className="member-modal-hint">{text.shareCreatedHint}</p>
         <code className="member-share-url">{url}</code>
         <div className="member-share-result-actions">
-          <button type="button" onClick={() => void copyToClipboard(url).then((ok) => setCopied(ok ? 'url' : null))}>{text.shareCopyUrl}</button>
-          {result.secret && <button type="button" onClick={() => void copyToClipboard(result.secret ?? '').then((ok) => setCopied(ok ? 'secret' : null))}>{text.shareCopySecret}</button>}
+          <button type="button" onClick={() => void copyText(url).then((ok) => setCopied(ok ? 'url' : 'failed'))}>{text.shareCopyUrl}</button>
+          {result.secret && <button type="button" onClick={() => void copyText(result.secret ?? '').then((ok) => setCopied(ok ? 'secret' : 'failed'))}>{text.shareCopySecret}</button>}
         </div>
-        {copied && <p className="member-admin-notice">{text.shareUrlCopied}</p>}
+        {copied === 'url' || copied === 'secret' ? <p className="member-admin-notice">{text.shareUrlCopied}</p> : copied === 'failed' ? <p className="member-error">{text.shareCopyFailed}</p> : null}
         <div><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
       </div>
     </div>

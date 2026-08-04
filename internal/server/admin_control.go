@@ -589,14 +589,22 @@ func (s *Server) putNetworkEntry(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "name must be lan_http or proxy_https")
 		return
 	}
+	nonEmptyCIDRs := 0
 	for _, cidr := range req.CIDRs {
 		if strings.TrimSpace(cidr) == "" {
 			continue
 		}
+		nonEmptyCIDRs++
 		if len(parseCIDRs([]string{cidr})) == 0 {
 			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "invalid CIDR: "+cidr)
 			return
 		}
+	}
+	if req.Enabled && nonEmptyCIDRs == 0 {
+		// Fail closed at the API too: enabling an entry with no allowed CIDRs
+		// would make its gate reject every request (see lanGate/proxyGate).
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "enabled entries require at least one allowed CIDR")
+		return
 	}
 	cidrJSON, err := marshalStrings(req.CIDRs)
 	if err != nil {
