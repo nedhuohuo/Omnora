@@ -5,6 +5,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        GOPROXY: "${GOPROXY:-https://proxy.golang.org,direct}"
     image: omnora:aliyun-test
     container_name: omnora
     restart: unless-stopped
