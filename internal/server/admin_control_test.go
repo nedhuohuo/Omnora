@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"omnora/internal/identity"
@@ -81,5 +82,133 @@ func TestAdminCreateUser(t *testing.T) {
 	svc := identity.New(db.SQL(), identity.Options{})
 	if _, err := svc.Authenticate(context.Background(), "new-user@example.test", apiTestPassword); err != nil {
 		t.Fatalf("expected new user to authenticate, got error: %v", err)
+	}
+}
+
+func TestAdminPutSpaceMemberResolvesEmailAndRejectsUnknownAccount(t *testing.T) {
+	db, handler := newAPITestServer(t)
+	admin, member := createAPITestAccounts(t, db)
+	adminCookie := issueAPITestSession(t, db, admin.ID)
+	ctx := context.Background()
+	if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO spaces(id, kind, name, owner_account_id, status)
+VALUES ('shared-acl', 'shared', 'ACL Space', ?, 'active')
+`, admin.ID); err != nil {
+		t.Fatalf("insert space: %v", err)
+	}
+	if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO space_members(space_id, account_id, permission)
+VALUES ('shared-acl', ?, 'manager')
+`, admin.ID); err != nil {
+		t.Fatalf("insert owner membership: %v", err)
+	}
+
+	body, err := json.Marshal(map[string]string{"permission": "manager"})
+	if err != nil {
+		t.Fatalf("marshal put member request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/spaces/shared-acl/members/"+strings.ToUpper(member.Email), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(adminCookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put member by email status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var added spaceMemberDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &added); err != nil {
+		t.Fatalf("decode added member: %v", err)
+	}
+	if added.AccountID != member.ID || added.Email != member.Email || added.DisplayName != member.DisplayName || added.Permission != "manager" {
+		t.Fatalf("added member = %#v, want resolved account with manager permission", added)
+	}
+	var permission string
+	if err := db.SQL().QueryRowContext(ctx, `
+SELECT permission FROM space_members WHERE space_id = 'shared-acl' AND account_id = ?
+`, member.ID).Scan(&permission); err != nil {
+		t.Fatalf("query added membership: %v", err)
+	}
+	if permission != "manager" {
+		t.Fatalf("permission = %q, want manager", permission)
+	}
+
+	missingReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/spaces/shared-acl/members/missing@example.test", bytes.NewReader(body))
+	missingReq.Header.Set("Content-Type", "application/json")
+	missingReq.AddCookie(adminCookie)
+	missingRec := httptest.NewRecorder()
+	handler.ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("put missing member status = %d, want %d, body = %s", missingRec.Code, http.StatusNotFound, missingRec.Body.String())
+	}
+
+	missingSpaceReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/spaces/missing-space/members/"+member.ID, bytes.NewReader(body))
+	missingSpaceReq.Header.Set("Content-Type", "application/json")
+	missingSpaceReq.AddCookie(adminCookie)
+	missingSpaceRec := httptest.NewRecorder()
+	handler.ServeHTTP(missingSpaceRec, missingSpaceReq)
+	if missingSpaceRec.Code != http.StatusNotFound {
+		t.Fatalf("put member into missing space status = %d, want %d, body = %s", missingSpaceRec.Code, http.StatusNotFound, missingSpaceRec.Body.String())
+	}
+}
+
+func TestAuditEventsReturnReadableActorAndTargetLabels(t *testing.T) {
+	db, handler := newAPITestServer(t)
+	admin, member := createAPITestAccounts(t, db)
+	adminCookie := issueAPITestSession(t, db, admin.ID)
+	ctx := context.Background()
+
+	if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO backups(id, status, path, created_by, created_at, notes)
+VALUES ('bkp-readable', 'failed', NULL, ?, '2026-08-04T15:00:00Z', 'sqlite online backup')
+`, admin.ID); err != nil {
+		t.Fatalf("insert backup: %v", err)
+	}
+	if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO audit_events(actor_account_id, route_group, action, target_type, target_id, metadata_json)
+VALUES
+	(?, 'rest', 'admin_user_disable', 'account', ?, '{}'),
+	(NULL, 'rest', 'route_group_update', 'route_group', 'mcp', '{}'),
+	(?, 'rest', 'admin_backup_create', 'backup', 'bkp-readable', '{}')
+`, admin.ID, member.ID, admin.ID); err != nil {
+		t.Fatalf("insert audit events: %v", err)
+	}
+
+	rec := authorizedAPITestRequest(t, handler, "/api/v1/audit/events?limit=10", adminCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list audit status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var listed struct {
+		Items []auditEventDTO `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode audit events: %v", err)
+	}
+	if len(listed.Items) < 2 {
+		t.Fatalf("audit events = %#v, want inserted rows", listed.Items)
+	}
+	var accountEvent auditEventDTO
+	var systemEvent auditEventDTO
+	var backupEvent auditEventDTO
+	for _, item := range listed.Items {
+		switch item.Action {
+		case "admin_user_disable":
+			accountEvent = item
+		case "route_group_update":
+			systemEvent = item
+		case "admin_backup_create":
+			backupEvent = item
+		}
+	}
+	if accountEvent.Actor != admin.ID || accountEvent.ActorLabel != "Admin" || accountEvent.ActorEmail != admin.Email || accountEvent.ActorDisplayName != admin.DisplayName {
+		t.Fatalf("account audit actor fields = %#v, want readable admin labels", accountEvent)
+	}
+	if accountEvent.TargetID != member.ID || accountEvent.TargetLabel != "Member" {
+		t.Fatalf("account audit target fields = %#v, want member target label", accountEvent)
+	}
+	if systemEvent.ActorLabel != "system" || systemEvent.TargetLabel != "mcp" {
+		t.Fatalf("system audit labels = %#v, want system / mcp", systemEvent)
+	}
+	if backupEvent.TargetID != "bkp-readable" || backupEvent.TargetLabel != "backup 2026-08-04T15:00:00Z" {
+		t.Fatalf("backup audit target fields = %#v, want readable backup label", backupEvent)
 	}
 }

@@ -7,16 +7,9 @@ services:
     labels:
       omnora.environment: aliyun-test
       omnora.role: test-server
-    ports:
-      # Aliyun test env sets OMNORA_LAN_BIND=0.0.0.0 for external HTTP on 8080.
-      # Keep proxy_https on 127.0.0.1 unless a TLS reverse proxy is configured.
-      - "${OMNORA_LAN_BIND:-0.0.0.0}:8080:8080"
-      - "${OMNORA_PROXY_BIND:-127.0.0.1}:8081:8081"
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
       OMNORA_DEPLOY_ENV: aliyun-test
-      OMNORA_LAN_HTTP_ALLOWED_CIDRS: "${OMNORA_LAN_HTTP_ALLOWED_CIDRS:-0.0.0.0/0,::/0}"
-      OMNORA_PROXY_HTTPS_ENABLED: "${OMNORA_PROXY_HTTPS_ENABLED:-false}"
       OMNORA_ROUTE_SHARE_ENABLED: "${OMNORA_ROUTE_SHARE_ENABLED:-false}"
       OMNORA_ROUTE_MCP_ENABLED: "${OMNORA_ROUTE_MCP_ENABLED:-false}"
     volumes:

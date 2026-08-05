@@ -92,6 +92,20 @@ type auditDTO struct {
 	Result string `json:"result"`
 }
 
+type auditEventDTO struct {
+	OccurredAt       string `json:"occurredAt"`
+	Actor            string `json:"actor"`
+	ActorEmail       string `json:"actorEmail,omitempty"`
+	ActorDisplayName string `json:"actorDisplayName,omitempty"`
+	ActorLabel       string `json:"actorLabel"`
+	RouteGroup       string `json:"routeGroup"`
+	Action           string `json:"action"`
+	TargetType       string `json:"targetType"`
+	TargetID         string `json:"targetId"`
+	TargetLabel      string `json:"targetLabel"`
+	Metadata         string `json:"metadata"`
+}
+
 type shareDTO struct {
 	ID         string `json:"id"`
 	Target     string `json:"target"`
@@ -162,11 +176,6 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("PUT /api/v1/admin/spaces/{spaceId}/members/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putAdminSpaceMember)))
 	s.mux.Handle("DELETE /api/v1/admin/spaces/{spaceId}/members/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteAdminSpaceMember)))
 	s.mux.Handle("POST /api/v1/admin/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createAdminSpace)))
-	s.mux.Handle("POST /api/v1/admin/emergency-access", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createEmergencyAccess)))
-	s.mux.Handle("GET /api/v1/admin/emergency-access", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listEmergencyAccess)))
-	s.mux.Handle("POST /api/v1/admin/emergency-access/{id}/revoke", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeEmergencyAccess)))
-	s.mux.Handle("GET /api/v1/admin/network-entries", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listNetworkEntries)))
-	s.mux.Handle("PUT /api/v1/admin/network-entries", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putNetworkEntry)))
 	s.mux.Handle("GET /api/v1/admin/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminShares)))
 	s.mux.Handle("DELETE /api/v1/admin/shares/{shareId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAdminShare)))
 	s.mux.Handle("GET /api/v1/admin/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminAITokens)))
@@ -306,7 +315,6 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	issued, err := svc.CreateSession(r.Context(), identity.SessionRequest{
 		AccountID: account.ID,
 		TTL:       8 * time.Hour,
-		Entry:     httpx.Entry(r.Context()),
 	})
 	if err != nil {
 		s.writeIdentityError(w, r, err)
@@ -452,14 +460,12 @@ ORDER BY sp.kind, sp.name
 	defer rows.Close()
 
 	items := make([]map[string]string, 0)
-	seen := map[string]struct{}{}
 	for rows.Next() {
 		var id, kind, name, permission string
 		if err := rows.Scan(&id, &kind, &name, &permission); err != nil {
 			writeDBError(w, r, err)
 			return
 		}
-		seen[id] = struct{}{}
 		items = append(items, map[string]string{
 			"id": id, "type": kind, "name": name, "role": permission,
 		})
@@ -469,39 +475,6 @@ ORDER BY sp.kind, sp.name
 		return
 	}
 
-	emergencyRows, err := s.sqlDB().QueryContext(r.Context(), `
-SELECT sp.id, sp.kind, sp.name
-FROM emergency_access ea
-JOIN spaces sp ON sp.id = ea.target_space_id
-WHERE ea.admin_account_id = ?
-  AND ea.session_id = ?
-  AND ea.revoked_at IS NULL
-  AND ea.expires_at > ?
-  AND sp.status = 'active'
-ORDER BY sp.kind, sp.name
-`, session.AccountID, session.ID, time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	defer emergencyRows.Close()
-	for emergencyRows.Next() {
-		var id, kind, name string
-		if err := emergencyRows.Scan(&id, &kind, &name); err != nil {
-			writeDBError(w, r, err)
-			return
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		items = append(items, map[string]string{
-			"id": id, "type": kind, "name": name, "role": string(domain.SpacePermissionViewer),
-		})
-	}
-	if err := emergencyRows.Err(); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -998,9 +971,15 @@ LIMIT ?
 		writeDBError(w, r, err)
 		return
 	}
-	defer rows.Close()
-
-	items := []map[string]any{}
+	type indexJobListEntry struct {
+		job         jobs.Job
+		claimedAt   string
+		claimedBy   string
+		lastError   string
+		completedAt string
+		mountID     string
+	}
+	entries := []indexJobListEntry{}
 	for rows.Next() {
 		var job jobs.Job
 		var status string
@@ -1025,11 +1004,28 @@ LIMIT ?
 			return
 		}
 		job.Status = jobs.Status(status)
-		items = append(items, jobResponse(job, claimedAt, claimedBy, lastError, completedAt))
+		entries = append(entries, indexJobListEntry{
+			job:         job,
+			claimedAt:   claimedAt,
+			claimedBy:   claimedBy,
+			lastError:   lastError,
+			completedAt: completedAt,
+			mountID:     indexJobMountID(job.PayloadJSON),
+		})
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		writeDBError(w, r, err)
 		return
+	}
+	if err := rows.Close(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	items := []map[string]any{}
+	for _, entry := range entries {
+		spaceName, mountName := s.indexJobMountLabels(r, entry.mountID)
+		items = append(items, jobResponse(entry.job, entry.claimedAt, entry.claimedBy, entry.lastError, entry.completedAt, spaceName, mountName))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -1082,7 +1078,8 @@ func (s *Server) enqueueIndexJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.recordAudit(r, "index_job_enqueue", "job", job.ID, "{}")
-	httpx.WriteJSON(w, http.StatusCreated, job)
+	spaceName, mountName := s.indexJobMountLabels(r, req.MountID)
+	httpx.WriteJSON(w, http.StatusCreated, jobResponse(job, "", "", "", "", spaceName, mountName))
 }
 
 func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
@@ -1126,31 +1123,10 @@ func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "job_not_claimed", "another job is running or this job is not queued")
 		return
 	}
-	var checkpoint struct {
-		Cursor string `json:"cursor"`
-	}
-	if err := json.Unmarshal([]byte(claimed.CheckpointJSON), &checkpoint); err != nil {
-		_ = store.Fail(r.Context(), claimed.ID, err)
-		httpx.WriteError(w, r, http.StatusConflict, "invalid_job", "job checkpoint is invalid")
-		return
-	}
-	result, err := catalog.NewService(s.sqlDB()).ScanBatch(r.Context(), mount, catalog.ScanOptions{
-		BatchSize: catalog.DefaultBatchSize,
-		Cursor:    checkpoint.Cursor,
-	})
+	result, err := s.runCatalogScanBatch(r.Context(), store, *claimed)
 	if err != nil {
-		_ = store.Fail(r.Context(), job.ID, err)
 		httpx.WriteError(w, r, http.StatusConflict, "index_failed", err.Error())
 		return
-	}
-	if !result.Done {
-		checkpoint, _ := json.Marshal(map[string]string{"cursor": result.NextCursor})
-		if err := store.Requeue(r.Context(), claimed.ID, string(checkpoint)); err != nil {
-			writeDBError(w, r, err)
-			return
-		}
-	} else {
-		_ = store.Complete(r.Context(), claimed.ID)
 	}
 	_ = s.recordAudit(r, "index_job_run", "job", job.ID, "{}")
 	httpx.WriteJSON(w, http.StatusOK, result)
@@ -1167,9 +1143,40 @@ func (s *Server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
-SELECT occurred_at, COALESCE(actor_account_id, 'system'), COALESCE(route_group, ''), action, target_type, COALESCE(target_id, ''), metadata_json
-FROM audit_events
-ORDER BY id DESC
+SELECT ae.occurred_at,
+       COALESCE(ae.actor_account_id, 'system'),
+       COALESCE(actor.email, ''),
+       COALESCE(actor.display_name, ''),
+       COALESCE(ae.route_group, ''),
+       ae.action,
+       ae.target_type,
+       COALESCE(ae.target_id, ''),
+       COALESCE(
+         CASE ae.target_type
+           WHEN 'account' THEN COALESCE(NULLIF(target_account.display_name, ''), target_account.email)
+           WHEN 'space' THEN target_space.name
+           WHEN 'mount' THEN target_mount.display_name
+           WHEN 'share' THEN COALESCE(NULLIF(target_share.relative_path, ''), target_share.public_id)
+           WHEN 'ai_token' THEN COALESCE(NULLIF(target_token.name, ''), target_token.public_id)
+           WHEN 'upload' THEN target_upload.target_relative_path
+           WHEN 'job' THEN target_job.kind
+           WHEN 'backup' THEN COALESCE(NULLIF(target_backup.path, ''), 'backup ' || target_backup.created_at)
+           ELSE ae.target_id
+         END,
+         COALESCE(ae.target_id, '')
+       ),
+       ae.metadata_json
+FROM audit_events ae
+LEFT JOIN accounts actor ON actor.id = ae.actor_account_id
+LEFT JOIN accounts target_account ON ae.target_type = 'account' AND target_account.id = ae.target_id
+LEFT JOIN spaces target_space ON ae.target_type = 'space' AND target_space.id = ae.target_id
+LEFT JOIN mounts target_mount ON ae.target_type = 'mount' AND target_mount.id = ae.target_id
+LEFT JOIN shares target_share ON ae.target_type = 'share' AND target_share.id = ae.target_id
+LEFT JOIN ai_tokens target_token ON ae.target_type = 'ai_token' AND target_token.id = ae.target_id
+LEFT JOIN upload_sessions target_upload ON ae.target_type = 'upload' AND target_upload.id = ae.target_id
+LEFT JOIN jobs target_job ON ae.target_type = 'job' AND target_job.id = ae.target_id
+LEFT JOIN backups target_backup ON ae.target_type = 'backup' AND target_backup.id = ae.target_id
+ORDER BY ae.id DESC
 LIMIT ?
 `, parseIntDefault(r.URL.Query().Get("limit"), 100))
 	if err != nil {
@@ -1177,17 +1184,15 @@ LIMIT ?
 		return
 	}
 	defer rows.Close()
-	items := []map[string]string{}
+	items := []auditEventDTO{}
 	for rows.Next() {
-		var occurredAt, actor, routeGroup, action, targetType, targetID, metadata string
-		if err := rows.Scan(&occurredAt, &actor, &routeGroup, &action, &targetType, &targetID, &metadata); err != nil {
+		var item auditEventDTO
+		if err := rows.Scan(&item.OccurredAt, &item.Actor, &item.ActorEmail, &item.ActorDisplayName, &item.RouteGroup, &item.Action, &item.TargetType, &item.TargetID, &item.TargetLabel, &item.Metadata); err != nil {
 			writeDBError(w, r, err)
 			return
 		}
-		items = append(items, map[string]string{
-			"occurredAt": occurredAt, "actor": actor, "routeGroup": routeGroup, "action": action,
-			"targetType": targetType, "targetId": targetID, "metadata": metadata,
-		})
+		item.ActorLabel = auditActorLabel(item.Actor, item.ActorEmail, item.ActorDisplayName)
+		items = append(items, item)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -1457,6 +1462,10 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
+	if !s.routeEnabled(domain.RouteGroupShare) {
+		httpx.WriteError(w, r, http.StatusConflict, "share_route_disabled", "share route group is disabled; enable the Share route group to create share links")
+		return
+	}
 	var req struct {
 		SpaceID         string `json:"spaceId"`
 		SpaceIDAlt      string `json:"space_id"`
@@ -1561,9 +1570,9 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		maxDownloads = *req.MaxDownloads
 	}
 	_, err = s.sqlDB().ExecContext(r.Context(), `
-INSERT INTO shares(id, public_id, secret_hash, password_hash, creator_account_id, space_id, mount_id, relative_path, allow_preview, allow_download, max_visits, max_downloads, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, shareID, publicID, share.HashSecret(secret), passwordHash, session.AccountID, req.SpaceID, req.MountID, relativePath, boolInt(allowPreview), boolInt(allowDownload), maxVisits, maxDownloads, expiresAt.Format(time.RFC3339Nano))
+	INSERT INTO shares(id, public_id, secret_hash, fragment_secret, password_hash, creator_account_id, space_id, mount_id, relative_path, allow_preview, allow_download, max_visits, max_downloads, expires_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, shareID, publicID, share.HashSecret(secret), secret, passwordHash, session.AccountID, req.SpaceID, req.MountID, relativePath, boolInt(allowPreview), boolInt(allowDownload), maxVisits, maxDownloads, expiresAt.Format(time.RFC3339Nano))
 	if err != nil {
 		writeDBError(w, r, err)
 		return
@@ -1587,9 +1596,11 @@ func (s *Server) listAITokens(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
 SELECT t.id, t.public_id, t.name, t.scopes, t.created_at, t.expires_at,
        COALESCE(t.last_used_at, ''), COALESCE(t.revoked_at, ''),
-       COALESCE(group_concat(b.space_id || char(31) || b.mount_id || char(31) || b.relative_path, char(30)), '')
+       COALESCE(group_concat(b.space_id || char(31) || COALESCE(sp.name, '') || char(31) || b.mount_id || char(31) || COALESCE(m.display_name, '') || char(31) || b.relative_path, char(30)), '')
 FROM ai_tokens t
 LEFT JOIN ai_token_boundaries b ON b.token_id = t.id
+LEFT JOIN spaces sp ON sp.id = b.space_id
+LEFT JOIN mounts m ON m.id = b.mount_id
 WHERE t.account_id = ?
 GROUP BY t.id
 ORDER BY t.created_at DESC, t.id DESC
@@ -1824,17 +1835,6 @@ func (s *Server) requireSession(r *http.Request) (identity.Session, error) {
 	if err != nil {
 		return identity.Session{}, err
 	}
-	// Entry isolation: a session issued on one network entry is rejected on
-	// the other. This is what actually prevents a LAN session being reused
-	// over the proxy origin (Secure alone is insufficient — a non-Secure LAN
-	// cookie is still sent over an HTTPS origin).
-	entry := httpx.Entry(r.Context())
-	if entry == "" {
-		entry = identity.DefaultSessionEntry
-	}
-	if session.Entry != entry {
-		return identity.Session{}, identity.ErrSessionInvalid
-	}
 	return session, nil
 }
 
@@ -1892,30 +1892,7 @@ WHERE sm.account_id = ? AND sm.space_id = ? AND sp.status = 'active'
 	if err == nil && count == 1 {
 		return true
 	}
-	return s.hasEmergencyViewerAccess(r, accountID, spaceID)
-}
-
-// hasEmergencyViewerAccess grants temporary viewer access only for the bound
-// interactive admin browser session. REST/MCP/AI Token callers without that
-// session cookie cannot consume emergency grants.
-func (s *Server) hasEmergencyViewerAccess(r *http.Request, accountID, spaceID string) bool {
-	session, err := s.requireSession(r)
-	if err != nil || session.AccountID != accountID {
-		return false
-	}
-	var count int
-	err = s.sqlDB().QueryRowContext(r.Context(), `
-SELECT COUNT(1)
-FROM emergency_access ea
-JOIN spaces sp ON sp.id = ea.target_space_id
-WHERE ea.admin_account_id = ?
-  AND ea.target_space_id = ?
-  AND ea.session_id = ?
-  AND ea.revoked_at IS NULL
-  AND ea.expires_at > ?
-  AND sp.status = 'active'
-`, accountID, spaceID, session.ID, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&count)
-	return err == nil && count == 1
+	return false
 }
 
 type accountTOTP struct {
@@ -2323,10 +2300,12 @@ func parseBoundaryList(value string) []map[string]string {
 	items := make([]map[string]string, 0, len(rows))
 	for _, row := range rows {
 		parts := strings.Split(row, string(rune(31)))
-		if len(parts) != 3 {
-			continue
+		switch len(parts) {
+		case 3:
+			items = append(items, map[string]string{"spaceId": parts[0], "mountId": parts[1], "path": parts[2]})
+		case 5:
+			items = append(items, map[string]string{"spaceId": parts[0], "spaceName": parts[1], "mountId": parts[2], "mountName": parts[3], "path": parts[4]})
 		}
-		items = append(items, map[string]string{"spaceId": parts[0], "mountId": parts[1], "path": parts[2]})
 	}
 	return items
 }
@@ -2360,12 +2339,14 @@ func aiTokenResponse(id, publicID, name, scopesJSON, createdAt, expiresAt, lastU
 	}
 }
 
-func jobResponse(job jobs.Job, claimedAt, claimedBy, lastError, completedAt string) map[string]any {
+func jobResponse(job jobs.Job, claimedAt, claimedBy, lastError, completedAt, spaceName, mountName string) map[string]any {
 	return map[string]any{
 		"id":          job.ID,
 		"kind":        job.Kind,
 		"priority":    job.Priority,
 		"status":      job.Status,
+		"spaceName":   spaceName,
+		"mountName":   mountName,
 		"payload":     json.RawMessage(job.PayloadJSON),
 		"checkpoint":  json.RawMessage(job.CheckpointJSON),
 		"attempts":    job.Attempts,
@@ -2379,6 +2360,33 @@ func jobResponse(job jobs.Job, claimedAt, claimedBy, lastError, completedAt stri
 	}
 }
 
+func indexJobMountID(payloadJSON string) string {
+	var payload struct {
+		MountID string `json:"mount_id"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.MountID)
+}
+
+func (s *Server) indexJobMountLabels(r *http.Request, mountID string) (string, string) {
+	if mountID == "" {
+		return "", ""
+	}
+	var spaceName, mountName string
+	err := s.sqlDB().QueryRowContext(r.Context(), `
+SELECT sp.name, m.display_name
+FROM mounts m
+JOIN spaces sp ON sp.id = m.space_id
+WHERE m.id = ?
+`, mountID).Scan(&spaceName, &mountName)
+	if err != nil {
+		return "", ""
+	}
+	return spaceName, mountName
+}
+
 func parseIntDefault(value string, fallback int) int {
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed <= 0 {
@@ -2387,11 +2395,9 @@ func parseIntDefault(value string, fallback int) int {
 	return parsed
 }
 
-// isSecureRequest reports whether the client connection is considered HTTPS.
-// The proxy_https entry is served as plain HTTP behind a TLS-terminating
-// reverse proxy, so its requests are treated as secure for cookie purposes.
+// isSecureRequest reports whether the client connection is HTTPS.
 func isSecureRequest(r *http.Request) bool {
-	return r.TLS != nil || httpx.Entry(r.Context()) == EntryProxy
+	return r.TLS != nil
 }
 
 func sessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {
@@ -2799,9 +2805,38 @@ LIMIT 20
 
 func (s *Server) bootstrapAudit(r *http.Request, db *sql.DB) []auditDTO {
 	rows, err := db.QueryContext(r.Context(), `
-SELECT occurred_at, COALESCE(actor_account_id, 'system'), action, target_type, COALESCE(target_id, '')
-FROM audit_events
-ORDER BY id DESC
+SELECT ae.occurred_at,
+       COALESCE(ae.actor_account_id, 'system'),
+       COALESCE(actor.email, ''),
+       COALESCE(actor.display_name, ''),
+       ae.action,
+       ae.target_type,
+       COALESCE(ae.target_id, ''),
+       COALESCE(
+         CASE ae.target_type
+           WHEN 'account' THEN COALESCE(NULLIF(target_account.display_name, ''), target_account.email)
+           WHEN 'space' THEN target_space.name
+           WHEN 'mount' THEN target_mount.display_name
+           WHEN 'share' THEN COALESCE(NULLIF(target_share.relative_path, ''), target_share.public_id)
+           WHEN 'ai_token' THEN COALESCE(NULLIF(target_token.name, ''), target_token.public_id)
+           WHEN 'upload' THEN target_upload.target_relative_path
+           WHEN 'job' THEN target_job.kind
+           WHEN 'backup' THEN COALESCE(NULLIF(target_backup.path, ''), 'backup ' || target_backup.created_at)
+           ELSE ae.target_id
+         END,
+         COALESCE(ae.target_id, '')
+       )
+FROM audit_events ae
+LEFT JOIN accounts actor ON actor.id = ae.actor_account_id
+LEFT JOIN accounts target_account ON ae.target_type = 'account' AND target_account.id = ae.target_id
+LEFT JOIN spaces target_space ON ae.target_type = 'space' AND target_space.id = ae.target_id
+LEFT JOIN mounts target_mount ON ae.target_type = 'mount' AND target_mount.id = ae.target_id
+LEFT JOIN shares target_share ON ae.target_type = 'share' AND target_share.id = ae.target_id
+LEFT JOIN ai_tokens target_token ON ae.target_type = 'ai_token' AND target_token.id = ae.target_id
+LEFT JOIN upload_sessions target_upload ON ae.target_type = 'upload' AND target_upload.id = ae.target_id
+LEFT JOIN jobs target_job ON ae.target_type = 'job' AND target_job.id = ae.target_id
+LEFT JOIN backups target_backup ON ae.target_type = 'backup' AND target_backup.id = ae.target_id
+ORDER BY ae.id DESC
 LIMIT 20
 `)
 	if err != nil {
@@ -2811,15 +2846,37 @@ LIMIT 20
 	items := []auditDTO{}
 	for rows.Next() {
 		var item auditDTO
-		var targetType, targetID string
-		if err := rows.Scan(&item.Time, &item.Actor, &item.Event, &targetType, &targetID); err != nil {
+		var targetType, targetID, targetLabel, actorEmail, actorDisplayName string
+		if err := rows.Scan(&item.Time, &item.Actor, &actorEmail, &actorDisplayName, &item.Event, &targetType, &targetID, &targetLabel); err != nil {
 			return []auditDTO{{Time: "", Actor: "system", Event: "audit_query_failed", Target: "audit", Result: "error"}}
 		}
-		item.Target = strings.TrimSpace(targetType + " " + targetID)
+		item.Actor = auditActorLabel(item.Actor, actorEmail, actorDisplayName)
+		item.Target = auditTargetLabel(targetType, targetID, targetLabel)
 		item.Result = "recorded"
 		items = append(items, item)
 	}
 	return items
+}
+
+func auditActorLabel(actorID, email, displayName string) string {
+	if actorID == "" || actorID == "system" {
+		return "system"
+	}
+	if strings.TrimSpace(displayName) != "" {
+		return displayName
+	}
+	if strings.TrimSpace(email) != "" {
+		return email
+	}
+	return actorID
+}
+
+func auditTargetLabel(targetType, targetID, targetLabel string) string {
+	label := strings.TrimSpace(targetLabel)
+	if label == "" {
+		label = strings.TrimSpace(targetID)
+	}
+	return strings.TrimSpace(strings.TrimSpace(targetType) + " " + label)
 }
 
 func (s *Server) bootstrapRisks(db *sql.DB) []adminRiskDTO {

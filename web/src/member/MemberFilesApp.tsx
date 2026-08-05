@@ -6,20 +6,30 @@ import {
   completeUpload,
   createDirectory,
   createUpload,
+  crossMountCopy,
+  crossMountMove,
   deleteObject,
   downloadURL,
+  emptyTrash,
   getPreferences,
   getSession,
   getUpload,
+  initialize,
   listDirectoryChildren,
   listMounts,
   listSpaces,
+  listTrash,
   login,
   logout,
   previewURL,
+  purgeTrashItem,
   renameObject,
+  restoreTrashItem,
   searchSpace,
   uploadPart,
+  moveObject,
+  type InitializePayload,
+  type TrashItemPayload,
 } from '../api';
 import { localeMessages } from './i18n';
 import AdminWorkspace, { type AdminTab } from './AdminWorkspace';
@@ -30,9 +40,10 @@ import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, t
 import { resumedUploadProgress, uploadStorageKey } from './uploadQueue';
 import { createClientId } from './clientId';
 import { useLocale } from './useLocale';
+import { readableLabel } from './displayLabels';
 import './member-files.css';
 
-type MemberTab = 'files' | 'shares' | 'tokens' | 'account';
+type MemberTab = 'files' | 'trash' | 'shares' | 'tokens' | 'account';
 
 type SessionState = 'checking' | 'signed-out' | 'ready';
 type ViewMode = 'list' | 'grid';
@@ -84,6 +95,8 @@ type PreviewTarget = {
   previewKind: string;
 };
 
+type FileOperation = 'move' | 'copy';
+
 type MemberFilesAppProps = {
   entry?: 'member' | 'admin';
 };
@@ -95,12 +108,20 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const [isAdmin, setIsAdmin] = useState(false);
   const [activeTab, setActiveTab] = useState<MemberTab | AdminTab>(entry === 'admin' ? 'overview' : 'files');
   const [loginForm, setLoginForm] = useState({ login: '', password: '', totpCode: '' });
+  const [setupMode, setSetupMode] = useState(false);
+  const [setupForm, setSetupForm] = useState<InitializePayload>({ token: '', email: '', displayName: '', password: '' });
+  const [setupNotice, setSetupNotice] = useState('');
   const [spaces, setSpaces] = useState<MemberSpace[]>([]);
   const [mounts, setMounts] = useState<MemberMount[]>([]);
   const [activeSpaceId, setActiveSpaceId] = useState('');
   const [activeMountId, setActiveMountId] = useState('');
+  const [destinationSpaceId, setDestinationSpaceId] = useState('');
+  const [destinationMounts, setDestinationMounts] = useState<MemberMount[]>([]);
+  const [destinationMountId, setDestinationMountId] = useState('');
+  const [destinationPath, setDestinationPath] = useState('.');
   const [relativePath, setRelativePath] = useState('.');
   const [entries, setEntries] = useState<MemberDirectoryEntry[]>([]);
+  const [trashItems, setTrashItems] = useState<TrashItemPayload[]>([]);
   const [readOnly, setReadOnly] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -122,6 +143,9 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const [renameBusy, setRenameBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<MemberDirectoryEntry | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [operationTarget, setOperationTarget] = useState<{ entry: MemberDirectoryEntry; operation: FileOperation } | null>(null);
+  const [operationBusy, setOperationBusy] = useState(false);
+  const [resumeSelectMode, setResumeSelectMode] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const controllersRef = useRef(new Map<string, AbortController>());
   const pendingDirectoryPathRef = useRef<string | null>(null);
@@ -163,6 +187,21 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       setLoading(false);
     }
   }, []);
+
+  const refreshTrash = useCallback(async () => {
+    if (!activeSpaceId || !activeMountId) return;
+    setLoading(true);
+    setError('');
+    try {
+      const response = await listTrash(activeSpaceId, activeMountId);
+      setTrashItems(response.items ?? []);
+    } catch (caught) {
+      setTrashItems([]);
+      setError(describeError(caught));
+    } finally {
+      setLoading(false);
+    }
+  }, [activeMountId, activeSpaceId]);
 
   useEffect(() => {
     void (async () => {
@@ -214,6 +253,27 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     void refreshDirectory(activeSpaceId, activeMountId, initialPath);
   }, [activeMountId, activeSpaceId, refreshDirectory, sessionState]);
 
+  useEffect(() => {
+    if (activeTab === 'trash' && sessionState === 'ready') void refreshTrash();
+  }, [activeTab, refreshTrash, sessionState]);
+
+  useEffect(() => {
+    if (!operationTarget || !destinationSpaceId) {
+      setDestinationMounts([]);
+      return;
+    }
+    const controller = new AbortController();
+    void listMounts(destinationSpaceId, controller.signal)
+      .then((response) => {
+        setDestinationMounts(response.items);
+        setDestinationMountId((current) => response.items.some((mount) => mount.id === current) ? current : (response.items[0]?.id ?? ''));
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setDestinationMounts([]);
+      });
+    return () => controller.abort();
+  }, [destinationSpaceId, operationTarget]);
+
   async function onLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
@@ -223,6 +283,23 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       setIsAdmin(session.isAdmin === true);
       setSessionState('ready');
       await loadSpaces();
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onInitialize(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+    setSetupNotice('');
+    try {
+      await initialize(setupForm);
+      setSetupNotice(text.setupComplete);
+      setSetupMode(false);
+      setLoginForm({ login: setupForm.email, password: '', totpCode: '' });
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -405,6 +482,14 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     setDeleteTarget(entry);
   }
 
+  function openOperation(entry: MemberDirectoryEntry, operation: FileOperation) {
+    setError('');
+    setOperationTarget({ entry, operation });
+    setDestinationSpaceId(activeSpaceId);
+    setDestinationMountId(entry.mountId ?? activeMountId);
+    setDestinationPath(relativePath);
+  }
+
   async function onDeleteConfirmed() {
     if (!deleteTarget) return;
     const mountId = deleteTarget.mountId ?? activeMountId;
@@ -421,6 +506,83 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       setError(describeError(caught));
     } finally {
       setDeleteBusy(false);
+    }
+  }
+
+  async function onFileOperation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!operationTarget || !destinationSpaceId || !destinationMountId) return;
+    const sourceMountId = operationTarget.entry.mountId ?? activeMountId;
+    const toDir = normalizeParentPath(destinationPath);
+    setOperationBusy(true);
+    setError('');
+    try {
+      if (operationTarget.operation === 'copy') {
+        await crossMountCopy(activeSpaceId, sourceMountId, {
+          from: operationTarget.entry.relativePath,
+          toSpaceId: destinationSpaceId,
+          toMountId: destinationMountId,
+          toDir,
+        });
+      } else if (destinationSpaceId === activeSpaceId && destinationMountId === sourceMountId) {
+        await moveObject(activeSpaceId, sourceMountId, { from: operationTarget.entry.relativePath, toDir });
+      } else {
+        await crossMountMove(activeSpaceId, sourceMountId, {
+          from: operationTarget.entry.relativePath,
+          toSpaceId: destinationSpaceId,
+          toMountId: destinationMountId,
+          toDir,
+        });
+      }
+      setOperationTarget(null);
+      await refreshDirectory(activeSpaceId, activeMountId, relativePath);
+      if (activeTab === 'trash') await refreshTrash();
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setOperationBusy(false);
+    }
+  }
+
+  async function onRestoreTrash(item: TrashItemPayload) {
+    if (!activeSpaceId || !activeMountId) return;
+    setLoading(true);
+    setError('');
+    try {
+      await restoreTrashItem(activeSpaceId, activeMountId, item.id);
+      await refreshTrash();
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onPurgeTrash(item: TrashItemPayload) {
+    if (!activeSpaceId || !activeMountId) return;
+    setLoading(true);
+    setError('');
+    try {
+      await purgeTrashItem(activeSpaceId, activeMountId, item.id);
+      await refreshTrash();
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onEmptyTrash() {
+    if (!activeSpaceId || !activeMountId || !window.confirm(text.trashEmptyConfirm)) return;
+    setLoading(true);
+    setError('');
+    try {
+      await emptyTrash(activeSpaceId, activeMountId);
+      await refreshTrash();
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -514,6 +676,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   function onFileInput(event: ChangeEvent<HTMLInputElement>) {
     const files = [...(event.target.files ?? [])];
     event.target.value = '';
+    setResumeSelectMode(false);
     if (files.length === 0) return;
     void files.reduce(async (previous, file) => {
       await previous;
@@ -540,15 +703,28 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       <main className="member-auth-state">
         <section className="member-login-panel">
           <div className="member-brand"><span>O</span>Omnora</div>
-          <h1>{text.signIn}</h1>
-          <p>{text.myFiles}</p>
-          <form onSubmit={onLogin}>
-            <label>{text.email}<input value={loginForm.login} onChange={(event) => setLoginForm({ ...loginForm, login: event.target.value })} autoComplete="username" required /></label>
-            <label>{text.password}<input type="password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} autoComplete="current-password" required /></label>
-            <label>{text.verificationCode}<input value={loginForm.totpCode} onChange={(event) => setLoginForm({ ...loginForm, totpCode: event.target.value })} inputMode="numeric" autoComplete="one-time-code" /></label>
-            {error && <p className="member-error">{text.error}: {error}</p>}
-            <button className="member-primary" type="submit" disabled={loading}>{text.signInAction}</button>
-          </form>
+          <h1>{setupMode ? text.setupTitle : text.signIn}</h1>
+          <p>{setupMode ? text.setupDetail : text.myFiles}</p>
+          {setupMode ? (
+            <form onSubmit={onInitialize}>
+              <label>{text.setupToken}<input value={setupForm.token} onChange={(event) => setSetupForm({ ...setupForm, token: event.target.value })} autoComplete="one-time-code" required /></label>
+              <label>{text.email}<input type="email" value={setupForm.email} onChange={(event) => setSetupForm({ ...setupForm, email: event.target.value })} autoComplete="username" required /></label>
+              <label>{text.setupDisplayName}<input value={setupForm.displayName} onChange={(event) => setSetupForm({ ...setupForm, displayName: event.target.value })} required /></label>
+              <label>{text.password}<input type="password" value={setupForm.password} onChange={(event) => setSetupForm({ ...setupForm, password: event.target.value })} autoComplete="new-password" required /></label>
+              {error && <p className="member-error">{text.error}: {error}</p>}
+              <button className="member-primary" type="submit" disabled={loading}>{text.setupSubmit}</button>
+              <button className="member-secondary-action" type="button" onClick={() => { setSetupMode(false); setError(''); }}>{text.backToSignIn}</button>
+            </form>
+          ) : (
+            <form onSubmit={onLogin}>
+              <label>{text.email}<input value={loginForm.login} onChange={(event) => setLoginForm({ ...loginForm, login: event.target.value })} autoComplete="username" required /></label>
+              <label>{text.password}<input type="password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} autoComplete="current-password" required /></label>
+              {setupNotice && <p className="member-readonly">{setupNotice}</p>}
+              {error && <p className="member-error">{text.error}: {error}</p>}
+              <button className="member-primary" type="submit" disabled={loading}>{text.signInAction}</button>
+              <button className="member-secondary-action" type="button" onClick={() => { setSetupMode(true); setError(''); }}>{text.firstSetup}</button>
+            </form>
+          )}
           <div className="member-language-auth"><button type="button" onClick={() => setLocale('zh-CN')} aria-pressed={locale === 'zh-CN'}>中文</button><button type="button" onClick={() => setLocale('en-US')} aria-pressed={locale === 'en-US'}>EN</button></div>
         </section>
       </main>
@@ -576,7 +752,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     modifiedAt: item.modifiedAt ?? '',
     readOnly: mounts.find((mount) => mount.id === item.mountId)?.mode === 'read-only',
     previewKind: item.previewKind ?? 'unknown',
-    mountName: mounts.find((mount) => mount.id === item.mountId)?.name ?? item.mountId,
+    mountName: readableLabel(mounts.find((mount) => mount.id === item.mountId)?.name),
   }));
   const crumbItems = breadcrumbs(relativePath);
   const previewSrc = preview ? previewURL(activeSpaceId, preview.mountId, preview.relativePath) : '';
@@ -600,8 +776,6 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             <button className={`member-nav ${activeTab === 'spaces' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('spaces')}>{text.adminSpaces}</button>
             <button className={`member-nav ${activeTab === 'mounts' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('mounts')}>{text.adminMounts}</button>
             <button className={`member-nav ${activeTab === 'index-jobs' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('index-jobs')}>{text.adminIndexJobs}</button>
-            <button className={`member-nav ${activeTab === 'emergency' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('emergency')}>{text.adminEmergency}</button>
-            <button className={`member-nav ${activeTab === 'network' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('network')}>{text.adminNetwork}</button>
             <button className={`member-nav ${activeTab === 'route-groups' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('route-groups')}>{text.adminRouteGroups}</button>
             <button className={`member-nav ${activeTab === 'share-governance' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('share-governance')}>{text.adminShareGovernance}</button>
             <button className={`member-nav ${activeTab === 'token-governance' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('token-governance')}>{text.adminTokenGovernance}</button>
@@ -610,11 +784,12 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
           </nav>}
           {entry === 'member' && <nav aria-label="Member workspace">
             <button className={`member-nav ${activeTab === 'files' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('files')}>{text.files}</button>
+            <button className={`member-nav ${activeTab === 'trash' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('trash')}>{text.recycleBin}</button>
             <button className={`member-nav ${activeTab === 'shares' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('shares')}>{text.navShares}</button>
             <button className={`member-nav ${activeTab === 'tokens' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('tokens')}>{text.navTokens}</button>
             <button className={`member-nav ${activeTab === 'account' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('account')}>{text.account}</button>
           </nav>}
-          {activeTab === 'files' && <><div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => setActiveSpaceId(space.id)}>{space.name}<small>{space.role}</small></button>)}</div>
+          {(activeTab === 'files' || activeTab === 'trash') && <><div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => setActiveSpaceId(space.id)}>{space.name}<small>{space.role}</small></button>)}</div>
           <div className="member-sidebar-section"><p>{text.mounts}</p>{mounts.map((mount) => <button className={`member-mount ${mount.id === activeMountId ? 'selected' : ''}`} key={mount.id} type="button" onClick={() => setActiveMountId(mount.id)}><span>{mount.name}</span><small>{mount.health === 'unavailable' ? text.statusUnavailable : mount.mode === 'read-only' ? text.readOnly : text.readWrite}</small></button>)}</div></>}
         </aside>
 
@@ -632,10 +807,10 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
               <thead><tr><th>{text.name}</th><th>{text.size}</th><th>{text.modified}</th><th>{text.actions}</th></tr></thead>
               <tbody>{visibleEntries.map((entry) => (
                 <tr key={`${entry.kind}-${entry.mountId ?? activeMountId}-${entry.relativePath}`}>
-                  <td><div className="member-file-name"><span className={`member-file-icon ${entry.kind}`}>{entry.kind === 'dir' ? 'DIR' : entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{entry.name}</button> : canPreview(entry.previewKind) ? <button type="button" className="member-file-preview" onClick={() => openPreview(entry)}>{entry.name}</button> : <span>{entry.name}</span>}{searchResults !== null && <small>{entry.mountName}</small>}</div></td>
+                  <td><div className="member-file-name"><span className={`member-file-icon ${entry.kind}`}>{entry.kind === 'dir' ? 'DIR' : entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{entry.name}</button> : canPreview(entry.previewKind) ? <button type="button" className="member-file-preview" onClick={() => openPreview(entry)}>{entry.name}</button> : <span>{entry.name}</span>}{searchResults !== null && entry.mountName && <small>{entry.mountName}</small>}</div></td>
                   <td>{entry.kind === 'dir' ? '--' : formatBytes(entry.size, locale)}</td>
                   <td>{formatDate(entry.modifiedAt, locale)}</td>
-                  <td><div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{text.open}</button> : <>{canPreview(entry.previewKind) && <button type="button" onClick={() => openPreview(entry)}>{text.preview}</button>}<a href={downloadURL(activeSpaceId, entry.mountId ?? activeMountId, entry.relativePath)}>{text.download}</a></>}{canManageShares && searchResults === null && <button type="button" onClick={() => openShareForEntry(entry)}>{text.shareAction}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openRename(entry)}>{text.rename}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openDelete(entry)}>{text.deleteFile}</button>}</div></td>
+                  <td><div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{text.open}</button> : <>{canPreview(entry.previewKind) && <button type="button" onClick={() => openPreview(entry)}>{text.preview}</button>}<a href={downloadURL(activeSpaceId, entry.mountId ?? activeMountId, entry.relativePath)}>{text.download}</a></>}{canManageShares && searchResults === null && <button type="button" onClick={() => openShareForEntry(entry)}>{text.shareAction}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'move')}>{text.move}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'copy')}>{text.copyObject}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openRename(entry)}>{text.rename}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openDelete(entry)}>{text.deleteFile}</button>}</div></td>
                 </tr>
               ))}</tbody>
             </table>
@@ -645,12 +820,30 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
                 <span className={`member-file-icon ${entry.kind}`}>{entry.kind === 'dir' ? 'DIR' : entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>
                 {entry.kind === 'dir' || canPreview(entry.previewKind) ? <button type="button" className={entry.kind === 'file' ? 'member-file-preview' : undefined} onClick={() => entry.kind === 'dir' ? openDirectory(entry.relativePath, entry.mountId) : openPreview(entry)}><strong>{entry.name}</strong></button> : <strong>{entry.name}</strong>}
                 <small>{entry.kind === 'dir' ? '--' : formatBytes(entry.size, locale)}</small>
-                {searchResults !== null && <small>{entry.mountName}</small>}
-                <div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{text.open}</button> : <>{canPreview(entry.previewKind) && <button type="button" onClick={() => openPreview(entry)}>{text.preview}</button>}<a className="member-grid-download" href={downloadURL(activeSpaceId, entry.mountId ?? activeMountId, entry.relativePath)}>{text.download}</a></>}{canManageShares && searchResults === null && <button type="button" onClick={() => openShareForEntry(entry)}>{text.shareAction}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openRename(entry)}>{text.rename}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openDelete(entry)}>{text.deleteFile}</button>}</div>
+                {searchResults !== null && entry.mountName && <small>{entry.mountName}</small>}
+                <div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{text.open}</button> : <>{canPreview(entry.previewKind) && <button type="button" onClick={() => openPreview(entry)}>{text.preview}</button>}<a className="member-grid-download" href={downloadURL(activeSpaceId, entry.mountId ?? activeMountId, entry.relativePath)}>{text.download}</a></>}{canManageShares && searchResults === null && <button type="button" onClick={() => openShareForEntry(entry)}>{text.shareAction}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'move')}>{text.move}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'copy')}>{text.copyObject}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openRename(entry)}>{text.rename}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openDelete(entry)}>{text.deleteFile}</button>}</div>
               </article>
             ))}</div>
           )}
           {searchResults !== null && searchNextCursor && <button className="member-load-more" type="button" onClick={() => void loadMoreSearchResults()} disabled={loading}>{text.loadMore}</button>}
+          </> : activeTab === 'trash' ? <>
+            <div className="member-heading"><div><h1>{text.trashTitle}</h1><p>{activeMount ? `${activeMount.name} · ${text.trashDetail}` : text.noMount}</p></div><button className="member-secondary-action" type="button" onClick={() => void refreshTrash()} disabled={loading || !activeMountId}>{text.refresh}</button></div>
+            <div className="member-toolbar"><button type="button" className="member-modal-danger" disabled={loading || trashItems.length === 0 || readOnly || mountUnavailable} onClick={() => void onEmptyTrash()}>{text.trashEmptyAction}</button></div>
+            {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
+            {loading ? <div className="member-loading">{text.loading}</div> : trashItems.length === 0 ? <div className="member-empty">{text.trashEmpty}</div> : (
+              <table className="member-file-table">
+                <thead><tr><th>{text.name}</th><th>{text.trashOriginalPath}</th><th>{text.size}</th><th>{text.trashDeletedAt}</th><th>{text.actions}</th></tr></thead>
+                <tbody>{trashItems.map((item) => (
+                  <tr key={item.id}>
+                    <td><div className="member-file-name"><span className={`member-file-icon ${item.kind === 'dir' ? 'dir' : 'file'}`}>{item.kind === 'dir' ? 'DIR' : item.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span><span>{item.name}</span></div></td>
+                    <td>{item.originalPath}</td>
+                    <td>{item.kind === 'dir' ? '--' : formatBytes(item.size, locale)}</td>
+                    <td>{formatDate(item.deletedAt, locale)}</td>
+                    <td><div className="member-file-actions"><button type="button" onClick={() => void onRestoreTrash(item)} disabled={loading || readOnly || mountUnavailable}>{text.trashRestore}</button><button type="button" onClick={() => void onPurgeTrash(item)} disabled={loading || readOnly || mountUnavailable}>{text.trashPurge}</button></div></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            )}
           </> : activeTab === 'shares' ? <MemberSharesPanel locale={locale} />
             : activeTab === 'tokens' ? <MemberTokensPanel locale={locale} />
             : activeTab === 'account' ? <MemberAccountPanel locale={locale} />
@@ -658,7 +851,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
         </section>
       </div>
 
-      {transfers.length > 0 && <aside className="member-transfers"><div><strong>{text.activeTransfers}</strong><button type="button" onClick={() => setTransfers((items) => items.filter((item) => item.state === 'uploading' || item.state === 'queued'))}>{text.clearCompleted}</button></div>{transfers.map((transfer) => <div className="member-transfer" key={transfer.id}><span>{transfer.name}</span><progress value={transfer.progress} max="100" /><small>{transfer.state === 'failed' ? `${text.uploadFailed}: ${transfer.detail ?? ''}` : transfer.state === 'completed' ? text.uploadComplete : `${text.uploadProgress} ${transfer.progress}%`}</small>{(transfer.state === 'failed' || transfer.state === 'cancelled') && <small>{text.resumeUploadHint}</small>}{(transfer.state === 'uploading' || transfer.state === 'queued') && <button type="button" onClick={() => void cancelTransfer(transfer)}>{text.cancel}</button>}</div>)}</aside>}
+      {transfers.length > 0 && <aside className="member-transfers"><div><strong>{text.activeTransfers}</strong><button type="button" onClick={() => setTransfers((items) => items.filter((item) => item.state === 'uploading' || item.state === 'queued'))}>{text.clearCompleted}</button></div>{transfers.map((transfer) => <div className="member-transfer" key={transfer.id}><span>{transfer.name}</span><progress value={transfer.progress} max="100" /><small>{transfer.state === 'failed' ? `${text.uploadFailed}: ${transfer.detail ?? ''}` : transfer.state === 'completed' ? text.uploadComplete : `${text.uploadProgress} ${transfer.progress}%`}</small>{(transfer.state === 'failed' || transfer.state === 'cancelled') && <small>{text.resumeUploadHint}</small>}{(transfer.state === 'failed' || transfer.state === 'cancelled') && <button type="button" onClick={() => { setResumeSelectMode(true); fileInputRef.current?.click(); }}>{resumeSelectMode ? text.selectFile : text.resumeUpload}</button>}{(transfer.state === 'uploading' || transfer.state === 'queued') && <button type="button" onClick={() => void cancelTransfer(transfer)}>{text.cancel}</button>}</div>)}</aside>}
 
       {newFolderOpen && <div className="member-modal-backdrop"><form className="member-modal" onSubmit={onCreateFolder}><h2>{text.newFolder}</h2><label>{text.folderName}<input autoFocus value={folderName} onChange={(event) => setFolderName(event.target.value)} required /></label><div><button type="button" onClick={() => setNewFolderOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={loading}>{text.create}</button></div></form></div>}
 
@@ -683,6 +876,31 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             <p className="member-modal-hint"><strong>{deleteTarget.name}</strong></p>
             <div><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDeleteConfirmed()} disabled={deleteBusy}>{text.deleteFile}</button></div>
           </div>
+        </div>
+      )}
+
+      {operationTarget && (
+        <div className="member-modal-backdrop">
+          <form className="member-modal" onSubmit={onFileOperation}>
+            <h2>{operationTarget.operation === 'copy' ? text.moveCopyTitle : text.moveTitle}</h2>
+            <p className="member-modal-hint"><strong>{operationTarget.entry.name}</strong></p>
+            <label>{text.moveTargetSpace}
+              <select value={destinationSpaceId} onChange={(event) => setDestinationSpaceId(event.target.value)} required>
+                {spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}
+              </select>
+            </label>
+            <label>{text.moveTargetMount}
+              <select value={destinationMountId} onChange={(event) => setDestinationMountId(event.target.value)} required>
+                {destinationMounts.map((mount) => <option key={mount.id} value={mount.id}>{mount.name}</option>)}
+              </select>
+            </label>
+            <label>{text.moveTargetPath}<input value={destinationPath} onChange={(event) => setDestinationPath(event.target.value)} placeholder="." /><small className="member-path-hint">{text.moveTargetPathHint}</small></label>
+            {error && <p className="member-error">{text.error}: {error}</p>}
+            <div>
+              <button type="button" onClick={() => setOperationTarget(null)}>{text.cancel}</button>
+              <button className="member-primary" type="submit" disabled={operationBusy || !destinationMountId}>{operationTarget.operation === 'copy' ? text.copySubmit : text.moveSubmit}</button>
+            </div>
+          </form>
         </div>
       )}
 

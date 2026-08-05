@@ -14,45 +14,6 @@ import (
 	"omnora/internal/store"
 )
 
-// TestNetworkGateFailsClosedOnEmptyCIDR guards against fail-open when the LAN
-// entry is enabled but no usable CIDR was configured.
-func TestNetworkGateFailsClosedOnEmptyCIDR(t *testing.T) {
-	db, handler := newAPITestServer(t)
-	admin, _ := createAPITestAccounts(t, db)
-	adminCookie := issueAPITestSession(t, db, admin.ID)
-
-	body, err := json.Marshal(map[string]any{
-		"name":     "lan_http",
-		"enabled":  true,
-		"bindAddr": "",
-		"cidrs":    []string{},
-	})
-	if err != nil {
-		t.Fatalf("marshal network entry: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/network-entries", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(adminCookie)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("put network entry status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-
-	// Every client address must be rejected now that the entry is enabled
-	// without any allowed CIDR.
-	for _, addr := range []string{"127.0.0.1:3456", "203.0.113.10:3456"} {
-		probe := httptest.NewRequest(http.MethodGet, "/api/v1/admin/overview", nil)
-		probe.RemoteAddr = addr
-		probe.AddCookie(adminCookie)
-		probeRec := httptest.NewRecorder()
-		handler.ServeHTTP(probeRec, probe)
-		if probeRec.Code != http.StatusForbidden {
-			t.Fatalf("probe from %s status = %d, want 403 (fail closed), body = %s", addr, probeRec.Code, probeRec.Body.String())
-		}
-	}
-}
-
 // TestTrashPurgeAndEmptyEndpoints exercises the permanent-cleanup HTTP surface.
 func TestTrashPurgeAndEmptyEndpoints(t *testing.T) {
 	db, handler := newAPITestServer(t)
@@ -132,7 +93,7 @@ func TestTrashPurgeAndEmptyEndpoints(t *testing.T) {
 // TestDeleteRevokesChildShares verifies that deleting a directory invalidates
 // shares pointing at anything beneath it, not just the exact path.
 func TestDeleteRevokesChildShares(t *testing.T) {
-	db, handler := newAPITestServer(t)
+	db, handler := newShareAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	root := createTestMount(t, db, "space-del", "mount-del", admin.ID, "read_write", "managed")
 	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o755); err != nil {
@@ -161,7 +122,7 @@ func TestDeleteRevokesChildShares(t *testing.T) {
 // TestCrossMountMoveRevokesChildShares verifies that a cross-mount move of a
 // directory invalidates shares beneath it on the source mount.
 func TestCrossMountMoveRevokesChildShares(t *testing.T) {
-	db, handler := newAPITestServer(t)
+	db, handler := newShareAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	srcRoot := createTestMount(t, db, "space-src", "mount-src", admin.ID, "read_write", "managed")
 	if err := os.MkdirAll(filepath.Join(srcRoot, "proj"), 0o755); err != nil {

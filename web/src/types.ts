@@ -36,7 +36,7 @@ export type RouteGroup = {
   id: string;
   label: string;
   exposed: boolean;
-  entry: 'lan_http' | 'proxy_https' | 'both' | 'disabled';
+  entry: 'http' | 'disabled';
   risk: string;
   tone: Tone;
 };

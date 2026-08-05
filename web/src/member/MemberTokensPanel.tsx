@@ -4,14 +4,20 @@ import {
   type AiTokenListItem,
   ApiError,
   createAiToken,
+  deleteAiToken,
   listAiTokens,
   listMounts,
   listSpaces,
-  revokeAiToken,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
 import type { MemberMount, MemberSpace } from './types';
 import { createClientId } from './clientId';
+import { copyText } from './clipboard';
+import { joinReadableLabels, readableLabel } from './displayLabels';
+
+// Canonical backend scopes (see internal/aitoken/types.go). The UI presents a
+// simplified "read" / "upload" choice; read expands to the full read-only set.
+const READ_SCOPES = ['spaces:read', 'files:list', 'files:metadata', 'files:text', 'search:read'];
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
@@ -41,20 +47,14 @@ function tokenStatusLabel(status: string | undefined, text: LocaleText) {
   return status ? (labels[status] ?? status) : text.tokenStatusActive;
 }
 
-async function copyToClipboard(value: string) {
-  try {
-    await navigator.clipboard.writeText(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 type BoundaryDraft = { key: string; spaceId: string; mountId: string; path: string };
 
-function boundarySummary(boundary: AiTokenBoundary) {
+function boundarySummary(boundary: AiTokenBoundary, spaces: MemberSpace[], mountsBySpace: Record<string, MemberMount[]>) {
   const path = boundary.path && boundary.path !== '.' ? boundary.path : '/';
-  return `${boundary.spaceId} / ${boundary.mountId} · ${path}`;
+  const spaceName = readableLabel(boundary.spaceName) || spaces.find((space) => space.id === boundary.spaceId)?.name;
+  const mountName = readableLabel(boundary.mountName) || mountsBySpace[boundary.spaceId]?.find((mount) => mount.id === boundary.mountId)?.name;
+  const location = joinReadableLabels([spaceName, mountName]);
+  return location ? `${location} · ${path}` : path;
 }
 
 export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) {
@@ -73,15 +73,29 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
   const [error, setError] = useState('');
   const [createdToken, setCreatedToken] = useState('');
   const [copied, setCopied] = useState(false);
-  const [revokeTarget, setRevokeTarget] = useState<AiTokenListItem | null>(null);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<AiTokenListItem | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
       const [tokenResponse, spaceResponse] = await Promise.all([listAiTokens(), listSpaces()]);
-      setTokens(tokenResponse.items ?? []);
+      const nextTokens = tokenResponse.items ?? [];
+      setTokens(nextTokens);
       setSpaces(spaceResponse.items);
+      const tokenSpaceIds = Array.from(new Set(nextTokens.flatMap((token) => (token.boundaries ?? []).map((boundary) => boundary.spaceId)).filter(Boolean)));
+      if (tokenSpaceIds.length > 0) {
+        const mountEntries = await Promise.all(tokenSpaceIds.map(async (spaceId) => {
+          try {
+            const response = await listMounts(spaceId);
+            return [spaceId, response.items] as const;
+          } catch {
+            return [spaceId, []] as const;
+          }
+        }));
+        setMountsBySpace((current) => ({ ...current, ...Object.fromEntries(mountEntries) }));
+      }
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -130,11 +144,19 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setCreating(true);
     setError('');
     try {
-      const scopes = [scopeRead ? 'read' : null, scopeUpload ? 'upload' : null].filter((value): value is string => Boolean(value));
+      const validBoundaries = boundaries.filter((boundary) => boundary.spaceId && boundary.mountId);
+      if (validBoundaries.length === 0) {
+        setError(text.tokenBoundaryRequired);
+        return;
+      }
+      const scopes = [
+        ...(scopeRead ? READ_SCOPES : []),
+        ...(scopeUpload ? ['uploads:create'] : []),
+      ];
       const result = await createAiToken({
         name: name.trim(),
-        scopes: scopes.length > 0 ? scopes : ['read'],
-        boundaries: boundaries.filter((boundary) => boundary.spaceId && boundary.mountId).map((boundary) => ({
+        scopes: scopes.length > 0 ? scopes : READ_SCOPES,
+        boundaries: validBoundaries.map((boundary) => ({
           spaceId: boundary.spaceId,
           mountId: boundary.mountId,
           path: boundary.path.trim() || '.',
@@ -152,13 +174,13 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     }
   }
 
-  async function onRevoke() {
-    if (!revokeTarget) return;
+  async function onDelete() {
+    if (!deleteTarget) return;
     setLoading(true);
     setError('');
     try {
-      await revokeAiToken(revokeTarget.id);
-      setRevokeTarget(null);
+      await deleteAiToken(deleteTarget.id);
+      setDeleteTarget(null);
       await load();
     } catch (caught) {
       setError(describeError(caught));
@@ -183,12 +205,12 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
           <thead><tr><th>{text.tokenColumnName}</th><th>{text.tokenColumnScopes}</th><th>{text.tokenColumnBoundary}</th><th>{text.tokenColumnExpires}</th><th>{text.tokenColumnStatus}</th><th>{text.actions}</th></tr></thead>
           <tbody>{tokens.map((token) => (
             <tr key={token.id}>
-              <td>{token.name}<small>{token.publicId ?? token.id}</small></td>
+              <td>{token.name}</td>
               <td>{(token.scopes ?? []).join(', ') || '--'}</td>
-              <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => boundarySummary(boundary)).join('; ')}</td>
+              <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => boundarySummary(boundary, spaces, mountsBySpace)).join('; ')}</td>
               <td>{formatDate(token.expiresAt, locale, '--')}</td>
               <td>{tokenStatusLabel(token.status, text)}</td>
-              <td><button className="member-table-action member-table-danger" type="button" onClick={() => setRevokeTarget(token)} disabled={loading}>{text.tokenRevoke}</button></td>
+              <td><button className="member-table-action member-table-danger" type="button" onClick={() => setDeleteTarget(token)} disabled={loading}>{text.tokenRevoke}</button></td>
             </tr>
           ))}</tbody>
         </table>
@@ -234,21 +256,22 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
             <p className="member-modal-hint">{text.tokenCreatedHint}</p>
             <code className="member-share-url">{createdToken}</code>
             <div className="member-share-result-actions">
-              <button type="button" onClick={() => void copyToClipboard(createdToken).then(setCopied)}>{text.tokenCopy}</button>
+              <button type="button" onClick={() => void copyText(createdToken).then((ok) => { setCopied(ok); setCopyFailed(!ok); })}>{text.tokenCopy}</button>
             </div>
             {copied && <p className="member-admin-notice">{text.tokenCopied}</p>}
-            <div><button className="member-primary" type="button" onClick={() => { setCreatedToken(''); setCopied(false); }}>{text.tokenClose}</button></div>
+            {copyFailed && <p className="member-error">{text.tokenCopyFailed}</p>}
+            <div><button className="member-primary" type="button" onClick={() => { setCreatedToken(''); setCopied(false); setCopyFailed(false); }}>{text.tokenClose}</button></div>
           </div>
         </div>
       )}
 
-      {revokeTarget && (
+      {deleteTarget && (
         <div className="member-modal-backdrop">
           <div className="member-modal">
             <h2>{text.tokenRevokeConfirmTitle}</h2>
             <p className="member-modal-hint">{text.tokenRevokeConfirmDetail}</p>
-            <p className="member-modal-hint"><strong>{revokeTarget.name}</strong></p>
-            <div><button type="button" onClick={() => setRevokeTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onRevoke()} disabled={loading}>{text.tokenRevoke}</button></div>
+            <p className="member-modal-hint"><strong>{deleteTarget.name}</strong></p>
+            <div><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDelete()} disabled={loading}>{text.tokenRevoke}</button></div>
           </div>
         </div>
       )}

@@ -13,6 +13,8 @@ import {
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
 import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, type MemberSpace } from './types';
+import { copyText } from './clipboard';
+import { joinReadableLabels } from './displayLabels';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
@@ -56,19 +58,14 @@ function displaySharePath(path: string, text: LocaleText) {
   return normalized === '.' ? text.shareBrowseRoot : normalized;
 }
 
+function shareLocationLabel(share: SharePayload) {
+  return joinReadableLabels([share.spaceName, share.mountName]);
+}
+
 function browseCrumbs(path: string) {
   const normalized = normalizeSharePath(path);
   if (normalized === '.') return [];
   return normalized.split('/').filter(Boolean);
-}
-
-async function copyToClipboard(value: string) {
-  try {
-    await navigator.clipboard.writeText(value);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export type ShareOptionsState = {
@@ -228,7 +225,7 @@ function ShareTargetPicker({
 export function ShareCreatedResult({ text, result, onClose }: { text: LocaleText; result: CreateShareResponse; onClose: () => void }) {
   const fragment = resolveShareFragment(result);
   const url = fragment ? buildShareURL(fragment) : '';
-  const [copied, setCopied] = useState<'url' | 'secret' | null>(null);
+  const [copied, setCopied] = useState<'url' | 'secret' | 'failed' | null>(null);
 
   return (
     <div className="member-modal-backdrop">
@@ -237,10 +234,37 @@ export function ShareCreatedResult({ text, result, onClose }: { text: LocaleText
         <p className="member-modal-hint">{text.shareCreatedHint}</p>
         <code className="member-share-url">{url}</code>
         <div className="member-share-result-actions">
-          <button type="button" onClick={() => void copyToClipboard(url).then((ok) => setCopied(ok ? 'url' : null))}>{text.shareCopyUrl}</button>
-          {result.secret && <button type="button" onClick={() => void copyToClipboard(result.secret ?? '').then((ok) => setCopied(ok ? 'secret' : null))}>{text.shareCopySecret}</button>}
+          <button type="button" onClick={() => void copyText(url).then((ok) => setCopied(ok ? 'url' : 'failed'))}>{text.shareCopyUrl}</button>
+          {result.secret && <button type="button" onClick={() => void copyText(result.secret ?? '').then((ok) => setCopied(ok ? 'secret' : 'failed'))}>{text.shareCopySecret}</button>}
         </div>
-        {copied && <p className="member-admin-notice">{text.shareUrlCopied}</p>}
+        {copied === 'url' || copied === 'secret' ? <p className="member-admin-notice">{text.shareUrlCopied}</p> : copied === 'failed' ? <p className="member-error">{text.shareCopyFailed}</p> : null}
+        <div><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
+      </div>
+    </div>
+  );
+}
+
+function ShareLinkViewer({ text, share, onClose }: { text: LocaleText; share: SharePayload; onClose: () => void }) {
+  const url = share.fragment ? buildShareURL(share.fragment) : '';
+  const [copied, setCopied] = useState<'url' | 'failed' | null>(null);
+
+  return (
+    <div className="member-modal-backdrop">
+      <div className="member-modal member-share-result">
+        <h2>{text.shareLinkTitle}</h2>
+        <p className="member-modal-hint"><strong>{displaySharePath(share.relativePath, text)}</strong></p>
+        {url ? (
+          <>
+            <p className="member-modal-hint">{text.shareLinkHint}</p>
+            <code className="member-share-url">{url}</code>
+            <div className="member-share-result-actions">
+              <button type="button" onClick={() => void copyText(url).then((ok) => setCopied(ok ? 'url' : 'failed'))}>{text.shareCopyUrl}</button>
+            </div>
+            {copied === 'url' ? <p className="member-admin-notice">{text.shareUrlCopied}</p> : copied === 'failed' ? <p className="member-error">{text.shareCopyFailed}</p> : null}
+          </>
+        ) : (
+          <p className="member-error">{text.shareLinkUnavailable}</p>
+        )}
         <div><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
       </div>
     </div>
@@ -304,6 +328,7 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
   const [error, setError] = useState('');
   const [createdResult, setCreatedResult] = useState<CreateShareResponse | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<SharePayload | null>(null);
+  const [linkTarget, setLinkTarget] = useState<SharePayload | null>(null);
 
   const managerSpaces = spaces.filter((space) => space.role === 'manager');
 
@@ -390,16 +415,22 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
       {loading ? <div className="member-loading">{text.loading}</div> : shares.length === 0 ? <div className="member-empty">{text.shareListEmpty}</div> : (
         <table className="member-admin-table">
           <thead><tr><th>{text.shareColumnTarget}</th><th>{text.shareColumnStatus}</th><th>{text.shareColumnExpires}</th><th>{text.shareColumnVisits}</th><th>{text.shareColumnDownloads}</th><th>{text.actions}</th></tr></thead>
-          <tbody>{shares.map((share) => (
-            <tr key={share.id}>
-              <td><strong>{share.relativePath}</strong><small>{share.spaceId} · {share.mountId}</small></td>
-              <td>{shareStatusLabel(share.status, text)}</td>
-              <td>{formatDate(share.expiresAt, locale, text)}</td>
-              <td>{share.usedVisits ?? 0}{share.maxVisits ? ` / ${share.maxVisits}` : ''}</td>
-              <td>{share.usedDownloads ?? 0}{share.maxDownloads ? ` / ${share.maxDownloads}` : ''}</td>
-              <td><button className="member-table-action member-table-danger" type="button" onClick={() => setRevokeTarget(share)} disabled={loading}>{text.shareRevoke}</button></td>
-            </tr>
-          ))}</tbody>
+          <tbody>{shares.map((share) => {
+            const location = shareLocationLabel(share);
+            return (
+              <tr key={share.id}>
+                <td><strong>{displaySharePath(share.relativePath, text)}</strong>{location && <small>{location}</small>}</td>
+                <td>{shareStatusLabel(share.status, text)}</td>
+                <td>{formatDate(share.expiresAt, locale, text)}</td>
+                <td>{share.usedVisits ?? 0}{share.maxVisits ? ` / ${share.maxVisits}` : ''}</td>
+                <td>{share.usedDownloads ?? 0}{share.maxDownloads ? ` / ${share.maxDownloads}` : ''}</td>
+                <td><div className="member-admin-table-actions">
+                  <button className="member-table-action" type="button" onClick={() => setLinkTarget(share)} disabled={loading}>{text.shareViewLink}</button>
+                  <button className="member-table-action member-table-danger" type="button" onClick={() => setRevokeTarget(share)} disabled={loading}>{text.shareRevoke}</button>
+                </div></td>
+              </tr>
+            );
+          })}</tbody>
         </table>
       )}
 
@@ -418,6 +449,7 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
       )}
 
       {createdResult && <ShareCreatedResult text={text} result={createdResult} onClose={() => setCreatedResult(null)} />}
+      {linkTarget && <ShareLinkViewer text={text} share={linkTarget} onClose={() => setLinkTarget(null)} />}
 
       {revokeTarget && (
         <div className="member-modal-backdrop">

@@ -30,19 +30,6 @@ function canPreview(previewKind: string | undefined) {
   return previewKind === 'image' || previewKind === 'pdf' || previewKind === 'media' || previewKind === 'text' || previewKind === 'markdown';
 }
 
-// Mirrors internal/files/service.go classifyPreviewKind. The share-current
-// endpoint does not return a previewKind for a file-target share, so the
-// portal guesses one client-side purely to decide whether to offer preview.
-function guessPreviewKind(name: string): string {
-  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.')).toLowerCase() : '';
-  if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif', '.tif', '.tiff'].includes(ext)) return 'image';
-  if (ext === '.pdf') return 'pdf';
-  if (['.md', '.markdown'].includes(ext)) return 'markdown';
-  if (['.txt', '.text', '.log', '.csv', '.tsv', '.json', '.jsonl', '.yaml', '.yml'].includes(ext)) return 'text';
-  if (['.mp3', '.m4a', '.ogg', '.wav', '.flac', '.aac', '.mp4', '.m4v', '.mov', '.webm', '.ogv'].includes(ext)) return 'media';
-  return 'unknown_download';
-}
-
 function breadcrumbSegments(path: string) {
   return path === '.' || !path ? [] : path.split('/').filter(Boolean);
 }
@@ -72,6 +59,7 @@ export default function SharePortalApp() {
   const [path, setPath] = useState('.');
   const [entries, setEntries] = useState<SharePortalEntry[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   function changeLocale(next: MemberLocale) {
     saveLocale(next);
@@ -80,23 +68,36 @@ export default function SharePortalApp() {
 
   const loadChildren = useCallback(async (nextPath: string) => {
     setLoading(true);
+    setLoadError('');
     try {
       const response = await listSharePortalChildren(nextPath === '.' ? '' : nextPath);
       setEntries(response.entries ?? []);
       setPath(response.relativePath ?? nextPath);
       return true;
-    } catch {
+    } catch (caught) {
       setEntries([]);
+      setLoadError(caught instanceof Error ? caught.message : text.portalUnavailableDetail);
       return false;
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [text.portalUnavailableDetail]);
 
   const enterReadyState = useCallback(async () => {
     const currentPayload = await getSharePortalCurrent();
     setCurrent(currentPayload);
     setStatus('ready');
+    if (currentPayload.kind === 'file') {
+      setEntries([]);
+      setPath('.');
+      setMode('file');
+      return;
+    }
+    if (currentPayload.kind === 'dir') {
+      const loaded = await loadChildren('.');
+      setMode(loaded ? 'directory' : null);
+      return;
+    }
     const isDirectory = await loadChildren('.');
     setMode(isDirectory ? 'directory' : 'file');
   }, [loadChildren]);
@@ -151,7 +152,7 @@ export default function SharePortalApp() {
 
   const crumbs = breadcrumbSegments(path);
   const rootLabel = current?.path || text.portalBackToRoot;
-  const filePreviewKind = current?.path ? guessPreviewKind(current.path) : 'unknown_download';
+  const filePreviewKind = current?.previewKind ?? 'unknown_download';
 
   return (
     <main className="share-portal">
@@ -188,6 +189,13 @@ export default function SharePortalApp() {
               {passwordError && <p className="member-error">{text.error}: {passwordError}</p>}
               <button className="member-primary" type="submit" disabled={passwordSubmitting}>{text.portalPasswordSubmit}</button>
             </form>
+          </section>
+        )}
+
+        {status === 'ready' && current && !mode && (
+          <section className="share-portal-panel">
+            <h1>{text.portalUnavailable}</h1>
+            <p>{loadError || text.portalUnavailableDetail}</p>
           </section>
         )}
 

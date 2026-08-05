@@ -1,0 +1,47 @@
+# Omnora NAS deployment. This file pulls the published GHCR image instead of
+# building from source on the NAS.
+services:
+  omnora:
+    image: ghcr.io/nedhuohuo/omnora:codex-aliyun-test-deploy
+    container_name: omnora
+    restart: unless-stopped
+    init: true
+    user: "${PUID:-1000}:${PGID:-1000}"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "${OMNORA_BIND:-0.0.0.0}:8080:8080"
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      UMASK: "${UMASK:-0027}"
+      OMNORA_CONFIG_DIR: /etc/omnora
+      OMNORA_DATA_DIR: /var/lib/omnora
+      OMNORA_DB_PATH: /var/lib/omnora/omnora.db
+      OMNORA_HTTP_ADDR: 0.0.0.0:8080
+      OMNORA_LOG_FORMAT: "${OMNORA_LOG_FORMAT:-json}"
+      OMNORA_LOG_LEVEL: "${OMNORA_LOG_LEVEL:-info}"
+      OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:?set a one-time local initialization token}"
+      OMNORA_INITIALIZATION_TOKEN_TTL: "${OMNORA_INITIALIZATION_TOKEN_TTL:-30m}"
+      OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:?set a TOTP encryption key}"
+      OMNORA_MANAGED_STORAGE_DIR: /srv/omnora/managed
+      OMNORA_PREDECLARED_MOUNT_ROOT: /mnt/omnora
+      OMNORA_ROUTE_ADMIN_WEB_ENABLED: "${OMNORA_ROUTE_ADMIN_WEB_ENABLED:-true}"
+      OMNORA_ROUTE_MEMBER_WEB_ENABLED: "${OMNORA_ROUTE_MEMBER_WEB_ENABLED:-true}"
+      OMNORA_ROUTE_SHARE_ENABLED: "${OMNORA_ROUTE_SHARE_ENABLED:-false}"
+      OMNORA_ROUTE_REST_ENABLED: "${OMNORA_ROUTE_REST_ENABLED:-true}"
+      OMNORA_ROUTE_MCP_ENABLED: "${OMNORA_ROUTE_MCP_ENABLED:-false}"
+      OMNORA_ROUTE_OPENAPI_ENABLED: "${OMNORA_ROUTE_OPENAPI_ENABLED:-true}"
+    volumes:
+      - ./config:/etc/omnora
+      - ./data:/var/lib/omnora
+      - ./managed:/srv/omnora/managed
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    logging:
+      driver: local
+      options:
+        max-size: "${OMNORA_LOG_MAX_SIZE:-10m}"
+        max-file: "${OMNORA_LOG_MAX_FILE:-5}"

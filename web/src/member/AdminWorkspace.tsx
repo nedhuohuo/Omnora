@@ -22,10 +22,9 @@ import {
   updateAdminRouteGroup,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
+import { readableLabel } from './displayLabels';
 import {
   AdminBackupsPanel,
-  AdminEmergencyPanel,
-  AdminNetworkPanel,
   AdminOverviewPanel,
   AdminShareGovernancePanel,
   AdminSpacesPanel,
@@ -39,8 +38,6 @@ export type AdminTab =
   | 'spaces'
   | 'mounts'
   | 'index-jobs'
-  | 'emergency'
-  | 'network'
   | 'route-groups'
   | 'share-governance'
   | 'token-governance'
@@ -110,6 +107,13 @@ function jobKindLabel(value: string, text: typeof localeMessages[MemberLocale]) 
   return value === 'catalog_scan' ? text.catalogScan : value;
 }
 
+function jobTargetLabel(job: JobPayload) {
+  const spaceName = readableLabel(job.spaceName);
+  const mountName = readableLabel(job.mountName);
+  if (spaceName && mountName) return `${spaceName} / ${mountName}`;
+  return mountName || spaceName || '';
+}
+
 function routeGroupLabel(id: string, text: typeof localeMessages[MemberLocale]) {
   const labels: Record<string, string> = {
     member_web: text.routeGroupMemberWeb,
@@ -132,6 +136,22 @@ function routeGroupDetail(id: string, text: typeof localeMessages[MemberLocale])
     openapi: text.routeDescOpenapi,
   };
   return details[id] ?? '';
+}
+
+function auditActorLabel(event: AuditEventPayload) {
+  const label = readableLabel(event.actorLabel);
+  const displayName = readableLabel(event.actorDisplayName);
+  const email = readableLabel(event.actorEmail);
+  const actor = event.actor === 'system' ? 'system' : readableLabel(event.actor);
+  return {
+    primary: label || displayName || email || actor || '--',
+    secondary: email && email !== label && email !== displayName ? email : '',
+  };
+}
+
+function auditTargetLabel(event: AuditEventPayload) {
+  const label = readableLabel(event.targetLabel) || readableLabel(event.targetId);
+  return label ? `${event.targetType} / ${label}` : event.targetType;
 }
 
 function defaultRootForKind(kind: MountForm['kind'], roots: string[]) {
@@ -391,8 +411,6 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
   if (tab === 'overview') return <AdminOverviewPanel locale={locale} />;
   if (tab === 'users') return <AdminUsersPanel locale={locale} />;
   if (tab === 'spaces') return <AdminSpacesPanel locale={locale} />;
-  if (tab === 'emergency') return <AdminEmergencyPanel locale={locale} />;
-  if (tab === 'network') return <AdminNetworkPanel locale={locale} />;
   if (tab === 'share-governance') return <AdminShareGovernancePanel locale={locale} />;
   if (tab === 'token-governance') return <AdminTokenGovernancePanel locale={locale} />;
   if (tab === 'backups') return <AdminBackupsPanel locale={locale} />;
@@ -512,7 +530,10 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
 
       {tab === 'index-jobs' && <>
         {indexableMounts.length === 0 ? <div className="member-empty">{text.noIndexableMounts}</div> : <form className="member-admin-inline-form" onSubmit={onQueueIndex}><label>{text.selectMount}<select value={selectedMountId} onChange={(event) => setSelectedMountId(event.target.value)} required>{indexableMounts.map((mount) => <option key={mount.id} value={mount.id}>{mountLabel(mount)}</option>)}</select></label><button className="member-primary" type="submit" disabled={loading || !selectedMountId}>{text.queueIndex}</button></form>}
-        {loading ? <div className="member-loading">{text.loading}</div> : jobs.length === 0 ? <div className="member-empty">{text.noIndexJobs}</div> : <table className="member-admin-table"><thead><tr><th>{text.job}</th><th>{text.status}</th><th>{text.attempts}</th><th>{text.updated}</th><th>{text.actions}</th></tr></thead><tbody>{jobs.map((job) => <tr key={job.id}><td>{jobKindLabel(job.kind ?? '--', text)}<small>{job.id}</small></td><td>{statusLabel(job.status ?? '--', text)}</td><td>{job.attempts ?? 0}/{job.maxAttempts ?? 0}</td><td>{formatDate(job.updatedAt ?? job.createdAt ?? '', locale)}</td><td>{job.status === 'queued' && job.id ? <button className="member-table-action" type="button" onClick={() => void onRunJob(job.id!)} disabled={loading}>{text.run}</button> : '--'}</td></tr>)}</tbody></table>}
+        {loading ? <div className="member-loading">{text.loading}</div> : jobs.length === 0 ? <div className="member-empty">{text.noIndexJobs}</div> : <table className="member-admin-table"><thead><tr><th>{text.job}</th><th>{text.status}</th><th>{text.attempts}</th><th>{text.updated}</th><th>{text.actions}</th></tr></thead><tbody>{jobs.map((job) => {
+          const target = jobTargetLabel(job);
+          return <tr key={job.id}><td>{jobKindLabel(job.kind ?? '--', text)}{target && <small>{target}</small>}</td><td>{statusLabel(job.status ?? '--', text)}</td><td>{job.attempts ?? 0}/{job.maxAttempts ?? 0}</td><td>{formatDate(job.updatedAt ?? job.createdAt ?? '', locale)}</td><td>{job.status === 'queued' && job.id ? <button className="member-table-action" type="button" onClick={() => void onRunJob(job.id!)} disabled={loading}>{text.run}</button> : '--'}</td></tr>;
+        })}</tbody></table>}
       </>}
 
       {tab === 'route-groups' && <>
@@ -559,7 +580,26 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
         )}
       </>}
 
-      {tab === 'audit' && (loading ? <div className="member-loading">{text.loading}</div> : events.length === 0 ? <div className="member-empty">{text.noAuditEvents}</div> : <table className="member-admin-table"><thead><tr><th>{text.time}</th><th>{text.actor}</th><th>{text.event}</th><th>{text.target}</th></tr></thead><tbody>{events.map((event, index) => <tr key={`${event.occurredAt}-${event.action}-${index}`}><td>{formatDate(event.occurredAt, locale)}</td><td>{event.actor}</td><td>{event.action}</td><td>{event.targetType}{event.targetId ? ` / ${event.targetId}` : ''}</td></tr>)}</tbody></table>)}
+      {tab === 'audit' && (loading ? <div className="member-loading">{text.loading}</div> : events.length === 0 ? <div className="member-empty">{text.noAuditEvents}</div> : (
+        <table className="member-admin-table">
+          <thead>
+            <tr><th>{text.event}</th><th>{text.actor}</th><th>{text.target}</th><th>{text.time}</th></tr>
+          </thead>
+          <tbody>
+            {events.map((event, index) => {
+              const actor = auditActorLabel(event);
+              return (
+                <tr key={`${event.occurredAt}-${event.action}-${index}`}>
+                  <td>{event.action}</td>
+                  <td>{actor.primary}{actor.secondary && <small>{actor.secondary}</small>}</td>
+                  <td>{auditTargetLabel(event)}</td>
+                  <td>{formatDate(event.occurredAt, locale)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      ))}
     </div>
   );
 }

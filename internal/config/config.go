@@ -14,6 +14,7 @@ import (
 
 type Config struct {
 	HTTP              HTTPConfig
+	Log               LogConfig
 	Database          DatabaseConfig
 	Initialization    InitializationConfig
 	Secrets           SecretConfig
@@ -29,10 +30,11 @@ type StorageConfig struct {
 
 type HTTPConfig struct {
 	Addr string
-	// ProxyHTTPSListen is the default bind address for the proxy_https entry
-	// when its network_entries row does not set one. The entry sits behind an
-	// external HTTPS reverse proxy, so this is a plain HTTP listener.
-	ProxyHTTPSListen string
+}
+
+type LogConfig struct {
+	Format string
+	Level  string
 }
 
 type DatabaseConfig struct {
@@ -52,8 +54,11 @@ type SecretConfig struct {
 func LoadEnv() (Config, error) {
 	cfg := Config{
 		HTTP: HTTPConfig{
-			Addr:             "127.0.0.1:8080",
-			ProxyHTTPSListen: "127.0.0.1:8081",
+			Addr: "127.0.0.1:8080",
+		},
+		Log: LogConfig{
+			Format: "text",
+			Level:  "info",
 		},
 		Database: DatabaseConfig{
 			BusyTimeout: 5 * time.Second,
@@ -75,13 +80,22 @@ func LoadEnv() (Config, error) {
 	if _, _, err := net.SplitHostPort(cfg.HTTP.Addr); err != nil {
 		return Config{}, fmt.Errorf("OMNORA_HTTP_ADDR must be host:port: %w", err)
 	}
-	if value := strings.TrimSpace(os.Getenv("OMNORA_PROXY_HTTPS_LISTEN")); value != "" {
-		cfg.HTTP.ProxyHTTPSListen = value
+	if value := strings.TrimSpace(os.Getenv("OMNORA_LOG_FORMAT")); value != "" {
+		cfg.Log.Format = strings.ToLower(value)
 	}
-	if _, _, err := net.SplitHostPort(cfg.HTTP.ProxyHTTPSListen); err != nil {
-		return Config{}, fmt.Errorf("OMNORA_PROXY_HTTPS_LISTEN must be host:port: %w", err)
+	switch cfg.Log.Format {
+	case "text", "json":
+	default:
+		return Config{}, fmt.Errorf("OMNORA_LOG_FORMAT must be text or json")
 	}
-
+	if value := strings.TrimSpace(os.Getenv("OMNORA_LOG_LEVEL")); value != "" {
+		cfg.Log.Level = strings.ToLower(value)
+	}
+	switch cfg.Log.Level {
+	case "debug", "info", "warn", "error":
+	default:
+		return Config{}, fmt.Errorf("OMNORA_LOG_LEVEL must be debug, info, warn, or error")
+	}
 	cfg.Database.Path = strings.TrimSpace(os.Getenv("OMNORA_DB_PATH"))
 	if value := strings.TrimSpace(os.Getenv("OMNORA_SQLITE_BUSY_TIMEOUT")); value != "" {
 		timeout, err := time.ParseDuration(value)

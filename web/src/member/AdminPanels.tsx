@@ -8,14 +8,12 @@ import {
   type AiTokenListItem,
   ApiError,
   type BackupPayload,
-  type EmergencyAccessPayload,
-  type NetworkEntryPayload,
   type SharePayload,
   type SpaceMemberRole,
   createAdminBackup,
   createAdminSpace,
   createAdminUser,
-  createEmergencyAccess,
+  deleteAdminAiToken,
   disableAdminUser,
   enableAdminUser,
   getAdminOverview,
@@ -24,19 +22,17 @@ import {
   listAdminShares,
   listAdminSpaces,
   listAdminUsers,
-  listEmergencyAccess,
-  listNetworkEntries,
   listSpaceMembers,
-  putNetworkEntry,
   putSpaceMember,
   removeSpaceMember,
   restoreAdminBackup,
-  revokeAdminAiToken,
   revokeAdminShare,
   revokeAdminUserSessions,
-  revokeEmergencyAccess,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
+import { joinReadableLabels, readableLabel } from './displayLabels';
+
+type LocaleText = (typeof localeMessages)[MemberLocale];
 
 function describeError(error: unknown) {
   if (error instanceof ApiError) {
@@ -55,6 +51,65 @@ function formatDate(value: string | undefined, locale: MemberLocale) {
   return Number.isNaN(date.valueOf()) ? '--' : new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
 
+function shareStatusLabel(status: string | undefined, text: LocaleText) {
+  const labels: Record<string, string> = {
+    active: text.shareStatusActive,
+    expired: text.shareStatusExpired,
+    revoked: text.shareStatusRevoked,
+  };
+  return status ? (labels[status] ?? status) : text.shareStatusActive;
+}
+
+function shareLocationLabel(share: SharePayload) {
+  return joinReadableLabels([share.spaceName, share.mountName]);
+}
+
+function shareCreatorLabel(share: SharePayload, text: LocaleText) {
+  const name = share.creatorDisplayName?.trim();
+  const email = share.creatorEmail?.trim();
+  return {
+    primary: name || email || text.shareGovUnknownCreator,
+    secondary: name && email && name !== email ? email : '',
+  };
+}
+
+function tokenStatusLabel(status: string | undefined, text: LocaleText) {
+  const labels: Record<string, string> = {
+    active: text.tokenStatusActive,
+    expired: text.tokenStatusExpired,
+    revoked: text.tokenStatusRevoked,
+  };
+  return status ? (labels[status] ?? status) : '--';
+}
+
+function tokenOwnerLabel(token: AiTokenListItem) {
+  const displayName = readableLabel(token.accountDisplayName);
+  const email = readableLabel(token.accountEmail);
+  return {
+    primary: displayName || email || '--',
+    secondary: displayName && email && displayName !== email ? email : '',
+  };
+}
+
+function backupCreatorLabel(backup: BackupPayload) {
+  const label = readableLabel(backup.createdByLabel);
+  const displayName = readableLabel(backup.createdByDisplayName);
+  const email = readableLabel(backup.createdByEmail);
+  return {
+    primary: label || displayName || email || '--',
+    secondary: email && email !== label && email !== displayName ? email : '',
+  };
+}
+
+function spaceMemberLabel(member: AdminSpaceMemberPayload) {
+  const email = readableLabel(member.email);
+  const displayName = readableLabel(member.displayName);
+  return {
+    primary: email || displayName || '--',
+    secondary: email && displayName && displayName !== email ? displayName : '',
+  };
+}
+
 function CountList({ title, counts }: { title: string; counts?: Record<string, number> }) {
   const entries = Object.entries(counts ?? {});
   if (entries.length === 0) return null;
@@ -68,12 +123,6 @@ function CountList({ title, counts }: { title: string; counts?: Record<string, n
       </ul>
     </div>
   );
-}
-
-function emergencyStatus(record: EmergencyAccessPayload): 'active' | 'expired' | 'revoked' {
-  if (record.revokedAt) return 'revoked';
-  if (new Date(record.expiresAt) <= new Date()) return 'expired';
-  return 'active';
 }
 
 // -- Overview -----------------------------------------------------------------------
@@ -164,6 +213,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     email: '', displayName: '', password: '', role: 'member',
   });
   const [creating, setCreating] = useState(false);
+  const [passwordError, setPasswordError] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -182,8 +232,30 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     void load();
   }, [load]);
 
+  function passwordMeetsRequirements(value: string) {
+    if (value.length < 12) return false;
+    const classes = [/[a-z]/.test(value), /[A-Z]/.test(value), /\d/.test(value), /[^a-zA-Z0-9]/.test(value)].filter(Boolean).length;
+    return classes >= 3;
+  }
+
+  function openForm() {
+    setError('');
+    setPasswordError('');
+    setFormOpen(true);
+  }
+
+  function closeForm() {
+    setPasswordError('');
+    setFormOpen(false);
+  }
+
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setPasswordError('');
+    if (!passwordMeetsRequirements(form.password)) {
+      setPasswordError(text.userPasswordWeak);
+      return;
+    }
     setCreating(true);
     setError('');
     try {
@@ -232,7 +304,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
         <div><h1>{text.usersTitle}</h1><p>{text.usersDetail}</p></div>
         <div className="member-admin-table-actions">
           <button className="member-secondary-action" type="button" onClick={() => void load()} disabled={loading}>{text.refresh}</button>
-          <button className="member-primary" type="button" onClick={() => setFormOpen(true)}>{text.userCreate}</button>
+          <button className="member-primary" type="button" onClick={openForm}>{text.userCreate}</button>
         </div>
       </div>
       {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
@@ -260,9 +332,11 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
             <label>{text.userEmail}<input type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} required /></label>
             <label>{text.userDisplayName}<input value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} required /></label>
             <label>{text.userPassword}<input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete="new-password" required /></label>
+            <small className="member-path-hint member-admin-form-wide">{text.userPasswordHint}</small>
+            {passwordError && <div className="member-error member-admin-form-wide">{text.error}: {passwordError}</div>}
             <label className="member-admin-checkbox"><input type="checkbox" checked={form.role === 'admin'} onChange={(event) => setForm({ ...form, role: event.target.checked ? 'admin' : 'member' })} />{text.userIsAdmin}</label>
             {error && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {error}</div>}
-            <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.userSubmit}</button></div>
+            <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={closeForm}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.userSubmit}</button></div>
           </form>
         </div>
       )}
@@ -396,19 +470,22 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
           {members.length === 0 ? <div className="member-empty">{text.spaceNoMembers}</div> : (
             <table className="member-admin-table">
               <thead><tr><th>{text.userColumnEmail}</th><th>{text.spaceMemberRole}</th><th>{text.actions}</th></tr></thead>
-              <tbody>{members.map((member) => (
-                <tr key={member.accountId}>
-                  <td>{member.email ?? member.accountId}<small>{member.displayName}</small></td>
-                  <td>
-                    <select value={member.permission} onChange={(event) => void onUpdatePermission(member.accountId, event.target.value as SpaceMemberRole)}>
-                      <option value="viewer">{text.spaceRoleViewer}</option>
-                      <option value="editor">{text.spaceRoleEditor}</option>
-                      <option value="manager">{text.spaceRoleManager}</option>
-                    </select>
-                  </td>
-                  <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onRemoveMember(member.accountId)}>{text.spaceMemberRemove}</button></td>
-                </tr>
-              ))}</tbody>
+              <tbody>{members.map((member) => {
+                const account = spaceMemberLabel(member);
+                return (
+                  <tr key={member.accountId}>
+                    <td>{account.primary}{account.secondary && <small>{account.secondary}</small>}</td>
+                    <td>
+                      <select value={member.permission} onChange={(event) => void onUpdatePermission(member.accountId, event.target.value as SpaceMemberRole)}>
+                        <option value="viewer">{text.spaceRoleViewer}</option>
+                        <option value="editor">{text.spaceRoleEditor}</option>
+                        <option value="manager">{text.spaceRoleManager}</option>
+                      </select>
+                    </td>
+                    <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onRemoveMember(member.accountId)}>{text.spaceMemberRemove}</button></td>
+                  </tr>
+                );
+              })}</tbody>
             </table>
           )}
 
@@ -423,217 +500,6 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
             </label>
             <button className="member-primary" type="submit" disabled={loading}>{text.spaceMemberAdd}</button>
           </form>
-        </>
-      )}
-    </div>
-  );
-}
-
-// -- Emergency access -------------------------------------------------------------------
-
-export function AdminEmergencyPanel({ locale }: { locale: MemberLocale }) {
-  const text = localeMessages[locale];
-  const [records, setRecords] = useState<EmergencyAccessPayload[]>([]);
-  const [spaces, setSpaces] = useState<AdminSpacePayload[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [formOpen, setFormOpen] = useState(false);
-  const [form, setForm] = useState({ spaceId: '', password: '', totpCode: '', reason: '' });
-  const [creating, setCreating] = useState(false);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const [recordResponse, spaceResponse] = await Promise.all([listEmergencyAccess(), listAdminSpaces()]);
-      setRecords(recordResponse.items ?? []);
-      setSpaces(spaceResponse.items.filter((space) => space.type === 'personal'));
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  async function onSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!form.spaceId || !form.reason.trim()) return;
-    setCreating(true);
-    setError('');
-    try {
-      await createEmergencyAccess({
-        spaceId: form.spaceId,
-        password: form.password,
-        totpCode: form.totpCode,
-        reason: form.reason.trim(),
-      });
-      setForm({ spaceId: '', password: '', totpCode: '', reason: '' });
-      setFormOpen(false);
-      await load();
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  async function onRevoke(record: EmergencyAccessPayload) {
-    setLoading(true);
-    setError('');
-    try {
-      await revokeEmergencyAccess(record.id);
-      await load();
-    } catch (caught) {
-      setError(describeError(caught));
-      setLoading(false);
-    }
-  }
-
-  function spaceLabel(spaceId: string) {
-    return spaces.find((space) => space.id === spaceId)?.name ?? spaceId;
-  }
-
-  function statusLabel(record: EmergencyAccessPayload) {
-    const status = emergencyStatus(record);
-    if (status === 'active') return text.emergencyStatusActive;
-    if (status === 'expired') return text.emergencyStatusExpired;
-    return text.emergencyStatusRevoked;
-  }
-
-  return (
-    <div className="member-admin-workspace">
-      <div className="member-heading">
-        <div><h1>{text.emergencyTitle}</h1><p>{text.emergencyDetail}</p></div>
-        <div className="member-admin-table-actions">
-          <button className="member-secondary-action" type="button" onClick={() => void load()} disabled={loading}>{text.refresh}</button>
-          <button className="member-primary" type="button" onClick={() => setFormOpen(true)} disabled={spaces.length === 0}>{text.emergencyCreate}</button>
-        </div>
-      </div>
-      <p className="member-admin-hint">{text.emergencyWarning}</p>
-      {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
-      {loading ? <div className="member-loading">{text.loading}</div> : records.length === 0 ? <div className="member-empty">{text.emergencyNoRecords}</div> : (
-        <table className="member-admin-table">
-          <thead><tr><th>{text.emergencyColumnTarget}</th><th>{text.emergencyColumnReason}</th><th>{text.emergencyColumnExpires}</th><th>{text.emergencyColumnStatus}</th><th>{text.actions}</th></tr></thead>
-          <tbody>{records.map((record) => (
-            <tr key={record.id}>
-              <td>{spaceLabel(record.targetSpaceId)}</td>
-              <td>{record.reason}</td>
-              <td>{formatDate(record.expiresAt, locale)}</td>
-              <td>{statusLabel(record)}</td>
-              <td>{emergencyStatus(record) === 'active' && <button className="member-table-action member-table-danger" type="button" onClick={() => void onRevoke(record)} disabled={loading}>{text.emergencyRevoke}</button>}</td>
-            </tr>
-          ))}</tbody>
-        </table>
-      )}
-      {formOpen && (
-        <div className="member-modal-backdrop">
-          <form className="member-modal member-admin-form" onSubmit={onSubmit}>
-            <h2 className="member-admin-form-wide">{text.emergencyCreate}</h2>
-            <label className="member-admin-form-wide">{text.emergencyTargetSpace}
-              <select value={form.spaceId} onChange={(event) => setForm({ ...form, spaceId: event.target.value })} required>
-                <option value="" disabled>{text.emergencyTargetSpace}</option>
-                {spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}
-              </select>
-            </label>
-            <label>{text.emergencyPassword}<input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete="current-password" required /></label>
-            <label>{text.emergencyTotp}<input value={form.totpCode} onChange={(event) => setForm({ ...form, totpCode: event.target.value })} inputMode="numeric" autoComplete="one-time-code" required /></label>
-            <label className="member-admin-form-wide">{text.emergencyReason}<input value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })} required /></label>
-            {error && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {error}</div>}
-            <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.emergencySubmit}</button></div>
-          </form>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// -- Network entries -------------------------------------------------------------------
-
-export function AdminNetworkPanel({ locale }: { locale: MemberLocale }) {
-  const text = localeMessages[locale];
-  const [entries, setEntries] = useState<NetworkEntryPayload[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
-  const [saving, setSaving] = useState('');
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const response = await listNetworkEntries();
-      setEntries(response.items ?? []);
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  function patchEntry(name: NetworkEntryPayload['name'], patch: Partial<NetworkEntryPayload>) {
-    setEntries((current) => current.map((entry) => (entry.name === name ? { ...entry, ...patch } : entry)));
-  }
-
-  async function onSave(entry: NetworkEntryPayload) {
-    setSaving(entry.name);
-    setError('');
-    setNotice('');
-    try {
-      const updated = await putNetworkEntry(entry);
-      setEntries((current) => current.map((item) => (item.name === updated.name ? updated : item)));
-      if (updated.rebound) {
-        setNotice(text.networkRebound);
-      } else if (updated.restartRequired) {
-        setNotice(updated.rebindError ? `${text.networkRestartRequired} (${updated.rebindError})` : text.networkRestartRequired);
-      }
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setSaving('');
-    }
-  }
-
-  const lan = entries.find((entry) => entry.name === 'lan_http');
-  const proxy = entries.find((entry) => entry.name === 'proxy_https');
-
-  return (
-    <div className="member-admin-workspace">
-      <div className="member-heading">
-        <div><h1>{text.networkTitle}</h1><p>{text.networkDetail}</p></div>
-        <button className="member-secondary-action" type="button" onClick={() => void load()} disabled={loading}>{text.refresh}</button>
-      </div>
-      {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
-      {notice && <div className="member-readonly member-page-error">{notice}</div>}
-      {loading ? <div className="member-loading">{text.loading}</div> : (
-        <>
-          {lan && (
-            <form className="member-admin-form" onSubmit={(event) => { event.preventDefault(); void onSave(lan); }}>
-              <h2 className="member-admin-form-wide">{text.networkLanHttp}</h2>
-              <label className="member-admin-checkbox"><input type="checkbox" checked={lan.enabled} onChange={(event) => patchEntry('lan_http', { enabled: event.target.checked })} />{text.networkEnabled}</label>
-              <label>{text.networkBindAddress}<input value={lan.bindAddr ?? ''} onChange={(event) => patchEntry('lan_http', { bindAddr: event.target.value })} /></label>
-              <label className="member-admin-form-wide">{text.networkAllowedCidrs}<input value={(lan.cidrs ?? []).join(', ')} onChange={(event) => patchEntry('lan_http', { cidrs: event.target.value.split(',').map((value) => value.trim()).filter(Boolean) })} /></label>
-              {lan.activeBindAddr && <p className="member-readonly member-admin-form-wide">{text.networkActiveBind}: {lan.activeBindAddr}</p>}
-              {lan.enabled && <p className="member-readonly member-admin-form-wide">{text.networkUnencryptedWarning}</p>}
-              <div className="member-admin-form-actions"><button className="member-primary" type="submit" disabled={saving === 'lan_http'}>{text.networkSave}</button></div>
-            </form>
-          )}
-          {proxy && (
-            <form className="member-admin-form" onSubmit={(event) => { event.preventDefault(); void onSave(proxy); }}>
-              <h2 className="member-admin-form-wide">{text.networkProxyHttps}</h2>
-              <label className="member-admin-checkbox"><input type="checkbox" checked={proxy.enabled} onChange={(event) => patchEntry('proxy_https', { enabled: event.target.checked })} />{text.networkEnabled}</label>
-              <label>{text.networkExternalUrl}<input value={proxy.externalHttpsUrl ?? ''} onChange={(event) => patchEntry('proxy_https', { externalHttpsUrl: event.target.value })} /></label>
-              <label className="member-admin-form-wide">{text.networkTrustedProxyCidrs}<input value={(proxy.cidrs ?? []).join(', ')} onChange={(event) => patchEntry('proxy_https', { cidrs: event.target.value.split(',').map((value) => value.trim()).filter(Boolean) })} /></label>
-              <div className="member-admin-form-actions"><button className="member-primary" type="submit" disabled={saving === 'proxy_https'}>{text.networkSave}</button></div>
-            </form>
-          )}
         </>
       )}
     </div>
@@ -687,15 +553,19 @@ export function AdminShareGovernancePanel({ locale }: { locale: MemberLocale }) 
       {loading ? <div className="member-loading">{text.loading}</div> : shares.length === 0 ? <div className="member-empty">{text.shareGovNoShares}</div> : (
         <table className="member-admin-table">
           <thead><tr><th>{text.shareColumnTarget}</th><th>{text.shareGovColumnCreator}</th><th>{text.shareColumnStatus}</th><th>{text.shareColumnExpires}</th><th>{text.actions}</th></tr></thead>
-          <tbody>{shares.map((share) => (
-            <tr key={share.id}>
-              <td>{share.relativePath}<small>{share.spaceId} · {share.mountId}</small></td>
-              <td>{share.publicId}</td>
-              <td>{share.status}</td>
-              <td>{formatDate(share.expiresAt, locale)}</td>
-              <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onRevoke(share)} disabled={loading}>{text.shareRevoke}</button></td>
-            </tr>
-          ))}</tbody>
+          <tbody>{shares.map((share) => {
+            const creator = shareCreatorLabel(share, text);
+            const location = shareLocationLabel(share);
+            return (
+              <tr key={share.id}>
+                <td>{share.relativePath && share.relativePath !== '.' ? share.relativePath : text.shareBrowseRoot}{location && <small>{location}</small>}</td>
+                <td>{creator.primary}{creator.secondary && <small>{creator.secondary}</small>}</td>
+                <td>{shareStatusLabel(share.status, text)}</td>
+                <td>{formatDate(share.expiresAt, locale)}</td>
+                <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onRevoke(share)} disabled={loading}>{text.shareRevoke}</button></td>
+              </tr>
+            );
+          })}</tbody>
         </table>
       )}
     </div>
@@ -727,11 +597,11 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
     void load();
   }, [load]);
 
-  async function onRevoke(token: AiTokenListItem) {
+  async function onDelete(token: AiTokenListItem) {
     setLoading(true);
     setError('');
     try {
-      await revokeAdminAiToken(token.id);
+      await deleteAdminAiToken(token.id);
       await load();
     } catch (caught) {
       setError(describeError(caught));
@@ -749,15 +619,18 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
       {loading ? <div className="member-loading">{text.loading}</div> : tokens.length === 0 ? <div className="member-empty">{text.tokenGovNoTokens}</div> : (
         <table className="member-admin-table">
           <thead><tr><th>{text.tokenColumnName}</th><th>{text.tokenGovColumnOwner}</th><th>{text.tokenColumnScopes}</th><th>{text.tokenColumnStatus}</th><th>{text.actions}</th></tr></thead>
-          <tbody>{tokens.map((token) => (
-            <tr key={token.id}>
-              <td>{token.name}</td>
-              <td>{token.accountId ?? '--'}</td>
-              <td>{(token.scopes ?? []).join(', ') || '--'}</td>
-              <td>{token.status ?? '--'}</td>
-              <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onRevoke(token)} disabled={loading}>{text.tokenRevoke}</button></td>
-            </tr>
-          ))}</tbody>
+          <tbody>{tokens.map((token) => {
+            const owner = tokenOwnerLabel(token);
+            return (
+              <tr key={token.id}>
+                <td>{token.name}</td>
+                <td>{owner.primary}{owner.secondary && <small>{owner.secondary}</small>}</td>
+                <td>{(token.scopes ?? []).join(', ') || '--'}</td>
+                <td>{tokenStatusLabel(token.status, text)}</td>
+                <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onDelete(token)} disabled={loading}>{text.tokenRevoke}</button></td>
+              </tr>
+            );
+          })}</tbody>
         </table>
       )}
     </div>
@@ -839,25 +712,29 @@ export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
       {notice && <div className="member-readonly member-page-error">{notice}</div>}
       {loading ? <div className="member-loading">{text.loading}</div> : backups.length === 0 ? <div className="member-empty">{text.backupNoBackups}</div> : (
         <table className="member-admin-table">
-          <thead><tr><th>{text.backupColumnCreated}</th><th>{text.backupColumnPath}</th><th>{text.backupColumnStatus}</th><th>{text.backupColumnNotes}</th><th>{text.actions}</th></tr></thead>
-          <tbody>{backups.map((backup) => (
-            <tr key={backup.id}>
-              <td>{formatDate(backup.createdAt, locale)}</td>
-              <td>{backup.path ?? '--'}</td>
-              <td>{backup.status}</td>
-              <td>{backup.notes ?? '--'}</td>
-              <td>
-                <button
-                  className="member-table-action"
-                  type="button"
-                  disabled={backup.status !== 'completed' || !backup.path}
-                  onClick={() => { setRestoreTarget(backup); setConfirmPhrase(''); }}
-                >
-                  {text.backupRestore}
-                </button>
-              </td>
-            </tr>
-          ))}</tbody>
+          <thead><tr><th>{text.backupColumnCreated}</th><th>{text.backupColumnCreator}</th><th>{text.backupColumnPath}</th><th>{text.backupColumnStatus}</th><th>{text.backupColumnNotes}</th><th>{text.actions}</th></tr></thead>
+          <tbody>{backups.map((backup) => {
+            const creator = backupCreatorLabel(backup);
+            return (
+              <tr key={backup.id}>
+                <td>{formatDate(backup.createdAt, locale)}</td>
+                <td>{creator.primary}{creator.secondary && <small>{creator.secondary}</small>}</td>
+                <td>{backup.path ?? '--'}</td>
+                <td>{backup.status}</td>
+                <td>{backup.notes ?? '--'}</td>
+                <td>
+                  <button
+                    className="member-table-action"
+                    type="button"
+                    disabled={backup.status !== 'completed' || !backup.path}
+                    onClick={() => { setRestoreTarget(backup); setConfirmPhrase(''); }}
+                  >
+                    {text.backupRestore}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}</tbody>
         </table>
       )}
       {restoreTarget && (

@@ -5,12 +5,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"strings"
 )
 
 type requestIDKey struct{}
-
-type entryKey struct{}
 
 type ErrorResponse struct {
 	Error ErrorBody `json:"error"`
@@ -33,23 +33,18 @@ func RequestID(ctx context.Context) string {
 	return ""
 }
 
-// WithEntry tags a request with the network entry (listener) it arrived on,
-// e.g. "lan_http" or "proxy_https". Entry names are owned by the server
-// package; httpx only carries the opaque string.
-func WithEntry(ctx context.Context, entry string) context.Context {
-	return context.WithValue(ctx, entryKey{}, entry)
-}
-
-// Entry returns the network entry tag from the context, or "" when the
-// request was not tagged.
-func Entry(ctx context.Context) string {
-	if entry, ok := ctx.Value(entryKey{}).(string); ok {
-		return entry
-	}
-	return ""
-}
-
 func WriteError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	level := slog.LevelWarn
+	if status >= http.StatusInternalServerError {
+		level = slog.LevelError
+	}
+	slog.LogAttrs(r.Context(), level, "http error response",
+		slog.Int("status", status),
+		slog.String("error_code", code),
+		slog.String("request_id", RequestID(r.Context())),
+		slog.String("method", r.Method),
+		slog.String("path", r.URL.Path),
+	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(ErrorResponse{
@@ -73,4 +68,36 @@ func NewRequestID() string {
 		return "request-id-unavailable"
 	}
 	return hex.EncodeToString(buf[:])
+}
+
+func RequestIDFromHeader(value string) string {
+	value = strings.TrimSpace(value)
+	if !validRequestID(value) {
+		return ""
+	}
+	return value
+}
+
+func validRequestID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= 'A' && r <= 'Z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		switch r {
+		case '-', '_', '.', ':':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }

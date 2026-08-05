@@ -128,3 +128,73 @@ func TestSharePortalChildrenAfterExchange(t *testing.T) {
 		t.Fatalf("share children entries = %#v, want notes.txt", listing.Entries)
 	}
 }
+
+func TestShareCurrentIncludesTargetMetadata(t *testing.T) {
+	db, handler := newShareAPITestServer(t)
+	admin, _ := createAPITestAccounts(t, db)
+	root := createTestSpaceAndMount(t, db, "space-meta", "mount-meta", admin.ID, "read_write")
+	if err := os.WriteFile(filepath.Join(root, "report.md"), []byte("# Report"), 0o600); err != nil {
+		t.Fatalf("write shared file: %v", err)
+	}
+	adminCookie := issueAPITestSession(t, db, admin.ID)
+
+	createBody, err := json.Marshal(map[string]any{
+		"spaceId":      "space-meta",
+		"mountId":      "mount-meta",
+		"relativePath": "report.md",
+	})
+	if err != nil {
+		t.Fatalf("marshal create share request: %v", err)
+	}
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.AddCookie(adminCookie)
+	createRec := httptest.NewRecorder()
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create share status = %d, body = %s", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		PublicID string `json:"publicId"`
+		Secret   string `json:"secret"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created share: %v", err)
+	}
+
+	exchangeBody, err := json.Marshal(map[string]any{
+		"public_id": created.PublicID,
+		"secret":    created.Secret,
+	})
+	if err != nil {
+		t.Fatalf("marshal exchange request: %v", err)
+	}
+	exchangeReq := httptest.NewRequest(http.MethodPost, "/api/v1/share-sessions", bytes.NewReader(exchangeBody))
+	exchangeReq.Header.Set("Content-Type", "application/json")
+	exchangeRec := httptest.NewRecorder()
+	handler.ServeHTTP(exchangeRec, exchangeReq)
+	if exchangeRec.Code != http.StatusCreated {
+		t.Fatalf("exchange status = %d, body = %s", exchangeRec.Code, exchangeRec.Body.String())
+	}
+
+	currentReq := httptest.NewRequest(http.MethodGet, "/api/v1/share/current", nil)
+	currentReq.AddCookie(exchangeRec.Result().Cookies()[0])
+	currentRec := httptest.NewRecorder()
+	handler.ServeHTTP(currentRec, currentReq)
+	if currentRec.Code != http.StatusOK {
+		t.Fatalf("current status = %d, body = %s", currentRec.Code, currentRec.Body.String())
+	}
+	var current struct {
+		Path        string `json:"path"`
+		Kind        string `json:"kind"`
+		PreviewKind string `json:"previewKind"`
+		Size        int64  `json:"size"`
+		ModifiedAt  string `json:"modifiedAt"`
+	}
+	if err := json.Unmarshal(currentRec.Body.Bytes(), &current); err != nil {
+		t.Fatalf("decode current: %v", err)
+	}
+	if current.Path != "report.md" || current.Kind != "file" || current.PreviewKind != "markdown" || current.Size != int64(len("# Report")) || current.ModifiedAt == "" {
+		t.Fatalf("share current metadata = %#v", current)
+	}
+}

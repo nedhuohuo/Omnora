@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,6 +44,93 @@ func TestRouteGroupsFailClosed(t *testing.T) {
 				t.Fatal("request_id should be present")
 			}
 		})
+	}
+}
+
+func TestRequestLoggingPreservesUpstreamRequestID(t *testing.T) {
+	var logs bytes.Buffer
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	handler := New(config.Config{Routes: map[domain.RouteGroup]bool{}}, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/", nil)
+	req.Header.Set("X-Request-ID", "proxy-req-123")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Header().Get("X-Request-ID") != "proxy-req-123" {
+		t.Fatalf("X-Request-ID = %q, want upstream id", rec.Header().Get("X-Request-ID"))
+	}
+	var body struct {
+		Error struct {
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.RequestID != "proxy-req-123" {
+		t.Fatalf("response request_id = %q, want upstream id", body.Error.RequestID)
+	}
+
+	output := logs.String()
+	for _, expected := range []string{
+		`"msg":"http error response"`,
+		`"msg":"http request completed"`,
+		`"request_id":"proxy-req-123"`,
+		`"status":404`,
+		`"error_code":"route_group_disabled"`,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("log output missing %s: %s", expected, output)
+		}
+	}
+}
+
+func TestPanicRecoveryLogsAndReturnsStableError(t *testing.T) {
+	var logs bytes.Buffer
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	handler := securityHeaders(requestID(accessLog(recoverPanic(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	})))))
+	req := httptest.NewRequest(http.MethodGet, "/panic", nil)
+	req.Header.Set("X-Request-ID", "panic-req")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-Request-ID") != "panic-req" {
+		t.Fatalf("X-Request-ID = %q, want panic-req", rec.Header().Get("X-Request-ID"))
+	}
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "internal_error" || body.Error.RequestID != "panic-req" {
+		t.Fatalf("error body = %#v", body.Error)
+	}
+
+	output := logs.String()
+	for _, expected := range []string{
+		`"msg":"http request panic"`,
+		`"msg":"http request completed"`,
+		`"request_id":"panic-req"`,
+		`"status":500`,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("panic log output missing %s: %s", expected, output)
+		}
 	}
 }
 

@@ -32,6 +32,38 @@ tags:
   - name: Audit
   - name: MCP
 paths:
+  /healthz:
+    get:
+      tags: [System]
+      summary: Return process health.
+      servers:
+        - url: /
+      x-omnora-route-group: none
+      security: []
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /readyz:
+    get:
+      tags: [System]
+      summary: Return readiness after database checks.
+      servers:
+        - url: /
+      x-omnora-route-group: none
+      security: []
+      responses:
+        "200":
+          description: The process is ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
   /health:
     x-omnora-stale: true
     get:
@@ -1069,72 +1101,6 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
-  /admin/emergency-access:
-    get:
-      tags: [Admin]
-      summary: Implemented endpoint GET /admin/emergency-access.
-      x-omnora-route-group: rest
-      responses:
-        "200":
-          description: Success.
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-    post:
-      tags: [Admin]
-      summary: Implemented endpoint POST /admin/emergency-access.
-      x-omnora-route-group: rest
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: true
-      responses:
-        "201":
-          description: Success.
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-
-  /admin/emergency-access/{id}/revoke:
-    post:
-      tags: [Admin]
-      summary: Implemented endpoint POST /admin/emergency-access/id/revoke.
-      x-omnora-route-group: rest
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: true
-      responses:
-        "200":
-          description: Success.
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-
   /admin/host-directories:
     get:
       tags: [Admin]
@@ -1206,43 +1172,6 @@ paths:
           required: true
           schema:
             type: string
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: true
-      responses:
-        "200":
-          description: Success.
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-
-  /admin/network-entries:
-    get:
-      tags: [Admin]
-      summary: Implemented endpoint GET /admin/network-entries.
-      x-omnora-route-group: rest
-      responses:
-        "200":
-          description: Success.
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-    put:
-      tags: [Admin]
-      summary: Implemented endpoint PUT /admin/network-entries.
-      x-omnora-route-group: rest
       requestBody:
         required: false
         content:
@@ -1616,17 +1545,38 @@ paths:
   /share/current:
     get:
       tags: [Shares]
-      summary: Implemented endpoint GET /share/current.
+      summary: Read metadata for the current anonymous share session.
       x-omnora-route-group: share
       security: []
       responses:
         "200":
-          description: Success.
+          description: Current share metadata.
           content:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                required: [path, allowPreview, allowDownload, expiresAt, kind, previewKind, size, modifiedAt]
+                properties:
+                  path:
+                    type: string
+                  kind:
+                    type: string
+                    enum: [dir, file]
+                  previewKind:
+                    type: string
+                  size:
+                    type: integer
+                    format: int64
+                  modifiedAt:
+                    type: string
+                    format: date-time
+                  allowPreview:
+                    type: boolean
+                  allowDownload:
+                    type: boolean
+                  expiresAt:
+                    type: string
+                    format: date-time
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -2061,6 +2011,12 @@ components:
         application/problem+json:
           schema:
             $ref: "#/components/schemas/Error"
+    ServiceUnavailable:
+      description: A required subsystem is temporarily unavailable.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Error"
   schemas:
     OpaqueId:
       type: string
@@ -2379,6 +2335,9 @@ components:
       properties:
         id:
           $ref: "#/components/schemas/OpaqueId"
+        fragment:
+          type: string
+          description: Full URL fragment that can be opened under /share# when the link secret is available.
         targetObjectId:
           $ref: "#/components/schemas/OpaqueId"
         status:
@@ -2523,36 +2482,49 @@ components:
           type: string
     Job:
       type: object
-      required: [id, type, status]
+      required: [id, kind, status]
       properties:
         id:
           $ref: "#/components/schemas/OpaqueId"
-        type:
+        kind:
           type: string
-          enum: [initial_scan, reconciliation, cleanup, upload_finalize]
+          enum: [catalog_scan]
         status:
           type: string
-          enum: [queued, running, paused, failed, complete]
+          enum: [queued, running, paused, failed, completed, canceled]
+        spaceName:
+          type: string
+        mountName:
+          type: string
         mountId:
           $ref: "#/components/schemas/OpaqueId"
         lastError:
           type: string
     AuditEvent:
       type: object
-      required: [id, occurredAt, category, actorType, action]
+      required: [occurredAt, actor, actorLabel, action, targetType, targetId, targetLabel, metadata]
       properties:
-        id:
-          $ref: "#/components/schemas/OpaqueId"
         occurredAt:
           type: string
           format: date-time
-        category:
+        actor:
           type: string
-          enum: [identity, access, mount, file, share, token, mcp, rest, recovery]
-        actorType:
+        actorEmail:
           type: string
-          enum: [user, share, token, system]
+          format: email
+        actorDisplayName:
+          type: string
+        actorLabel:
+          type: string
+        routeGroup:
+          type: string
         action:
           type: string
-        redacted:
-          type: boolean
+        targetType:
+          type: string
+        targetId:
+          type: string
+        targetLabel:
+          type: string
+        metadata:
+          type: string
