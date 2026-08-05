@@ -132,24 +132,26 @@ docker compose --env-file aliyun-test.env \
 | [完整 Web 设计](docs/design/web-application-design.md) | 成员端、管理控制台、公开分享页 |
 | [项目框架设计](docs/superpowers/specs/2026-08-02-omnora-project-foundation-design.md) | 工程骨架、模块依赖与技术探针 |
 | [验收标准](docs/verification/acceptance-criteria.md) | 第一版发布门槛 |
+| [生产日志](docs/deployment/logging.md) | JSON 日志、请求 ID、代理日志关联和 NAS 证据 |
+| [重装数据连续性](docs/deployment/reinstall-data-continuity.md) | 重装后保留原路径文件可读可用 |
 | [OpenAPI](openapi/omnora.v1.yaml) | REST 契约草案 |
 
 出现冲突时，以许可证、安全模型、领域模型、产品需求、技术架构、Web 设计、验收标准的顺序裁决，详见 [文档地图](docs/README.md)。
 
 ## 验证命令
 
-常用本地检查：
+常用本地发布门槛：
 
 ```bash
-go test ./...
-cd web && npm run build
-./scripts/verification/verify-scaffolding.sh
+scripts/verification/release-gate.sh
 ```
 
-Docker Compose 可用时，再执行：
+发布候选版必须使用严格门槛，并提供真实外部访问地址和 NAS 部署证据：
 
 ```bash
-docker compose -f deploy/docker-compose.yml config
+OMNORA_DEPLOYED_BASE_URL=<base-url> \
+OMNORA_NAS_VERIFICATION_RECORD=<record-path> \
+scripts/verification/release-gate.sh --strict
 ```
 
 ## 许可证与贡献

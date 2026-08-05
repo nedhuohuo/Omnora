@@ -32,6 +32,38 @@ tags:
   - name: Audit
   - name: MCP
 paths:
+  /healthz:
+    get:
+      tags: [System]
+      summary: Return process health.
+      servers:
+        - url: /
+      x-omnora-route-group: none
+      security: []
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /readyz:
+    get:
+      tags: [System]
+      summary: Return readiness after database checks.
+      servers:
+        - url: /
+      x-omnora-route-group: none
+      security: []
+      responses:
+        "200":
+          description: The process is ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
   /health:
     x-omnora-stale: true
     get:
@@ -1513,17 +1545,38 @@ paths:
   /share/current:
     get:
       tags: [Shares]
-      summary: Implemented endpoint GET /share/current.
+      summary: Read metadata for the current anonymous share session.
       x-omnora-route-group: share
       security: []
       responses:
         "200":
-          description: Success.
+          description: Current share metadata.
           content:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                required: [path, allowPreview, allowDownload, expiresAt, kind, previewKind, size, modifiedAt]
+                properties:
+                  path:
+                    type: string
+                  kind:
+                    type: string
+                    enum: [dir, file]
+                  previewKind:
+                    type: string
+                  size:
+                    type: integer
+                    format: int64
+                  modifiedAt:
+                    type: string
+                    format: date-time
+                  allowPreview:
+                    type: boolean
+                  allowDownload:
+                    type: boolean
+                  expiresAt:
+                    type: string
+                    format: date-time
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -1954,6 +2007,12 @@ components:
             $ref: "#/components/schemas/Error"
     RangeNotSatisfiable:
       description: Requested byte range is outside the current file size.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ServiceUnavailable:
+      description: A required subsystem is temporarily unavailable.
       content:
         application/problem+json:
           schema:

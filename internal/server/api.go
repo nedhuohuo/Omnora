@@ -1123,31 +1123,10 @@ func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "job_not_claimed", "another job is running or this job is not queued")
 		return
 	}
-	var checkpoint struct {
-		Cursor string `json:"cursor"`
-	}
-	if err := json.Unmarshal([]byte(claimed.CheckpointJSON), &checkpoint); err != nil {
-		_ = store.Fail(r.Context(), claimed.ID, err)
-		httpx.WriteError(w, r, http.StatusConflict, "invalid_job", "job checkpoint is invalid")
-		return
-	}
-	result, err := catalog.NewService(s.sqlDB()).ScanBatch(r.Context(), mount, catalog.ScanOptions{
-		BatchSize: catalog.DefaultBatchSize,
-		Cursor:    checkpoint.Cursor,
-	})
+	result, err := s.runCatalogScanBatch(r.Context(), store, *claimed)
 	if err != nil {
-		_ = store.Fail(r.Context(), job.ID, err)
 		httpx.WriteError(w, r, http.StatusConflict, "index_failed", err.Error())
 		return
-	}
-	if !result.Done {
-		checkpoint, _ := json.Marshal(map[string]string{"cursor": result.NextCursor})
-		if err := store.Requeue(r.Context(), claimed.ID, string(checkpoint)); err != nil {
-			writeDBError(w, r, err)
-			return
-		}
-	} else {
-		_ = store.Complete(r.Context(), claimed.ID)
 	}
 	_ = s.recordAudit(r, "index_job_run", "job", job.ID, "{}")
 	httpx.WriteJSON(w, http.StatusOK, result)

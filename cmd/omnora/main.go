@@ -24,6 +24,7 @@ func main() {
 		slog.Error("invalid configuration", "error", err)
 		os.Exit(2)
 	}
+	configureLogger(cfg.Log, os.Stdout)
 
 	var db *store.DB
 	if cfg.Database.Path != "" {
@@ -47,6 +48,9 @@ func main() {
 
 	listeners := server.NewListenerManager()
 	srv := server.NewServer(cfg, db, server.WithListeners(listeners))
+	if db != nil {
+		srv.StartJobWorker(ctx, server.JobWorkerOptions{})
+	}
 
 	if err := listeners.Start(server.EntryHTTP, cfg.HTTP.Addr, srv.Handler()); err != nil {
 		slog.Error("http listener failed to bind", "addr", cfg.HTTP.Addr, "error", err)

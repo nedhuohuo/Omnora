@@ -45,7 +45,7 @@ Matching env values on the host (`deploy/aliyun-test.env`):
 OMNORA_BIND=0.0.0.0
 ```
 
-This is a disposable test-box choice, not a production security model. Keep Share and MCP route groups disabled unless a specific test requires them. `OMNORA_DEPLOY_ENV=aliyun-test` is an environment label, not a security boundary. The actual boundary remains the Docker bind address, route-group switches, Aliyun security group, host firewall, and any reverse-proxy policy.
+This is a disposable test-box choice, not a production security model. The checked-in QA env example sets `OMNORA_ROUTE_SHARE_ENABLED=true` so public share-link flows can be exercised; keep `OMNORA_ROUTE_MCP_ENABLED=false` unless a specific MCP test requires it. `OMNORA_DEPLOY_ENV=aliyun-test` is an environment label, not a security boundary. The actual boundary remains the Docker bind address, route-group switches, Aliyun security group, host firewall, and any reverse-proxy policy.
 
 If Clash/Meta TUN is enabled locally and SSH to the host fails, add `120.26.88.7/32` to the `DIRECT` rules or temporarily disable that TUN route. The operator note records this as a required connectivity condition for SSH operations.
 
@@ -89,6 +89,18 @@ docker-compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compos
 docker logs --tail 80 omnora-aliyun-test
 ```
 
+Troubleshoot by request ID:
+
+```bash
+curl -i -H 'X-Request-ID: aliyun-smoke-001' http://120.26.88.7:8080/readyz
+docker logs --since 30m omnora-aliyun-test | grep aliyun-smoke-001
+```
+
+The test env example defaults to `OMNORA_LOG_FORMAT=json` and
+`OMNORA_LOG_LEVEL=info`. Keep those defaults for external QA so application
+logs, proxy access logs, and client error responses can be correlated by
+`X-Request-ID`.
+
 Stop the test server:
 
 ```bash
@@ -107,11 +119,19 @@ Register external mounts under `/mnt/omnora/...`, or managed mounts under `/srv/
 
 Effective write access is still `Docker volume mode ∩ Omnora mount mode`. If you later switch the Compose bind back to `:ro`, existing `read_write` mounts will fail create/upload until the volume is remounted read-write.
 
+For reinstall or container recreation tests, keep `deploy/aliyun-test/config`,
+`deploy/aliyun-test/data`, `deploy/aliyun-test/managed`, and
+`deploy/aliyun-test/mounts` in place and mount them back to the same container
+paths. Existing files under registered managed and external mounts must remain
+browsable and downloadable without re-registering the mount. If a directory is
+replaced or mounted to a different container path, Omnora should mark that mount
+unavailable until an administrator confirms and re-verifies the intended source.
+
 ## Guardrails
 
 - Keep `deploy/aliyun-test.env` untracked.
 - Never store root passwords, private keys, API tokens, or generated TOTP encryption keys in this repository.
 - Keep test data synthetic or explicitly disposable.
-- Keep `OMNORA_ROUTE_SHARE_ENABLED=false` and `OMNORA_ROUTE_MCP_ENABLED=false` by default.
+- Keep `OMNORA_ROUTE_MCP_ENABLED=false` by default. The QA env example enables `OMNORA_ROUTE_SHARE_ENABLED=true` only to cover public share-link tests; turn it off when share testing is not in scope.
 - Treat open `0.0.0.0/0` CIDR on `8080` as test-only; do not copy this allowlist into production.
 - Record any firewall, domain, or reverse-proxy changes in the operator vault after they are made.

@@ -47,12 +47,35 @@ func (s *Server) shareCurrent(w http.ResponseWriter, r *http.Request) {
 		writeShareSessionError(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+	mount, err := loadMountForListing(r, s.sqlDB(), principal.SpaceID, principal.MountID)
+	if writeMountLoadError(w, r, err) {
+		return
+	}
+	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
+		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
+		return
+	}
+	entry, err := lookupMountEntry(files.Mount{Root: mount.Root, Mode: mount.Mode}, principal.RelativePath)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "share target was not found")
+		return
+	}
+	payload := map[string]any{
 		"path":          path.Base(principal.RelativePath),
 		"allowPreview":  principal.AllowPreview,
 		"allowDownload": principal.AllowDownload,
 		"expiresAt":     principal.ShareExpires,
-	})
+		"kind":          entry.Kind,
+		"previewKind":   entry.PreviewKind,
+		"size":          entry.Size,
+		"modifiedAt":    entry.ModifiedAt,
+	}
+	if principal.RelativePath == "" || principal.RelativePath == "." {
+		payload["path"] = "."
+		payload["kind"] = files.EntryKindDir
+		payload["previewKind"] = files.PreviewKindUnknownDownload
+	}
+	httpx.WriteJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) shareChildren(w http.ResponseWriter, r *http.Request) {

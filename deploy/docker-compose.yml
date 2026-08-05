@@ -28,6 +28,8 @@ services:
       OMNORA_DATA_DIR: /var/lib/omnora
       OMNORA_DB_PATH: /var/lib/omnora/omnora.db
       OMNORA_HTTP_ADDR: 0.0.0.0:8080
+      OMNORA_LOG_FORMAT: "${OMNORA_LOG_FORMAT:-json}"
+      OMNORA_LOG_LEVEL: "${OMNORA_LOG_LEVEL:-info}"
       OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:?set a one-time local initialization token}"
       OMNORA_INITIALIZATION_TOKEN_TTL: "${OMNORA_INITIALIZATION_TOKEN_TTL:-30m}"
       OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:?set a TOTP encryption key}"
@@ -40,10 +42,19 @@ services:
       OMNORA_ROUTE_MCP_ENABLED: "${OMNORA_ROUTE_MCP_ENABLED:-false}"
       OMNORA_ROUTE_OPENAPI_ENABLED: "${OMNORA_ROUTE_OPENAPI_ENABLED:-true}"
     volumes:
+      # Keep these host directories stable across reinstall/container recreation.
+      # Deleting or remapping them creates a new Omnora instance and can make
+      # previously registered mount paths unavailable until re-verified.
       - ./config:/etc/omnora
       - ./data:/var/lib/omnora
       - ./managed:/srv/omnora/managed
       # Bind NAS directories under /mnt/omnora before registering them in Omnora.
+      # After reinstall, bind each original source back to the same container path.
       # Keep external mounts read-only unless write access is intentionally required.
     tmpfs:
       - /tmp:size=128m,mode=1777
+    logging:
+      driver: local
+      options:
+        max-size: "${OMNORA_LOG_MAX_SIZE:-10m}"
+        max-file: "${OMNORA_LOG_MAX_FILE:-5}"

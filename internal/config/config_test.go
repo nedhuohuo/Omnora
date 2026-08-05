@@ -21,6 +21,9 @@ func TestLoadEnvDefaultsFailClosed(t *testing.T) {
 	if cfg.Database.Path != "" {
 		t.Fatalf("DB path = %q, want empty", cfg.Database.Path)
 	}
+	if cfg.Log.Format != "text" || cfg.Log.Level != "info" {
+		t.Fatalf("log config = %#v, want text/info", cfg.Log)
+	}
 	if cfg.Database.BusyTimeout != 5*time.Second {
 		t.Fatalf("busy timeout = %s", cfg.Database.BusyTimeout)
 	}
@@ -64,6 +67,39 @@ func TestLoadEnvRouteGroups(t *testing.T) {
 	}
 }
 
+func TestLoadEnvLogging(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("OMNORA_LOG_FORMAT", "json")
+	t.Setenv("OMNORA_LOG_LEVEL", "debug")
+
+	cfg, err := LoadEnv()
+	if err != nil {
+		t.Fatalf("LoadEnv() error = %v", err)
+	}
+	if cfg.Log.Format != "json" || cfg.Log.Level != "debug" {
+		t.Fatalf("log config = %#v, want json/debug", cfg.Log)
+	}
+}
+
+func TestLoadEnvRejectsInvalidLogging(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		env   string
+		value string
+	}{
+		{name: "format", env: "OMNORA_LOG_FORMAT", value: "xml"},
+		{name: "level", env: "OMNORA_LOG_LEVEL", value: "trace"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv(tc.env, tc.value)
+			if _, err := LoadEnv(); err == nil {
+				t.Fatal("LoadEnv() error = nil, want invalid logging config")
+			}
+		})
+	}
+}
+
 func TestLoadEnvRejectsInvalidBool(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("OMNORA_ROUTE_MCP_ENABLED", "sometimes")
@@ -77,6 +113,8 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"OMNORA_HTTP_ADDR",
+		"OMNORA_LOG_FORMAT",
+		"OMNORA_LOG_LEVEL",
 		"OMNORA_DB_PATH",
 		"OMNORA_SQLITE_BUSY_TIMEOUT",
 		"OMNORA_INITIALIZATION_TOKEN",

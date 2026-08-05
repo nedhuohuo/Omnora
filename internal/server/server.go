@@ -4,10 +4,12 @@ import (
 	"context"
 	"embed"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"path"
 	"strings"
 	"sync"
+	"time"
 
 	"omnora/internal/config"
 	"omnora/internal/domain"
@@ -64,7 +66,7 @@ func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 
 // Handler returns the fully wrapped HTTP handler.
 func (s *Server) Handler() http.Handler {
-	return securityHeaders(requestID(s.mux))
+	return securityHeaders(requestID(accessLog(recoverPanic(s.mux))))
 }
 
 func (s *Server) routes() {
@@ -204,10 +206,90 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 
 func requestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestID := httpx.NewRequestID()
+		requestID := httpx.RequestIDFromHeader(r.Header.Get("X-Request-ID"))
+		if requestID == "" {
+			requestID = httpx.NewRequestID()
+		}
 		w.Header().Set("X-Request-ID", requestID)
 		next.ServeHTTP(w, r.WithContext(httpx.WithRequestID(r.Context(), requestID)))
 	})
+}
+
+func accessLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		recorder := &loggingResponseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		duration := time.Since(start)
+		level := slog.LevelInfo
+		if recorder.status >= http.StatusInternalServerError {
+			level = slog.LevelError
+		} else if recorder.status >= http.StatusBadRequest {
+			level = slog.LevelWarn
+		}
+		slog.LogAttrs(r.Context(), level, "http request completed",
+			slog.String("request_id", httpx.RequestID(r.Context())),
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", recorder.status),
+			slog.Int64("duration_ms", duration.Milliseconds()),
+			slog.Int64("bytes", recorder.bytes),
+			slog.String("remote_addr", r.RemoteAddr),
+			slog.String("user_agent", r.UserAgent()),
+		)
+	})
+}
+
+func recoverPanic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				slog.ErrorContext(r.Context(), "http request panic",
+					"request_id", httpx.RequestID(r.Context()),
+					"method", r.Method,
+					"path", r.URL.Path,
+					"panic", recovered,
+				)
+				httpx.WriteError(w, r, http.StatusInternalServerError, "internal_error", "request could not be completed")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	bytes       int64
+	wroteHeader bool
+}
+
+func (w *loggingResponseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *loggingResponseWriter) Write(payload []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(w.status)
+	}
+	n, err := w.ResponseWriter.Write(payload)
+	w.bytes += int64(n)
+	return n, err
+}
+
+func (w *loggingResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func securityHeaders(next http.Handler) http.Handler {

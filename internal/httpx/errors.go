@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"strings"
 )
 
 type requestIDKey struct{}
@@ -32,6 +34,17 @@ func RequestID(ctx context.Context) string {
 }
 
 func WriteError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	level := slog.LevelWarn
+	if status >= http.StatusInternalServerError {
+		level = slog.LevelError
+	}
+	slog.LogAttrs(r.Context(), level, "http error response",
+		slog.Int("status", status),
+		slog.String("error_code", code),
+		slog.String("request_id", RequestID(r.Context())),
+		slog.String("method", r.Method),
+		slog.String("path", r.URL.Path),
+	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(ErrorResponse{
@@ -55,4 +68,36 @@ func NewRequestID() string {
 		return "request-id-unavailable"
 	}
 	return hex.EncodeToString(buf[:])
+}
+
+func RequestIDFromHeader(value string) string {
+	value = strings.TrimSpace(value)
+	if !validRequestID(value) {
+		return ""
+	}
+	return value
+}
+
+func validRequestID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= 'A' && r <= 'Z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		switch r {
+		case '-', '_', '.', ':':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }

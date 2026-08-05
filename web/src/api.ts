@@ -294,6 +294,10 @@ export type MoveObjectPayload = {
 
 export type SharePortalCurrentPayload = {
   path?: string;
+  kind?: 'dir' | 'file';
+  size?: number;
+  modifiedAt?: string;
+  previewKind?: string;
   allowPreview?: boolean;
   allowDownload?: boolean;
   expiresAt?: string;
@@ -865,10 +869,24 @@ export function listTrash(spaceId: string, mountId: string, signal?: AbortSignal
   );
 }
 
+export function emptyTrash(spaceId: string, mountId: string, signal?: AbortSignal) {
+  return requestJson<{ removed?: number }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/trash`,
+    { method: 'DELETE', signal },
+  );
+}
+
 export function restoreTrashItem(spaceId: string, mountId: string, trashId: string, signal?: AbortSignal) {
   return requestJson<{ relativePath: string }>(
     `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/trash/${encodeURIComponent(trashId)}/restore`,
     { method: 'POST', signal },
+  );
+}
+
+export function purgeTrashItem(spaceId: string, mountId: string, trashId: string, signal?: AbortSignal) {
+  return requestJson<void>(
+    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/trash/${encodeURIComponent(trashId)}`,
+    { method: 'DELETE', signal },
   );
 }
 
