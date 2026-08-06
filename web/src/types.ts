@@ -75,6 +75,7 @@ export type AiToken = {
 };
 
 export type AppBootstrap = {
+  initializationAvailable?: boolean;
   routeGroups: RouteGroup[];
   mounts: Mount[];
   files: FileItem[];

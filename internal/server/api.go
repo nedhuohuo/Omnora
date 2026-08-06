@@ -126,14 +126,15 @@ type tokenDTO struct {
 }
 
 type bootstrapDTO struct {
-	RouteGroups []routeGroupDTO `json:"routeGroups"`
-	Mounts      []mountDTO      `json:"mounts"`
-	Files       []fileDTO       `json:"files"`
-	Transfers   []transferDTO   `json:"transfers"`
-	AdminRisks  []adminRiskDTO  `json:"adminRisks"`
-	AuditRows   []auditDTO      `json:"auditRows"`
-	Shares      []shareDTO      `json:"shares"`
-	Tokens      []tokenDTO      `json:"tokens"`
+	InitializationAvailable bool            `json:"initializationAvailable"`
+	RouteGroups             []routeGroupDTO `json:"routeGroups"`
+	Mounts                  []mountDTO      `json:"mounts"`
+	Files                   []fileDTO       `json:"files"`
+	Transfers               []transferDTO   `json:"transfers"`
+	AdminRisks              []adminRiskDTO  `json:"adminRisks"`
+	AuditRows               []auditDTO      `json:"auditRows"`
+	Shares                  []shareDTO      `json:"shares"`
+	Tokens                  []tokenDTO      `json:"tokens"`
 }
 
 func (s *Server) apiRoutes() {
@@ -217,7 +218,8 @@ func (s *Server) apiRoutes() {
 
 func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	payload := bootstrapDTO{
-		RouteGroups: s.routeGroups(),
+		InitializationAvailable: false,
+		RouteGroups:             s.routeGroups(),
 		Transfers: []transferDTO{
 			{Name: "No active transfers", Operation: "transfer center", Progress: 0, State: "idle", Tone: "muted"},
 		},
@@ -230,6 +232,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, payload)
 		return
 	}
+	payload.InitializationAvailable = s.initializationAvailable(r.Context(), db)
 
 	session, authenticated := s.optionalSession(r)
 	payload.Mounts = s.bootstrapMounts(r, db, session, authenticated)
@@ -245,6 +248,27 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		payload.AdminRisks = []adminRiskDTO{{Label: "Session", Value: "not authenticated", Tone: "muted"}}
 	}
 	httpx.WriteJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) initializationAvailable(ctx context.Context, db *sql.DB) bool {
+	var accountCount int
+	if err := db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM accounts
+WHERE status <> 'deleted'
+`).Scan(&accountCount); err != nil || accountCount != 0 {
+		return false
+	}
+
+	var pendingCount int
+	if err := db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM identity_initialization
+WHERE id = 1 AND consumed_at IS NULL AND expires_at > ?
+`, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&pendingCount); err != nil {
+		return false
+	}
+	return pendingCount == 1
 }
 
 func (s *Server) initialize(w http.ResponseWriter, r *http.Request) {
@@ -273,6 +297,14 @@ func (s *Server) initialize(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		s.writeIdentityError(w, r, err)
+		return
+	}
+	if _, err := db.ExecContext(r.Context(), `
+INSERT INTO system_state(key, value, updated_at)
+VALUES ('initial_admin_account_id', ?, ?)
+ON CONFLICT(key) DO NOTHING
+`, created.Account.ID, nowRFC3339()); err != nil {
+		writeDBError(w, r, err)
 		return
 	}
 	_ = s.recordAudit(r, "system_initialize", "account", created.Account.ID, "{}")

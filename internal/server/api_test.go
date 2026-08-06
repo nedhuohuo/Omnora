@@ -75,6 +75,70 @@ func TestSessionResponsesIncludeCurrentAdminStatus(t *testing.T) {
 	}
 }
 
+func TestBootstrapReportsInitializationAvailability(t *testing.T) {
+	db, handler := newAPITestServer(t)
+	ctx := context.Background()
+	service := identity.New(db.SQL(), identity.Options{})
+	secret, err := service.PrepareInitialization(ctx, time.Hour)
+	if err != nil {
+		t.Fatalf("prepare initialization: %v", err)
+	}
+
+	assertInitializationAvailable := func(want bool) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/bootstrap", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("bootstrap status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			InitializationAvailable bool `json:"initializationAvailable"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode bootstrap: %v", err)
+		}
+		if body.InitializationAvailable != want {
+			t.Fatalf("initializationAvailable = %v, want %v", body.InitializationAvailable, want)
+		}
+	}
+
+	assertInitializationAvailable(true)
+	initBody, err := json.Marshal(map[string]string{
+		"token":       secret.Token,
+		"email":       "admin@example.test",
+		"displayName": "Admin",
+		"password":    apiTestPassword,
+	})
+	if err != nil {
+		t.Fatalf("marshal initialization request: %v", err)
+	}
+	initReq := httptest.NewRequest(http.MethodPost, "/api/v1/initialize", bytes.NewReader(initBody))
+	initReq.Header.Set("Content-Type", "application/json")
+	initRec := httptest.NewRecorder()
+	handler.ServeHTTP(initRec, initReq)
+	if initRec.Code != http.StatusCreated {
+		t.Fatalf("initialize admin status = %d, body = %s", initRec.Code, initRec.Body.String())
+	}
+
+	var initialAdminID string
+	if err := db.SQL().QueryRowContext(ctx, `
+SELECT value FROM system_state WHERE key = 'initial_admin_account_id'
+`).Scan(&initialAdminID); err != nil {
+		t.Fatalf("load initial admin marker: %v", err)
+	}
+	var accountID string
+	if err := db.SQL().QueryRowContext(ctx, `
+SELECT id FROM accounts WHERE email = 'admin@example.test'
+`).Scan(&accountID); err != nil {
+		t.Fatalf("load initialized admin account: %v", err)
+	}
+	if initialAdminID == "" || initialAdminID != accountID {
+		t.Fatalf("initial admin marker = %q, want account %q", initialAdminID, accountID)
+	}
+	assertInitializationAvailable(false)
+}
+
 func TestAdminSpaceAndMountListingsRequireAdminAndReturnGlobalData(t *testing.T) {
 	db, handler := newAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)

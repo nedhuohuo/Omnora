@@ -12,6 +12,7 @@ import {
   downloadURL,
   emptyTrash,
   getPreferences,
+  getBootstrap,
   getSession,
   getUpload,
   initialize,
@@ -129,6 +130,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const [adminGroupTabs, setAdminGroupTabs] = useState<Record<AdminNavGroup, AdminTab>>(defaultAdminGroupTabs);
   const [loginForm, setLoginForm] = useState({ login: '', password: '', totpCode: '' });
   const [setupMode, setSetupMode] = useState(false);
+  const [initializationAvailable, setInitializationAvailable] = useState(false);
   const [setupForm, setSetupForm] = useState<InitializePayload>({ token: '', email: '', displayName: '', password: '' });
   const [setupNotice, setSetupNotice] = useState('');
   const [spaces, setSpaces] = useState<MemberSpace[]>([]);
@@ -238,6 +240,12 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
         }
       } catch {
         setSessionState('signed-out');
+        try {
+          const bootstrap = await getBootstrap();
+          setInitializationAvailable(bootstrap.initializationAvailable === true);
+        } catch {
+          setInitializationAvailable(false);
+        }
       }
     })();
   }, [loadSpaces]);
@@ -319,6 +327,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       await initialize(setupForm);
       setSetupNotice(text.setupComplete);
       setSetupMode(false);
+      setInitializationAvailable(false);
       setLoginForm({ login: setupForm.email, password: '', totpCode: '' });
     } catch (caught) {
       setError(describeError(caught));
@@ -752,7 +761,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
               {setupNotice && <p className="member-readonly">{setupNotice}</p>}
               {error && <p className="member-error">{text.error}: {error}</p>}
               <button className="member-primary" type="submit" disabled={loading}>{text.signInAction}</button>
-              <button className="member-secondary-action" type="button" onClick={() => { setSetupMode(true); setError(''); }}>{text.firstSetup}</button>
+              {initializationAvailable && <button className="member-secondary-action" type="button" onClick={() => { setSetupMode(true); setError(''); }}>{text.firstSetup}</button>}
             </form>
           )}
           <div className="member-language-auth"><button type="button" onClick={() => setLocale('zh-CN')} aria-pressed={locale === 'zh-CN'}>中文</button><button type="button" onClick={() => setLocale('en-US')} aria-pressed={locale === 'en-US'}>EN</button></div>
