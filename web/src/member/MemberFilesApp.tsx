@@ -44,9 +44,28 @@ import { readableLabel } from './displayLabels';
 import './member-files.css';
 
 type MemberTab = 'files' | 'trash' | 'shares' | 'tokens' | 'account';
+type AdminNavGroup = 'overview' | 'identity-space' | 'storage-search' | 'access-security' | 'backups';
+type AdminNavItem = { id: AdminTab; label: string };
+type AdminNavGroupItem = { id: AdminNavGroup; label: string; tabs: AdminNavItem[] };
 
 type SessionState = 'checking' | 'signed-out' | 'ready';
 type ViewMode = 'list' | 'grid';
+
+const defaultAdminGroupTabs: Record<AdminNavGroup, AdminTab> = {
+  overview: 'overview',
+  'identity-space': 'users',
+  'storage-search': 'mounts',
+  'access-security': 'route-groups',
+  backups: 'backups',
+};
+
+function adminGroupForTab(tab: AdminTab): AdminNavGroup {
+  if (tab === 'users' || tab === 'spaces') return 'identity-space';
+  if (tab === 'mounts' || tab === 'index-jobs') return 'storage-search';
+  if (tab === 'route-groups' || tab === 'share-governance' || tab === 'token-governance' || tab === 'audit') return 'access-security';
+  if (tab === 'backups') return 'backups';
+  return 'overview';
+}
 
 function formatBytes(bytes: number, locale: string) {
   if (!Number.isFinite(bytes) || bytes <= 0) return bytes === 0 ? '0 B' : '--';
@@ -107,6 +126,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const [sessionState, setSessionState] = useState<SessionState>('checking');
   const [isAdmin, setIsAdmin] = useState(false);
   const [activeTab, setActiveTab] = useState<MemberTab | AdminTab>(entry === 'admin' ? 'overview' : 'files');
+  const [adminGroupTabs, setAdminGroupTabs] = useState<Record<AdminNavGroup, AdminTab>>(defaultAdminGroupTabs);
   const [loginForm, setLoginForm] = useState({ login: '', password: '', totpCode: '' });
   const [setupMode, setSetupMode] = useState(false);
   const [setupForm, setSetupForm] = useState<InitializePayload>({ token: '', email: '', displayName: '', password: '' });
@@ -694,6 +714,16 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     if (transfer.uploadId) await cancelUpload(transfer.uploadId).catch(() => undefined);
   }
 
+  const activateAdminTab = useCallback((tab: AdminTab) => {
+    setActiveTab(tab);
+    setAdminGroupTabs((current) => ({ ...current, [adminGroupForTab(tab)]: tab }));
+  }, []);
+
+  const activateAdminGroup = useCallback((group: AdminNavGroup) => {
+    const nextTab = adminGroupTabs[group] ?? defaultAdminGroupTabs[group];
+    activateAdminTab(nextTab);
+  }, [activateAdminTab, adminGroupTabs]);
+
   if (sessionState === 'checking') {
     return <main className="member-auth-state">{text.loading}</main>;
   }
@@ -759,6 +789,15 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const previewDownload = preview ? downloadURL(activeSpaceId, preview.mountId, preview.relativePath) : '';
   const canManageShares = entry === 'member' && activeSpace?.role === 'manager';
   const canEditFiles = entry === 'member' && (activeSpace?.role === 'editor' || activeSpace?.role === 'manager');
+  const adminNavigation: AdminNavGroupItem[] = [
+    { id: 'overview', label: text.adminOverview, tabs: [{ id: 'overview', label: text.adminOverview }] },
+    { id: 'identity-space', label: text.adminIdentitySpace, tabs: [{ id: 'users', label: text.adminUsers }, { id: 'spaces', label: text.adminSpaces }] },
+    { id: 'storage-search', label: text.adminStorageSearch, tabs: [{ id: 'mounts', label: text.adminMounts }, { id: 'index-jobs', label: text.adminIndexJobs }] },
+    { id: 'access-security', label: text.adminAccessSecurity, tabs: [{ id: 'route-groups', label: text.adminRouteGroups }, { id: 'share-governance', label: text.adminShareGovernance }, { id: 'token-governance', label: text.adminTokenGovernance }, { id: 'audit', label: text.adminAudit }] },
+    { id: 'backups', label: text.adminBackups, tabs: [{ id: 'backups', label: text.adminBackups }] },
+  ];
+  const activeAdminTab = entry === 'admin' ? activeTab as AdminTab : null;
+  const activeAdminGroup = activeAdminTab ? adminNavigation.find((group) => group.id === adminGroupForTab(activeAdminTab)) ?? adminNavigation[0] : null;
 
   return (
     <main className="member-app">
@@ -771,16 +810,9 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       <div className="member-layout">
         <aside className="member-sidebar">
           {entry === 'admin' && <nav aria-label="Administrator workspace">
-            <button className={`member-nav ${activeTab === 'overview' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('overview')}>{text.adminOverview}</button>
-            <button className={`member-nav ${activeTab === 'users' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('users')}>{text.adminUsers}</button>
-            <button className={`member-nav ${activeTab === 'spaces' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('spaces')}>{text.adminSpaces}</button>
-            <button className={`member-nav ${activeTab === 'mounts' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('mounts')}>{text.adminMounts}</button>
-            <button className={`member-nav ${activeTab === 'index-jobs' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('index-jobs')}>{text.adminIndexJobs}</button>
-            <button className={`member-nav ${activeTab === 'route-groups' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('route-groups')}>{text.adminRouteGroups}</button>
-            <button className={`member-nav ${activeTab === 'share-governance' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('share-governance')}>{text.adminShareGovernance}</button>
-            <button className={`member-nav ${activeTab === 'token-governance' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('token-governance')}>{text.adminTokenGovernance}</button>
-            <button className={`member-nav ${activeTab === 'backups' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('backups')}>{text.adminBackups}</button>
-            <button className={`member-nav ${activeTab === 'audit' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('audit')}>{text.adminAudit}</button>
+            {adminNavigation.map((group) => (
+              <button className={`member-nav ${activeAdminGroup?.id === group.id ? 'active' : ''}`} type="button" onClick={() => activateAdminGroup(group.id)} key={group.id}>{group.label}</button>
+            ))}
           </nav>}
           {entry === 'member' && <nav aria-label="Member workspace">
             <button className={`member-nav ${activeTab === 'files' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('files')}>{text.files}</button>
@@ -794,6 +826,22 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
         </aside>
 
         <section className="member-content">
+          {entry === 'admin' && activeAdminGroup && activeAdminGroup.tabs.length > 1 && (
+            <div className="member-admin-subnav" role="tablist" aria-label={activeAdminGroup.label}>
+              {activeAdminGroup.tabs.map((item) => (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeAdminTab === item.id}
+                  aria-pressed={activeAdminTab === item.id}
+                  onClick={() => activateAdminTab(item.id)}
+                  key={item.id}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          )}
           {activeTab === 'files' ? <>
           <div className="member-crumbs"><button type="button" onClick={() => openDirectory('.')}>{activeSpace?.name ?? text.myFiles}</button>{crumbItems.map((part, index) => <span key={`${part}-${index}`}><b>/</b><button type="button" onClick={() => openDirectory(crumbItems.slice(0, index + 1).join('/'))}>{part}</button></span>)}</div>
           <div className="member-heading"><div><h1>{searchResults === null ? text.myFiles : `${text.search}: ${searchQuery}`}</h1><p>{activeMount ? `${activeMount.name} · ${mountUnavailable ? text.statusUnavailable : readOnly ? text.readOnly : text.readWrite}` : text.noMount}</p></div><div className="member-view-toggle"><button type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}>{text.list}</button><button type="button" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}>{text.grid}</button></div></div>
