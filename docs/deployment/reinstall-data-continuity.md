@@ -28,6 +28,12 @@ Also preserve these secrets:
 - Any deployment-specific route-group env settings
 - The operator vault entry for external mount source paths
 
+The entrypoint also writes the same non-secret instance marker to
+`/etc/omnora/.omnora-instance-id` and `/var/lib/omnora/.omnora-instance-id`.
+If either marker is missing or they disagree, startup stops instead of silently
+creating a new SQLite instance. Do not delete either marker to make the service
+start; verify that the original config and data directories are mounted back.
+
 Changing `OMNORA_INITIALIZATION_TOKEN` after initialization is safe; it is only a
 one-time bootstrap token.
 
@@ -42,6 +48,16 @@ one-time bootstrap token.
 6. Browse and download an existing external mount file.
 7. If a mount is unavailable, inspect the admin mount list and use re-verify
    only after confirming the host directory is the intended original source.
+
+If startup reports `persistent state check failed`, inspect the effective
+mounts before changing any application data:
+
+```bash
+docker inspect omnora --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+```
+
+The original config and data host directories must be mounted to
+`/etc/omnora` and `/var/lib/omnora` respectively.
 
 Do not reinitialize Omnora with an empty database if you expect previous spaces,
 mounts, ACLs, shares, Tokens, audit events, or upload sessions to remain.

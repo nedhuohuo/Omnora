@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -189,6 +188,10 @@ func (s *Server) deleteMount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deleteData := req.DeleteData || req.DeleteDataAlt
+	if deleteData {
+		httpx.WriteError(w, r, http.StatusBadRequest, "mount_data_delete_disabled", "deleting a mount never deletes files or directories")
+		return
+	}
 
 	mountID := strings.TrimSpace(r.PathValue("mountId"))
 	mount, err := s.loadAdminMount(r.Context(), mountID)
@@ -210,26 +213,17 @@ func (s *Server) deleteMount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dataDeleted := false
-	if deleteData {
-		if err := wipeMountContents(mount.RootPath); err != nil {
-			httpx.WriteError(w, r, http.StatusConflict, "mount_data_delete_failed", fmt.Sprintf("mount was deleted but folder data could not be removed: %v", err))
-			return
-		}
-		dataDeleted = true
-	}
-
 	metadata, _ := json.Marshal(map[string]any{
-		"deleteData":  deleteData,
-		"dataDeleted": dataDeleted,
+		"deleteData":  false,
+		"dataDeleted": false,
 		"rootPath":    mount.RootPath,
 	})
 	_ = s.recordAudit(r, "mount_delete", "mount", mount.ID, string(metadata))
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"id":          mount.ID,
 		"deleted":     true,
-		"deleteData":  deleteData,
-		"dataDeleted": dataDeleted,
+		"deleteData":  false,
+		"dataDeleted": false,
 	})
 }
 
@@ -353,40 +347,6 @@ func deletedMountDisplayName(displayName, mountID string) string {
 		runes = runes[:available]
 	}
 	return string(runes) + suffix
-}
-
-func wipeMountContents(rootPath string) error {
-	rootPath = filepath.Clean(strings.TrimSpace(rootPath))
-	if rootPath == "" || rootPath == "." || rootPath == string(filepath.Separator) {
-		return fmt.Errorf("refusing to wipe unsafe mount root")
-	}
-	root, err := os.OpenRoot(rootPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	defer root.Close()
-
-	directory, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	entries, err := directory.ReadDir(-1)
-	closeErr := directory.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	for _, entry := range entries {
-		if err := root.RemoveAll(entry.Name()); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, target any) bool {

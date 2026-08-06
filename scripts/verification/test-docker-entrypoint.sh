@@ -52,6 +52,20 @@ run_entrypoint_without_secret_env() {
 		sh "$ENTRYPOINT" /bin/sh -c 'test -n "$OMNORA_INITIALIZATION_TOKEN" && test -n "$OMNORA_TOTP_ENCRYPTION_KEY" && printf ready'
 }
 
+run_entrypoint_with_failure() {
+	config_dir="$1"
+	data_dir="$2"
+	managed_dir="$3"
+	db_path="$data_dir/omnora.db"
+	OMNORA_CONFIG_DIR="$config_dir" \
+	OMNORA_DATA_DIR="$data_dir" \
+	OMNORA_DB_PATH="$db_path" \
+	OMNORA_MANAGED_STORAGE_DIR="$managed_dir" \
+	OMNORA_INITIALIZATION_TOKEN= \
+	OMNORA_TOTP_ENCRYPTION_KEY= \
+	sh "$ENTRYPOINT" /bin/sh -c 'exit 1'
+}
+
 run_entrypoint_as_root() {
 	config_dir="$1"
 	data_dir="$2"
@@ -144,12 +158,21 @@ managed_dir="$TMP_ROOT/managed"
 db_path="$data_dir/omnora.db"
 mkdir -p "$config_dir" "$data_dir" "$managed_dir"
 
-[ "$(run_entrypoint "$config_dir" "$data_dir" "$managed_dir")" = ready ] || exit 1
+runtime_stderr="$TMP_ROOT/runtime-stderr"
+[ "$(run_entrypoint "$config_dir" "$data_dir" "$managed_dir" 2>"$runtime_stderr")" = ready ] || exit 1
 token_before=$(sed -n 's/^OMNORA_INITIALIZATION_TOKEN=//p' "$config_dir/runtime.env")
 config_instance=$(sed -n '1p' "$config_dir/.omnora-instance-id")
 data_instance=$(sed -n '1p' "$data_dir/.omnora-instance-id")
 [ -n "$token_before" ] || exit 1
 [ "$config_instance" = "$data_instance" ] || exit 1
+if grep -Fq 'Initial setup token:' "$runtime_stderr" || grep -Fq "$token_before" "$runtime_stderr"; then
+	printf 'FAIL: generated initialization token was written to entrypoint stderr\n' >&2
+	exit 1
+fi
+grep -Fq "Omnora generated runtime secrets in $config_dir/runtime.env" "$runtime_stderr" || {
+	printf 'FAIL: entrypoint did not report the protected runtime secrets path\n' >&2
+	exit 1
+}
 : > "$db_path"
 
 [ "$(run_entrypoint "$config_dir" "$data_dir" "$managed_dir")" = ready ] || exit 1
@@ -170,6 +193,31 @@ if run_entrypoint "$config_dir" "$data_dir" "$managed_dir" >/dev/null 2>&1; then
 	exit 1
 fi
 mv "$config_dir/runtime.env.saved" "$config_dir/runtime.env"
+
+retry_config_dir="$TMP_ROOT/retry-config"
+retry_data_dir="$TMP_ROOT/retry-data"
+retry_managed_dir="$TMP_ROOT/retry-managed"
+retry_db_path="$retry_data_dir/omnora.db"
+mkdir -p "$retry_config_dir" "$retry_data_dir" "$retry_managed_dir"
+if run_entrypoint_with_failure "$retry_config_dir" "$retry_data_dir" "$retry_managed_dir" >/dev/null 2>&1; then
+	printf 'FAIL: failed first process unexpectedly succeeded\n' >&2
+	exit 1
+fi
+if [ -e "$retry_config_dir/.omnora-instance-id" ] || [ -e "$retry_data_dir/.omnora-instance-id" ]; then
+	printf 'FAIL: failed first process left an instance marker before database creation\n' >&2
+	exit 1
+fi
+
+OMNORA_CONFIG_DIR="$retry_config_dir" \
+OMNORA_DATA_DIR="$retry_data_dir" \
+OMNORA_DB_PATH="$retry_db_path" \
+OMNORA_MANAGED_STORAGE_DIR="$retry_managed_dir" \
+OMNORA_INITIALIZATION_TOKEN= \
+OMNORA_TOTP_ENCRYPTION_KEY= \
+sh "$ENTRYPOINT" /bin/sh -c ': > "$OMNORA_DB_PATH"'
+[ -f "$retry_config_dir/.omnora-instance-id" ] || exit 1
+[ -f "$retry_data_dir/.omnora-instance-id" ] || exit 1
+[ -f "$retry_db_path" ] || exit 1
 
 new_data_dir="$TMP_ROOT/new-data"
 mkdir -p "$new_data_dir"

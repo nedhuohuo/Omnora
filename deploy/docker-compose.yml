@@ -33,9 +33,11 @@ services:
       OMNORA_HTTP_ADDR: 0.0.0.0:8080
       OMNORA_LOG_FORMAT: "${OMNORA_LOG_FORMAT:-json}"
       OMNORA_LOG_LEVEL: "${OMNORA_LOG_LEVEL:-info}"
-      OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:?set a one-time local initialization token}"
+      # Leave the secrets empty to let the image entrypoint generate and persist
+      # them in ./config/runtime.env.
+      OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:-}"
       OMNORA_INITIALIZATION_TOKEN_TTL: "${OMNORA_INITIALIZATION_TOKEN_TTL:-30m}"
-      OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:?set a TOTP encryption key}"
+      OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:-}"
       OMNORA_MANAGED_STORAGE_DIR: /srv/omnora/managed
       OMNORA_PREDECLARED_MOUNT_ROOT: /mnt/omnora
       OMNORA_ROUTE_ADMIN_WEB_ENABLED: "${OMNORA_ROUTE_ADMIN_WEB_ENABLED:-true}"
@@ -46,14 +48,14 @@ services:
       OMNORA_ROUTE_OPENAPI_ENABLED: "${OMNORA_ROUTE_OPENAPI_ENABLED:-true}"
     volumes:
       # Keep these host directories stable across reinstall/container recreation.
-      # Deleting or remapping them creates a new Omnora instance and can make
-      # previously registered mount paths unavailable until re-verified.
+      # The entrypoint writes a shared instance marker to config and data and
+      # refuses to start if those bind mounts no longer belong to one instance.
       - ./config:/etc/omnora
       - ./data:/var/lib/omnora
-      - ./managed:/srv/omnora/managed
-      # Bind NAS directories under /mnt/omnora before registering them in Omnora.
-      # After reinstall, bind each original source back to the same container path.
-      # Keep external mounts read-only unless write access is intentionally required.
+      - ./managed:/srv/omnora/managed:rw
+      # Keep the predeclared mount root writable at container startup. Omnora
+      # applies each registered mount's read_only/read_write policy in code.
+      - ./mounts:/mnt/omnora:rw
     tmpfs:
       - /tmp:size=128m,mode=1777
     logging:

@@ -10,17 +10,34 @@ import (
 type hostDirectoryEntry struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
+	Kind string `json:"kind,omitempty"`
+}
+
+type hostDirectoryRoot struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
 }
 
 type hostDirectorySuggestions struct {
-	Roots   []string             `json:"roots"`
-	Path    string               `json:"path"`
-	Entries []hostDirectoryEntry `json:"entries"`
+	// Roots is retained for clients that only need the configured paths. New
+	// clients should use RootDetails so they do not have to infer a mount kind
+	// from a path string.
+	Roots       []string             `json:"roots"`
+	RootDetails []hostDirectoryRoot  `json:"rootDetails"`
+	Path        string               `json:"path"`
+	Entries     []hostDirectoryEntry `json:"entries"`
 }
 
-func (s *Server) storageRoots() []string {
-	roots := make([]string, 0, 2)
-	for _, root := range []string{s.cfg.Storage.ManagedDir, s.cfg.Storage.PredeclaredMountRoot} {
+func (s *Server) storageRootDetails() []hostDirectoryRoot {
+	roots := make([]hostDirectoryRoot, 0, 2)
+	for _, configured := range []struct {
+		path string
+		kind string
+	}{
+		{path: s.cfg.Storage.ManagedDir, kind: "managed"},
+		{path: s.cfg.Storage.PredeclaredMountRoot, kind: "external"},
+	} {
+		root := configured.path
 		root = filepath.Clean(strings.TrimSpace(root))
 		if root == "" || root == "." || root == string(filepath.Separator) {
 			continue
@@ -28,13 +45,32 @@ func (s *Server) storageRoots() []string {
 		if !filepath.IsAbs(root) {
 			continue
 		}
-		roots = append(roots, root)
+		roots = append(roots, hostDirectoryRoot{Path: root, Kind: configured.kind})
 	}
-	return uniqueSorted(roots)
+	sort.Slice(roots, func(i, j int) bool {
+		if roots[i].Path == roots[j].Path {
+			return roots[i].Kind < roots[j].Kind
+		}
+		return roots[i].Path < roots[j].Path
+	})
+	return uniqueRootDetails(roots)
+}
+
+func (s *Server) storageRoots() []string {
+	paths := make([]string, 0, 2)
+	for _, root := range s.storageRootDetails() {
+		paths = append(paths, root.Path)
+	}
+	return uniqueSorted(paths)
 }
 
 func (s *Server) suggestHostDirectories(rawPath string) (hostDirectorySuggestions, error) {
-	roots := s.storageRoots()
+	rootDetails := s.storageRootDetails()
+	roots := make([]string, 0, len(rootDetails))
+	for _, root := range rootDetails {
+		roots = append(roots, root.Path)
+	}
+	roots = uniqueSorted(roots)
 	path := filepath.Clean(strings.TrimSpace(rawPath))
 	if path == "." || path == "" {
 		path = "/"
@@ -45,9 +81,10 @@ func (s *Server) suggestHostDirectories(rawPath string) (hostDirectorySuggestion
 	}
 
 	payload := hostDirectorySuggestions{
-		Roots:   append([]string(nil), roots...),
-		Path:    path,
-		Entries: []hostDirectoryEntry{},
+		Roots:       append([]string(nil), roots...),
+		RootDetails: append([]hostDirectoryRoot{}, rootDetails...),
+		Path:        path,
+		Entries:     []hostDirectoryEntry{},
 	}
 	if len(roots) == 0 {
 		return payload, nil
@@ -67,9 +104,11 @@ func (s *Server) suggestHostDirectories(rawPath string) (hostDirectorySuggestion
 			return
 		}
 		seen[entryPath] = struct{}{}
+		kind := rootKindForPath(entryPath, rootDetails)
 		payload.Entries = append(payload.Entries, hostDirectoryEntry{
 			Name: filepath.Base(entryPath),
 			Path: entryPath,
+			Kind: kind,
 		})
 	}
 
@@ -123,6 +162,43 @@ func (s *Server) suggestHostDirectories(rawPath string) (hostDirectorySuggestion
 
 	sort.Slice(payload.Entries, func(i, j int) bool { return payload.Entries[i].Path < payload.Entries[j].Path })
 	return payload, nil
+}
+
+func rootKindForPath(path string, roots []hostDirectoryRoot) string {
+	path = filepath.Clean(path)
+	bestLength := -1
+	kind := ""
+	for _, root := range roots {
+		rootPath := filepath.Clean(root.Path)
+		if path != rootPath && !strings.HasPrefix(path, rootPath+string(filepath.Separator)) {
+			continue
+		}
+		if len(rootPath) > bestLength {
+			bestLength = len(rootPath)
+			kind = root.Kind
+			continue
+		}
+		if len(rootPath) == bestLength && kind != root.Kind {
+			// An overlapping path configured for two kinds is ambiguous. Keep
+			// the path usable, but let the caller preserve its current kind.
+			kind = ""
+		}
+	}
+	return kind
+}
+
+func uniqueRootDetails(values []hostDirectoryRoot) []hostDirectoryRoot {
+	seen := map[string]struct{}{}
+	out := make([]hostDirectoryRoot, 0, len(values))
+	for _, value := range values {
+		key := value.Path + "\x00" + value.Kind
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func isUnderAnyRoot(path string, roots []string) bool {

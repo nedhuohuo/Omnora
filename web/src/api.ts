@@ -177,10 +177,17 @@ export type AdminRouteGroupItem = {
 export type HostDirectoryEntry = {
   name: string;
   path: string;
+  kind?: 'external' | 'managed';
+};
+
+export type HostDirectoryRoot = {
+  path: string;
+  kind?: 'external' | 'managed';
 };
 
 export type HostDirectorySuggestions = {
   roots?: string[];
+  rootDetails?: HostDirectoryRoot[];
   path?: string;
   entries?: HostDirectoryEntry[];
 };
@@ -336,6 +343,7 @@ export type AdminUserPayload = {
   role: 'admin' | 'member';
   status: string;
   totpRequired: boolean;
+  protected: boolean;
 };
 
 export type CreateAdminUserPayload = {
@@ -361,6 +369,7 @@ export type AdminSpaceMemberPayload = {
   email?: string;
   displayName?: string;
   permission: SpaceMemberRole;
+  protected?: boolean;
 };
 
 export type BackupPayload = {
@@ -500,12 +509,11 @@ export function renameAdminMount(mountId: string, displayName: string, signal?: 
   });
 }
 
-export function deleteAdminMount(mountId: string, deleteData = false, signal?: AbortSignal) {
-  return requestJson<{ id?: string; deleted?: boolean; deleteData?: boolean; dataDeleted?: boolean }>(
+export function deleteAdminMount(mountId: string, signal?: AbortSignal) {
+  return requestJson<{ id?: string; deleted?: boolean }>(
     `/api/v1/admin/mounts/${encodeURIComponent(mountId)}`,
     {
       method: 'DELETE',
-      body: JSON.stringify({ deleteData }),
       signal,
     },
   );

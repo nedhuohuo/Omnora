@@ -13,6 +13,15 @@ Create one evidence record for each release candidate after:
 - Application, container, and proxy log evidence can correlate at least one failed request by request ID.
 - Reinstall or container recreation preserves access to files under the original registered mount paths.
 
+Before starting the NAS Compose deployment, set `OMNORA_IMAGE` to the exact GHCR
+tag or digest verified for this release candidate. The Compose file intentionally
+fails when this variable is missing, so an older image cannot be selected by
+accident:
+
+```bash
+OMNORA_IMAGE=ghcr.io/nedhuohuo/omnora:sha-<verified-commit> docker compose -f deploy/docker-compose.nas.yml up -d
+```
+
 Recommended record path:
 
 ```text

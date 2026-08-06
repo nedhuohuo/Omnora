@@ -15,8 +15,7 @@ services:
     volumes:
       - ./aliyun-test/config:/etc/omnora
       - ./aliyun-test/data:/var/lib/omnora
-      - ./aliyun-test/managed:/srv/omnora/managed
-      # Aliyun test intentionally mounts external dirs read-write so folder create
-      # and upload can be exercised. Production should keep external mounts :ro
-      # unless write access is deliberately required.
-      - ./aliyun-test/mounts:/mnt/omnora
+      - ./aliyun-test/managed:/srv/omnora/managed:rw
+      # Keep the predeclared root writable; Omnora applies the selected mount
+      # mode when the administrator registers each child directory.
+      - ./aliyun-test/mounts:/mnt/omnora:rw

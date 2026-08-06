@@ -85,6 +85,83 @@ func TestAdminCreateUser(t *testing.T) {
 	}
 }
 
+func TestInitialAdminIsProtectedFromAccountAndSpaceMutations(t *testing.T) {
+	db, handler := newAPITestServer(t)
+	admin, _ := createAPITestAccounts(t, db)
+	adminCookie := issueAPITestSession(t, db, admin.ID)
+	ctx := context.Background()
+
+	decodeErrorCode := func(rec *httptest.ResponseRecorder) string {
+		t.Helper()
+		var body struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode error response: %v; body = %s", err, rec.Body.String())
+		}
+		return body.Error.Code
+	}
+
+	disableReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/"+admin.ID+"/disable", nil)
+	disableReq.AddCookie(adminCookie)
+	disableRec := httptest.NewRecorder()
+	handler.ServeHTTP(disableRec, disableReq)
+	if disableRec.Code != http.StatusConflict || decodeErrorCode(disableRec) != "initial_admin_protected" {
+		t.Fatalf("disable initial admin status = %d, body = %s", disableRec.Code, disableRec.Body.String())
+	}
+
+	var personalSpaceID string
+	if err := db.SQL().QueryRowContext(ctx, `
+SELECT id FROM spaces WHERE kind = 'personal' AND owner_account_id = ?
+`, admin.ID).Scan(&personalSpaceID); err != nil {
+		t.Fatalf("load initial admin personal space: %v", err)
+	}
+
+	listMembersRec := authorizedAPITestRequest(t, handler, "/api/v1/admin/spaces/"+personalSpaceID+"/members", adminCookie)
+	if listMembersRec.Code != http.StatusOK {
+		t.Fatalf("list personal space members status = %d, body = %s", listMembersRec.Code, listMembersRec.Body.String())
+	}
+	var listed struct {
+		Items []spaceMemberDTO `json:"items"`
+	}
+	if err := json.Unmarshal(listMembersRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode personal space members: %v", err)
+	}
+	if len(listed.Items) != 1 || listed.Items[0].AccountID != admin.ID || !listed.Items[0].Protected {
+		t.Fatalf("personal space members = %#v, want protected initial admin", listed.Items)
+	}
+
+	permissionBody := bytes.NewReader([]byte(`{"permission":"viewer"}`))
+	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/spaces/"+personalSpaceID+"/members/"+admin.ID, permissionBody)
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq.AddCookie(adminCookie)
+	putRec := httptest.NewRecorder()
+	handler.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusConflict || decodeErrorCode(putRec) != "initial_admin_protected" {
+		t.Fatalf("change initial admin permission status = %d, body = %s", putRec.Code, putRec.Body.String())
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/spaces/"+personalSpaceID+"/members/"+admin.ID, nil)
+	deleteReq.AddCookie(adminCookie)
+	deleteRec := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusConflict || decodeErrorCode(deleteRec) != "initial_admin_protected" {
+		t.Fatalf("remove initial admin status = %d, body = %s", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	var permission string
+	if err := db.SQL().QueryRowContext(ctx, `
+SELECT permission FROM space_members WHERE space_id = ? AND account_id = ?
+`, personalSpaceID, admin.ID).Scan(&permission); err != nil {
+		t.Fatalf("load initial admin permission: %v", err)
+	}
+	if permission != "manager" {
+		t.Fatalf("initial admin permission = %q, want manager", permission)
+	}
+}
+
 func TestAdminPutSpaceMemberResolvesEmailAndRejectsUnknownAccount(t *testing.T) {
 	db, handler := newAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)

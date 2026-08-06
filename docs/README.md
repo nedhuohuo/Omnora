@@ -11,6 +11,9 @@
 | [技术架构](design/architecture.md) | 开发、运维 | 进程、模块、SQLite、索引、任务、部署、资源与恢复 |
 | [安全模型](security/security-model.md) | 开发、安全、运维 | 信任边界、认证授权、路径安全、网络暴露、凭证和备份恢复 |
 | [验收标准](verification/acceptance-criteria.md) | 开发、测试、发布 | 功能、安全、性能、可靠性和发布门槛 |
+| [REST API 指南](api/README.md) | REST 客户端、开发、测试 | REST 接入、认证、错误、常用流程和契约入口 |
+| [MCP 指南](mcp/README.md) | AI 客户端、开发、测试、安全 | 当前 MCP HTTP 适配器、工具、scope 和目标协议边界 |
+| [OpenAPI 契约](../openapi/omnora.v1.yaml) | REST 客户端、代码生成、调试工具 | REST API 的机器可读唯一手工源 |
 | [项目框架设计](superpowers/specs/2026-08-02-omnora-project-foundation-design.md) | 开发、测试、运维 | 工程骨架、模块依赖、技术探针、测试与 CI 门禁 |
 | [完整 Web 设计](design/web-application-design.md) | 产品、设计、前端、测试 | 成员端、管理员控制台、公开分享页、响应式、状态和验收范围 |
 | [阿里云测试服务器](deployment/aliyun-test-server.md) | 开发、测试、运维 | 阿里云 ECS 测试服务器边界、外部 `8080` 访问方式和部署文件 |

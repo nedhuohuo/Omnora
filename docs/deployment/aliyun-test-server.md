@@ -68,12 +68,21 @@ mkdir -p deploy/aliyun-test/{config,data,managed,mounts}
 sudo chown -R 1000:1000 deploy/aliyun-test
 ```
 
-Edit `deploy/aliyun-test.env` on the server and set fresh values for:
+Edit `deploy/aliyun-test.env` on the server if you want to provide explicit values for:
 
 ```text
 OMNORA_INITIALIZATION_TOKEN
 OMNORA_TOTP_ENCRYPTION_KEY
 ```
+
+Both values may be left blank on a new test deployment. The container entrypoint
+generates them and persists them in `aliyun-test/config/runtime.env`; preserve
+that file when recreating the container. It also writes matching instance
+markers to `aliyun-test/config/.omnora-instance-id` and
+`aliyun-test/data/.omnora-instance-id`; if those markers no longer match, the
+container stops so a new empty instance cannot be created accidentally. When
+restoring an existing data directory, keep using the original TOTP encryption
+key.
 
 Start the test server (this host uses Docker Compose 1.29.2, so prefer `docker-compose`):
 

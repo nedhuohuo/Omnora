@@ -2,7 +2,9 @@
 # building from source on the NAS.
 services:
   omnora:
-    image: ghcr.io/nedhuohuo/omnora:codex-aliyun-test-deploy
+    # Pin this deployment explicitly to the release tag or digest being
+    # verified. Never silently fall back to an image from an older checkout.
+    image: "${OMNORA_IMAGE:?set OMNORA_IMAGE to the verified GHCR tag or digest}"
     container_name: omnora
     restart: unless-stopped
     init: true
@@ -26,9 +28,11 @@ services:
       OMNORA_HTTP_ADDR: 0.0.0.0:8080
       OMNORA_LOG_FORMAT: "${OMNORA_LOG_FORMAT:-json}"
       OMNORA_LOG_LEVEL: "${OMNORA_LOG_LEVEL:-info}"
-      OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:?set a one-time local initialization token}"
+      # Leave the secrets empty to let the image entrypoint generate and persist
+      # them in ./config/runtime.env.
+      OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:-}"
       OMNORA_INITIALIZATION_TOKEN_TTL: "${OMNORA_INITIALIZATION_TOKEN_TTL:-30m}"
-      OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:?set a TOTP encryption key}"
+      OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:-}"
       OMNORA_MANAGED_STORAGE_DIR: /srv/omnora/managed
       OMNORA_PREDECLARED_MOUNT_ROOT: /mnt/omnora
       OMNORA_ROUTE_ADMIN_WEB_ENABLED: "${OMNORA_ROUTE_ADMIN_WEB_ENABLED:-true}"
@@ -38,9 +42,14 @@ services:
       OMNORA_ROUTE_MCP_ENABLED: "${OMNORA_ROUTE_MCP_ENABLED:-false}"
       OMNORA_ROUTE_OPENAPI_ENABLED: "${OMNORA_ROUTE_OPENAPI_ENABLED:-true}"
     volumes:
+      # Keep config and data directories stable. The entrypoint refuses to
+      # start when their persistent instance markers no longer match.
       - ./config:/etc/omnora
       - ./data:/var/lib/omnora
-      - ./managed:/srv/omnora/managed
+      - ./managed:/srv/omnora/managed:rw
+      # The application controls the read_only/read_write policy for each
+      # registered child directory under this writable predeclared root.
+      - ./mounts:/mnt/omnora:rw
     tmpfs:
       - /tmp:size=128m,mode=1777
     logging:

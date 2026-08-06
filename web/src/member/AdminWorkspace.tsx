@@ -5,6 +5,8 @@ import {
   type AdminSpacePayload,
   type AuditEventPayload,
   type HostDirectoryEntry,
+  type HostDirectoryRoot,
+  type HostDirectorySuggestions,
   type JobPayload,
   ApiError,
   deleteAdminMount,
@@ -154,11 +156,21 @@ function auditTargetLabel(event: AuditEventPayload) {
   return label ? `${event.targetType} / ${label}` : event.targetType;
 }
 
-function defaultRootForKind(kind: MountForm['kind'], roots: string[]) {
-  if (kind === 'managed') {
-    return roots.find((root) => root.includes('/managed')) ?? roots[0] ?? '';
-  }
-  return roots.find((root) => root.includes('/mnt/')) ?? roots[0] ?? '';
+export function defaultRootForKind(kind: MountForm['kind'], roots: HostDirectoryRoot[]) {
+  return roots.find((root) => root.kind === kind)?.path ?? roots[0]?.path ?? '';
+}
+
+function mountRootDetail(root: HostDirectoryRoot, text: typeof localeMessages[MemberLocale]) {
+  if (root.kind === 'managed') return text.managedMountRootDetail;
+  if (root.kind === 'external') return text.externalMountRootDetail;
+  return text.unknownMountRootDetail;
+}
+
+function hostDirectoryRoots(response: HostDirectorySuggestions): HostDirectoryRoot[] {
+  if (response.rootDetails?.length) return response.rootDetails;
+  // Keep compatibility with older servers that only returned `roots`; the
+  // current mount kind remains selected until the server supplies metadata.
+  return (response.roots ?? []).map((path) => ({ path }));
 }
 
 export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale: MemberLocale }) {
@@ -174,13 +186,12 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
   const [pendingGroupId, setPendingGroupId] = useState('');
   const [error, setError] = useState('');
   const [operationComplete, setOperationComplete] = useState(false);
-  const [allowedRoots, setAllowedRoots] = useState<string[]>([]);
+  const [allowedRoots, setAllowedRoots] = useState<HostDirectoryRoot[]>([]);
   const [pathSuggestions, setPathSuggestions] = useState<HostDirectoryEntry[]>([]);
   const [showPathSuggestions, setShowPathSuggestions] = useState(false);
   const [renameTarget, setRenameTarget] = useState<AdminMountListItem | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<AdminMountListItem | null>(null);
-  const [deleteData, setDeleteData] = useState(false);
   const suggestionRequest = useRef(0);
 
   const loadMountData = useCallback(async () => {
@@ -194,7 +205,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
       ]);
       setSpaces(spaceResponse.items);
       setMounts(mountResponse.items);
-      const roots = hostDirs.roots ?? [];
+      const roots = hostDirectoryRoots(hostDirs);
       setAllowedRoots(roots);
       setMountForm((current) => ({
         ...current,
@@ -265,7 +276,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
       void listAdminHostDirectories(mountForm.rootPath || '/')
         .then((response) => {
           if (requestId !== suggestionRequest.current) return;
-          setAllowedRoots(response.roots ?? []);
+          setAllowedRoots(hostDirectoryRoots(response));
           setPathSuggestions(response.entries ?? []);
         })
         .catch(() => {
@@ -303,7 +314,6 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     setOperationComplete(false);
     setDeleteTarget(mount);
-    setDeleteData(false);
   }
 
   async function onRenameMount(event: FormEvent<HTMLFormElement>) {
@@ -331,9 +341,8 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     setOperationComplete(false);
     try {
-      await deleteAdminMount(deleteTarget.id, deleteData);
+      await deleteAdminMount(deleteTarget.id);
       setDeleteTarget(null);
-      setDeleteData(false);
       setOperationComplete(true);
       await loadMountData();
     } catch (caught) {
@@ -460,7 +469,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
                       className="member-path-suggest-item"
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={() => {
-                        setMountForm({ ...mountForm, rootPath: entry.path });
+                        setMountForm((current) => ({ ...current, rootPath: entry.path, kind: entry.kind ?? current.kind }));
                         setShowPathSuggestions(true);
                       }}
                     >
@@ -473,17 +482,25 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
             <small className="member-path-hint">{text.mountRootHint}</small>
             {allowedRoots.length > 0 && (
               <div className="member-path-roots">
-                <span>{text.allowedRoots}</span>
-                {allowedRoots.map((root) => (
-                  <button
-                    key={root}
-                    type="button"
-                    className="member-path-root"
-                    onClick={() => setMountForm({ ...mountForm, rootPath: root })}
-                  >
-                    {root}
-                  </button>
-                ))}
+                <span className="member-path-roots-title">{text.allowedRoots}</span>
+                <div className="member-path-root-list">
+                  {allowedRoots.map((root) => {
+                    const kind = root.kind;
+                    const kindLabel = kind === 'managed' ? text.managedMount : kind === 'external' ? text.externalMount : text.mountRoot;
+                    return (
+                      <button
+                        key={`${root.path}:${root.kind ?? 'unknown'}`}
+                        type="button"
+                        className="member-path-root"
+                        onClick={() => setMountForm((current) => ({ ...current, rootPath: root.path, kind: kind ?? current.kind }))}
+                      >
+                        <span className={`member-path-root-kind ${kind ?? ''}`}>{kindLabel}</span>
+                        <code>{root.path}</code>
+                        <small>{mountRootDetail(root, text)}</small>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </label>
@@ -514,13 +531,8 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
               <h2>{text.deleteMount}</h2>
               <p className="member-modal-hint">{text.deleteMountDetail}</p>
               <p className="member-modal-hint"><strong>{deleteTarget.name}</strong> · {deleteTarget.space}</p>
-              <label className="member-admin-checkbox">
-                <input type="checkbox" checked={deleteData} onChange={(event) => setDeleteData(event.target.checked)} />
-                {text.deleteMountData}
-              </label>
-              <p className="member-modal-hint">{text.deleteMountDataHint}</p>
               <div>
-                <button type="button" onClick={() => { setDeleteTarget(null); setDeleteData(false); }}>{text.cancel}</button>
+                <button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button>
                 <button className="member-modal-danger" type="submit" disabled={loading}>{text.confirmDeleteMount}</button>
               </div>
             </form>
@@ -564,14 +576,16 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
                   <td>{group.entry}</td>
                   <td>{group.risk}</td>
                   <td>
-                    <button
-                      className={`member-table-action ${group.exposed ? 'member-table-danger' : ''}`}
-                      type="button"
-                      disabled={loading || pendingGroupId === group.id}
-                      onClick={() => void onToggleRouteGroup(group)}
-                    >
-                      {group.exposed ? text.routeDisable : text.routeEnable}
-                    </button>
+                    {(!group.exposed || (group.id !== 'member_web' && group.id !== 'admin_web')) && (
+                      <button
+                        className={`member-table-action ${group.exposed ? 'member-table-danger' : ''}`}
+                        type="button"
+                        disabled={loading || pendingGroupId === group.id}
+                        onClick={() => void onToggleRouteGroup(group)}
+                      >
+                        {group.exposed ? text.routeDisable : text.routeEnable}
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}

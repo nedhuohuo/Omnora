@@ -122,10 +122,16 @@ type adminUserDTO struct {
 	Role         string `json:"role"`
 	Status       string `json:"status"`
 	TOTPRequired bool   `json:"totpRequired"`
+	Protected    bool   `json:"protected"`
 }
 
 func (s *Server) listAdminUsers(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	initialAdminID, err := s.initialAdminID(r.Context())
+	if err != nil {
+		writeDBError(w, r, err)
 		return
 	}
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
@@ -148,6 +154,7 @@ ORDER BY created_at
 			return
 		}
 		item.TOTPRequired = totpRequired == 1
+		item.Protected = item.ID == initialAdminID
 		items = append(items, item)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -192,6 +199,9 @@ func (s *Server) setAdminUserEnabled(w http.ResponseWriter, r *http.Request, ena
 		return
 	}
 	userID := r.PathValue("userId")
+	if !enabled && s.rejectInitialAdminMutation(w, r, userID, "the initial administrator must remain active") {
+		return
+	}
 	status := "disabled"
 	if enabled {
 		status = "active"
@@ -248,10 +258,16 @@ type spaceMemberDTO struct {
 	Email       string `json:"email"`
 	DisplayName string `json:"displayName"`
 	Permission  string `json:"permission"`
+	Protected   bool   `json:"protected"`
 }
 
 func (s *Server) listAdminSpaceMembers(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	initialAdminID, err := s.initialAdminID(r.Context())
+	if err != nil {
+		writeDBError(w, r, err)
 		return
 	}
 	spaceID := r.PathValue("spaceId")
@@ -274,6 +290,7 @@ ORDER BY a.display_name
 			writeDBError(w, r, err)
 			return
 		}
+		item.Protected = item.AccountID == initialAdminID
 		items = append(items, item)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -307,6 +324,9 @@ func (s *Server) putAdminSpaceMember(w http.ResponseWriter, r *http.Request) {
 	}
 	member, ok := s.resolveAdminSpaceMemberAccount(w, r, accountRef)
 	if !ok {
+		return
+	}
+	if s.rejectInitialAdminMutation(w, r, member.AccountID, "the initial administrator cannot have a space permission changed") {
 		return
 	}
 	now := nowRFC3339()
@@ -366,6 +386,9 @@ func (s *Server) deleteAdminSpaceMember(w http.ResponseWriter, r *http.Request) 
 	}
 	spaceID := r.PathValue("spaceId")
 	accountID := r.PathValue("accountId")
+	if s.rejectInitialAdminMutation(w, r, accountID, "the initial administrator cannot be removed from a space") {
+		return
+	}
 	result, err := s.sqlDB().ExecContext(r.Context(), `
 DELETE FROM space_members WHERE space_id = ? AND account_id = ?
 `, spaceID, accountID)
@@ -430,6 +453,45 @@ VALUES (?, ?, 'manager', ?, ?)
 	}
 	_ = s.recordAudit(r, "admin_space_create", "space", spaceID, "{}")
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": spaceID, "type": "shared", "name": name})
+}
+
+func (s *Server) initialAdminID(ctx context.Context) (string, error) {
+	var accountID string
+	err := s.sqlDB().QueryRowContext(ctx, `
+SELECT value
+FROM system_state
+WHERE key = 'initial_admin_account_id'
+`).Scan(&accountID)
+	if err == nil && strings.TrimSpace(accountID) != "" {
+		return accountID, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+
+	err = s.sqlDB().QueryRowContext(ctx, `
+SELECT id
+FROM accounts
+ORDER BY created_at ASC, id ASC
+LIMIT 1
+`).Scan(&accountID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return accountID, err
+}
+
+func (s *Server) rejectInitialAdminMutation(w http.ResponseWriter, r *http.Request, accountID, message string) bool {
+	initialAdminID, err := s.initialAdminID(r.Context())
+	if err != nil {
+		writeDBError(w, r, err)
+		return true
+	}
+	if initialAdminID == "" || initialAdminID != accountID {
+		return false
+	}
+	httpx.WriteError(w, r, http.StatusConflict, "initial_admin_protected", message)
+	return true
 }
 
 // ---- Global shares & AI tokens ----

@@ -318,7 +318,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
               <td>{user.totpRequired ? text.accountTotpEnabled : text.accountTotpDisabledLabel}</td>
               <td>{user.role === 'admin' ? text.userStatusActive : '--'}</td>
               <td><div className="member-admin-table-actions">
-                <button className="member-table-action" type="button" onClick={() => void onToggleStatus(user)} disabled={loading}>{user.status === 'active' ? text.userDisable : text.userEnable}</button>
+                {user.protected && user.status === 'active' ? <span className="member-readonly">{text.userProtected}</span> : <button className="member-table-action" type="button" onClick={() => void onToggleStatus(user)} disabled={loading}>{user.status === 'active' ? text.userDisable : text.userEnable}</button>}
                 <button className="member-table-action member-table-danger" type="button" onClick={() => void onRevokeSessions(user)} disabled={loading}>{text.userRevokeSessions}</button>
               </div></td>
             </tr>
@@ -476,13 +476,13 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
                   <tr key={member.accountId}>
                     <td>{account.primary}{account.secondary && <small>{account.secondary}</small>}</td>
                     <td>
-                      <select value={member.permission} onChange={(event) => void onUpdatePermission(member.accountId, event.target.value as SpaceMemberRole)}>
+                      {member.protected ? <span className="member-readonly">{text.spaceMemberProtected}</span> : <select value={member.permission} onChange={(event) => void onUpdatePermission(member.accountId, event.target.value as SpaceMemberRole)}>
                         <option value="viewer">{text.spaceRoleViewer}</option>
                         <option value="editor">{text.spaceRoleEditor}</option>
                         <option value="manager">{text.spaceRoleManager}</option>
-                      </select>
+                      </select>}
                     </td>
-                    <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onRemoveMember(member.accountId)}>{text.spaceMemberRemove}</button></td>
+                    <td>{member.protected ? <span className="member-readonly">{text.spaceMemberProtected}</span> : <button className="member-table-action member-table-danger" type="button" onClick={() => void onRemoveMember(member.accountId)}>{text.spaceMemberRemove}</button>}</td>
                   </tr>
                 );
               })}</tbody>

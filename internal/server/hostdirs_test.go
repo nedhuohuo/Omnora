@@ -64,8 +64,20 @@ func TestAdminHostDirectorySuggestionsStayInsideConfiguredRoots(t *testing.T) {
 		if len(payload.Roots) != 2 {
 			t.Fatalf("roots = %#v", payload.Roots)
 		}
+		if got := hostDirectoryRootKind(payload.RootDetails, managed); got != "managed" {
+			t.Fatalf("managed root kind = %q, want managed; details = %#v", got, payload.RootDetails)
+		}
+		if got := hostDirectoryRootKind(payload.RootDetails, external); got != "external" {
+			t.Fatalf("external root kind = %q, want external; details = %#v", got, payload.RootDetails)
+		}
 		if !containsHostPath(payload.Entries, managed) || !containsHostPath(payload.Entries, external) {
 			t.Fatalf("entries = %#v", payload.Entries)
+		}
+		if got := hostDirectoryEntryKind(payload.Entries, managed); got != "managed" {
+			t.Fatalf("managed entry kind = %q, want managed; entries = %#v", got, payload.Entries)
+		}
+		if got := hostDirectoryEntryKind(payload.Entries, external); got != "external" {
+			t.Fatalf("external entry kind = %q, want external; entries = %#v", got, payload.Entries)
 		}
 		if containsHostPath(payload.Entries, outside) {
 			t.Fatalf("outside path leaked: %#v", payload.Entries)
@@ -86,6 +98,9 @@ func TestAdminHostDirectorySuggestionsStayInsideConfiguredRoots(t *testing.T) {
 		}
 		if !containsHostPath(payload.Entries, nested) {
 			t.Fatalf("entries = %#v, want %s", payload.Entries, nested)
+		}
+		if got := hostDirectoryEntryKind(payload.Entries, nested); got != "external" {
+			t.Fatalf("nested entry kind = %q, want external; entries = %#v", got, payload.Entries)
 		}
 	})
 
@@ -114,6 +129,24 @@ func containsHostPath(entries []hostDirectoryEntry, path string) bool {
 		}
 	}
 	return false
+}
+
+func hostDirectoryRootKind(roots []hostDirectoryRoot, path string) string {
+	for _, root := range roots {
+		if root.Path == path {
+			return root.Kind
+		}
+	}
+	return ""
+}
+
+func hostDirectoryEntryKind(entries []hostDirectoryEntry, path string) string {
+	for _, entry := range entries {
+		if entry.Path == path {
+			return entry.Kind
+		}
+	}
+	return ""
 }
 
 func TestProbeMountWritableRejectsReadOnlyRoot(t *testing.T) {

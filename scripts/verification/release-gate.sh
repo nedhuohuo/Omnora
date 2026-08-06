@@ -77,6 +77,9 @@ step "Frontend test suite"
 step "Frontend production build"
 (cd "$ROOT/web" && npm run build)
 
+step "OpenAPI, REST, and MCP documentation checks"
+"$ROOT/scripts/verification/verify-api-docs.sh"
+
 step "Static release scaffold and Compose checks"
 if [ "$STRICT" -eq 1 ]; then
   OMNORA_REQUIRE_DOCKER_COMPOSE=1 "$ROOT/scripts/verification/verify-scaffolding.sh"

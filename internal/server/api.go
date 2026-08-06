@@ -1455,6 +1455,10 @@ func (s *Server) createMount(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusConflict
 			code = "mount_identity_unverifiable"
 		}
+		if errors.Is(err, errMountRootNotAllowed) {
+			status = http.StatusForbidden
+			code = "mount_root_not_allowed"
+		}
 		httpx.WriteError(w, r, status, code, err.Error())
 		return
 	}
@@ -2077,6 +2081,7 @@ func writeTokenError(w http.ResponseWriter, r *http.Request, err error) {
 var (
 	errMountConflict             = errors.New("mount conflicts with an existing mount")
 	errMountIdentityUnverifiable = errors.New("mount identity is unverifiable")
+	errMountRootNotAllowed       = errors.New("mount root is outside the configured storage root")
 	errMountUnavailable          = errors.New("mount is unavailable")
 )
 
@@ -2110,6 +2115,9 @@ func (s *Server) validateMountRequest(r *http.Request, spaceID, displayName, roo
 	if mountMode != domain.MountModeReadOnly && mountMode != domain.MountModeReadWrite {
 		return validatedMount{}, fmt.Errorf("mount mode must be read_only or read_write")
 	}
+	if !s.mountRootAllowedForKind(kind, rootPath) {
+		return validatedMount{}, fmt.Errorf("%w: %s mounts must be inside their configured storage root", errMountRootNotAllowed, kind)
+	}
 	var spaceName string
 	err = s.sqlDB().QueryRowContext(r.Context(), `
 SELECT name
@@ -2140,6 +2148,28 @@ WHERE id = ? AND status = 'active'
 	}
 
 	return validatedMount{SpaceName: spaceName, DisplayName: displayName, RootPath: identity.Path, Kind: kind, Mode: mountMode, Identity: identity}, nil
+}
+
+func (s *Server) mountRootAllowedForKind(kind, candidatePath string) bool {
+	var configuredRoot string
+	switch kind {
+	case "managed":
+		configuredRoot = s.cfg.Storage.ManagedDir
+	case "external":
+		configuredRoot = s.cfg.Storage.PredeclaredMountRoot
+	default:
+		return false
+	}
+
+	candidatePath = filepath.Clean(strings.TrimSpace(candidatePath))
+	configuredRoot = filepath.Clean(strings.TrimSpace(configuredRoot))
+	if candidatePath == "." || configuredRoot == "." ||
+		!filepath.IsAbs(candidatePath) || !filepath.IsAbs(configuredRoot) ||
+		configuredRoot == string(filepath.Separator) {
+		return false
+	}
+
+	return candidatePath == configuredRoot || strings.HasPrefix(candidatePath, configuredRoot+string(filepath.Separator))
 }
 
 func probeMountWritable(rootPath string) error {

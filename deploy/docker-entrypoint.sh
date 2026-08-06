@@ -48,6 +48,7 @@ write_instance_file() {
 config_instance_id=''
 data_instance_id=''
 persistent_instance_exists=false
+instance_markers_created=false
 if [ -f "$CONFIG_INSTANCE_FILE" ] || [ -f "$DATA_INSTANCE_FILE" ] ||
 	[ -f "$SECRETS_FILE" ] || [ -f "$DB_PATH" ] || [ -f "$DB_PATH-wal" ] || [ -f "$DB_PATH-shm" ]; then
 	persistent_instance_exists=true
@@ -67,6 +68,7 @@ if [ -f "$CONFIG_INSTANCE_FILE" ] || [ -f "$DATA_INSTANCE_FILE" ] ||
 		umask 077
 		write_instance_file "$CONFIG_INSTANCE_FILE"
 		write_instance_file "$DATA_INSTANCE_FILE"
+		instance_markers_created=true
 	else
 		fail_persistence_check "persistent state exists but $DB_PATH is missing; check the config/data bind mounts"
 	fi
@@ -75,6 +77,7 @@ else
 	umask 077
 	write_instance_file "$CONFIG_INSTANCE_FILE"
 	write_instance_file "$DATA_INSTANCE_FILE"
+	instance_markers_created=true
 fi
 
 if [ -f "$SECRETS_FILE" ]; then
@@ -90,6 +93,7 @@ if [ "$persistent_instance_exists" = true ] && [ ! -f "$SECRETS_FILE" ] &&
 fi
 
 save_runtime_secrets=false
+runtime_secrets_created=false
 
 if [ -z "${OMNORA_INITIALIZATION_TOKEN:-}" ]; then
 	OMNORA_INITIALIZATION_TOKEN="$(random_hex)"
@@ -112,8 +116,31 @@ if [ "$save_runtime_secrets" = true ]; then
 	} > "$tmp_file"
 	mv "$tmp_file" "$SECRETS_FILE"
 	chmod 600 "$SECRETS_FILE"
+	runtime_secrets_created=true
 	printf 'Omnora generated runtime secrets in %s\n' "$SECRETS_FILE" >&2
-	printf 'Initial setup token: %s\n' "$OMNORA_INITIALIZATION_TOKEN" >&2
 fi
 
-exec "$@"
+forward_child_signal() {
+	if [ -n "${child_pid:-}" ]; then
+		kill -TERM "$child_pid" 2>/dev/null || true
+	fi
+}
+
+trap 'forward_child_signal' HUP INT TERM
+set +e
+"$@" &
+child_pid=$!
+wait "$child_pid"
+child_status=$?
+set -e
+trap - HUP INT TERM
+child_pid=''
+
+if [ "$child_status" -ne 0 ] && [ "$instance_markers_created" = true ] && [ ! -f "$DB_PATH" ]; then
+	rm -f "$CONFIG_INSTANCE_FILE" "$DATA_INSTANCE_FILE"
+	if [ "$runtime_secrets_created" = true ]; then
+		rm -f "$SECRETS_FILE"
+	fi
+fi
+
+exit "$child_status"

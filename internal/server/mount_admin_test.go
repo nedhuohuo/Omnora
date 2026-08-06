@@ -91,8 +91,7 @@ VALUES ('ce1', 'space-admin', 'mnt-keep', 'keep.txt', 'keep.txt', 'file', 'text'
 	})
 
 	t.Run("delete without wiping data", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/mounts/mnt-keep", bytes.NewReader([]byte(`{"deleteData":false}`)))
-		req.Header.Set("Content-Type", "application/json")
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/mounts/mnt-keep", nil)
 		req.AddCookie(adminCookie)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
@@ -119,7 +118,7 @@ VALUES ('ce1', 'space-admin', 'mnt-keep', 'keep.txt', 'keep.txt', 'file', 'text'
 	})
 }
 
-func TestAdminMountDeleteWipesFolderData(t *testing.T) {
+func TestAdminMountDeleteRejectsDataDeletion(t *testing.T) {
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	ctx := context.Background()
@@ -168,26 +167,28 @@ VALUES ('mnt-wipe', 'space-wipe', 'temp', ?, 'managed', 'read_write', 0, 'active
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatalf("readdir: %v", err)
+	var response struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
-	if len(entries) != 0 {
-		t.Fatalf("entries left = %#v", entries)
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
 	}
-	if _, err := os.Stat(root); err != nil {
-		t.Fatalf("root should remain: %v", err)
+	if response.Error.Code != "mount_data_delete_disabled" {
+		t.Fatalf("error code = %q, body = %s", response.Error.Code, rec.Body.String())
 	}
-}
-
-func TestWipeMountContentsRejectsUnsafeRoots(t *testing.T) {
-	if err := wipeMountContents("/"); err == nil {
-		t.Fatal("expected refuse wipe of /")
+	var status string
+	if err := db.SQL().QueryRowContext(ctx, `SELECT status FROM mounts WHERE id = 'mnt-wipe'`).Scan(&status); err != nil {
+		t.Fatalf("load status: %v", err)
 	}
-	if err := wipeMountContents(""); err == nil {
-		t.Fatal("expected refuse wipe of empty path")
+	if status != "active" {
+		t.Fatalf("status = %q; rejected request must not change database", status)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("expected user file to remain: %v", err)
 	}
 }
