@@ -6,12 +6,15 @@ services:
     container_name: omnora
     restart: unless-stopped
     init: true
-    user: "${PUID:-1000}:${PGID:-1000}"
     read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
     ports:
       - "${OMNORA_BIND:-0.0.0.0}:8080:8080"
     environment:

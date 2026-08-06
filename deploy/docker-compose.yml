@@ -11,12 +11,15 @@ services:
     container_name: omnora
     restart: unless-stopped
     init: true
-    user: "${PUID:-1000}:${PGID:-1000}"
     read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
     ports:
       # Bind to 127.0.0.1 for local/reverse-proxy-only access, or a private/public
       # host address when the service should be reachable directly.

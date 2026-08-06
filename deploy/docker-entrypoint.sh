@@ -8,13 +8,29 @@ MANAGED_DIR="${OMNORA_MANAGED_STORAGE_DIR:-/srv/omnora/managed}"
 SECRETS_FILE="${OMNORA_SECRETS_FILE:-$CONFIG_DIR/runtime.env}"
 CONFIG_INSTANCE_FILE="${OMNORA_CONFIG_INSTANCE_FILE:-$CONFIG_DIR/.omnora-instance-id}"
 DATA_INSTANCE_FILE="${OMNORA_DATA_INSTANCE_FILE:-$DATA_DIR/.omnora-instance-id}"
-
-mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$MANAGED_DIR"
+ROOT_CONFIG_DIR=/etc/omnora
+ROOT_DATA_DIR=/var/lib/omnora
+ROOT_MANAGED_DIR=/srv/omnora/managed
 
 fail_persistence_check() {
 	printf 'Omnora persistent state check failed: %s\n' "$1" >&2
 	exit 1
 }
+
+drop_privileges_for_persistence() {
+	[ "$(id -u)" = 0 ] || return 0
+
+	command -v su-exec >/dev/null 2>&1 || fail_persistence_check "su-exec is required to drop root privileges"
+	mkdir -p "$ROOT_CONFIG_DIR" "$ROOT_DATA_DIR" "$ROOT_MANAGED_DIR" ||
+		fail_persistence_check "cannot prepare persistent directories"
+	chown 1000:1000 "$ROOT_CONFIG_DIR" "$ROOT_DATA_DIR" "$ROOT_MANAGED_DIR" ||
+		fail_persistence_check "cannot prepare persistent directory ownership"
+	exec su-exec 1000:1000 "$0" "$@"
+}
+
+drop_privileges_for_persistence "$@"
+
+mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$MANAGED_DIR"
 
 random_hex() {
 	od -An -N32 -tx1 /dev/urandom | tr -d ' \n'

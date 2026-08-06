@@ -3,12 +3,27 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 ENTRYPOINT="$ROOT/deploy/docker-entrypoint.sh"
+COMPOSE="$ROOT/deploy/docker-compose.yml"
+NAS_COMPOSE="$ROOT/deploy/docker-compose.nas.yml"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/omnora-entrypoint-test.XXXXXX")
 
 cleanup() {
 	rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT INT TERM
+
+for compose_file in "$COMPOSE" "$NAS_COMPOSE"; do
+	grep -Fq 'cap_add:' "$compose_file" || {
+		printf 'FAIL: %s does not grant the entrypoint minimal ownership capabilities\n' "$compose_file" >&2
+		exit 1
+	}
+	for capability in CHOWN SETGID SETUID; do
+		grep -Fq "      - $capability" "$compose_file" || {
+			printf 'FAIL: %s does not grant CAP_%s\n' "$compose_file" "$capability" >&2
+			exit 1
+		}
+	done
+done
 
 run_entrypoint() {
 	config_dir="$1"
@@ -35,6 +50,92 @@ run_entrypoint_without_secret_env() {
 		OMNORA_DB_PATH="$db_path" \
 		OMNORA_MANAGED_STORAGE_DIR="$managed_dir" \
 		sh "$ENTRYPOINT" /bin/sh -c 'test -n "$OMNORA_INITIALIZATION_TOKEN" && test -n "$OMNORA_TOTP_ENCRYPTION_KEY" && printf ready'
+}
+
+run_entrypoint_as_root() {
+	config_dir="$1"
+	data_dir="$2"
+	managed_dir="$3"
+	db_path="$data_dir/omnora.db"
+	PATH="$fake_bin:$PATH" \
+	CHOWN_RECORD="$chown_record" \
+	MKDIR_RECORD="$mkdir_record" \
+	SU_EXEC_RECORD="$su_exec_record" \
+	PUID=2000 \
+	PGID=2000 \
+	OMNORA_PRIVILEGE_DROPPED=1 \
+	OMNORA_CONFIG_DIR="$config_dir" \
+	OMNORA_DATA_DIR="$data_dir" \
+	OMNORA_DB_PATH="$db_path" \
+	OMNORA_MANAGED_STORAGE_DIR="$managed_dir" \
+	OMNORA_INITIALIZATION_TOKEN= \
+	OMNORA_TOTP_ENCRYPTION_KEY= \
+	sh "$ENTRYPOINT" /bin/sh -c 'printf root-ready'
+}
+
+fake_bin="$TMP_ROOT/fake-bin"
+chown_record="$TMP_ROOT/chown-record"
+mkdir_record="$TMP_ROOT/mkdir-record"
+su_exec_record="$TMP_ROOT/su-exec-record"
+mkdir -p "$fake_bin"
+
+cat > "$fake_bin/id" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+	-u)
+		if [ "${FAKE_ID_DROPPED:-}" = 1 ]; then
+			printf '1000\n'
+		else
+			printf '0\n'
+		fi
+		;;
+	-g) printf '0\n' ;;
+	*) exec /usr/bin/id "$@" ;;
+esac
+EOF
+
+cat > "$fake_bin/chown" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CHOWN_RECORD"
+EOF
+
+cat > "$fake_bin/mkdir" <<'EOF'
+#!/bin/sh
+if [ "${FAKE_ID_DROPPED:-}" = 1 ]; then
+	printf 'user:%s\n' "$*" >> "$MKDIR_RECORD"
+else
+	printf 'root:%s\n' "$*" >> "$MKDIR_RECORD"
+fi
+EOF
+
+cat > "$fake_bin/su-exec" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" > "$SU_EXEC_RECORD"
+shift
+export FAKE_ID_DROPPED=1
+exec /bin/sh "$@"
+EOF
+
+chmod 755 "$fake_bin/id" "$fake_bin/chown" "$fake_bin/mkdir" "$fake_bin/su-exec"
+
+root_config_dir="$TMP_ROOT/root-config"
+root_data_dir="$TMP_ROOT/root-data"
+root_managed_dir="$TMP_ROOT/root-managed"
+mkdir -p "$root_config_dir" "$root_data_dir" "$root_managed_dir"
+
+[ "$(run_entrypoint_as_root "$root_config_dir" "$root_data_dir" "$root_managed_dir")" = root-ready ] || exit 1
+if [ ! -s "$su_exec_record" ]; then
+	printf 'FAIL: root entrypoint did not drop privileges before persistence setup\n' >&2
+	exit 1
+fi
+[ "$(sed -n '1p' "$su_exec_record")" = 1000:1000 ] || exit 1
+grep -Fx '1000:1000 /etc/omnora /var/lib/omnora /srv/omnora/managed' "$chown_record" >/dev/null || {
+	printf 'FAIL: root entrypoint chowned configurable paths instead of fixed persistence roots\n' >&2
+	exit 1
+}
+grep -Fx 'root:-p /etc/omnora /var/lib/omnora /srv/omnora/managed' "$mkdir_record" >/dev/null || {
+	printf 'FAIL: root entrypoint created configurable paths instead of fixed persistence roots\n' >&2
+	exit 1
 }
 
 config_dir="$TMP_ROOT/config"

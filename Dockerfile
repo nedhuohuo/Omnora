@@ -20,7 +20,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/omnora ./cmd/omnor
 
 FROM alpine:3.22
 
-RUN addgroup -S -g 1000 omnora \
+RUN apk add --no-cache su-exec \
+    && addgroup -S -g 1000 omnora \
     && adduser -S -D -H -u 1000 -G omnora omnora \
     && mkdir -p /etc/omnora /var/lib/omnora /srv/omnora/managed \
     && chown -R 1000:1000 /etc/omnora /var/lib/omnora /srv/omnora
@@ -46,7 +47,7 @@ ENV TZ=Asia/Shanghai \
     OMNORA_ROUTE_MCP_ENABLED=false \
     OMNORA_ROUTE_OPENAPI_ENABLED=true
 
-USER 1000:1000
+USER root
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/omnora-docker-entrypoint"]
 CMD ["/usr/local/bin/omnora"]
