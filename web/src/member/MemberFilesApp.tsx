@@ -556,11 +556,16 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     if (!deleteTarget) return;
     const mountId = deleteTarget.mountId ?? activeMountId;
     const mount = mounts.find((item) => item.id === mountId) ?? activeMount;
+    const deletePolicy = mountDeletePolicy(mount);
+    if (deletePolicy === 'unavailable') {
+      setError(text.deleteUnavailableDetail);
+      return;
+    }
     setDeleteBusy(true);
     setError('');
     try {
       await deleteObject(activeSpaceId, mountId, deleteTarget.relativePath, {
-        permanent: mountDeletePolicy(mount) === 'permanent',
+        permanent: deletePolicy === 'permanent',
       });
       setDeleteTarget(null);
       await refreshDirectory(activeSpaceId, activeMountId, relativePath);
@@ -964,9 +969,10 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
         <div className="member-modal-backdrop">
           <div className="member-modal">
             <h2>{text.deleteConfirmTitle}</h2>
-            <p className="member-modal-hint">{deleteTargetPolicy === 'permanent' ? text.deletePermanentConfirmDetail : text.deleteConfirmDetail}</p>
+            <p className="member-modal-hint">{deleteTargetPolicy === 'permanent' ? text.deletePermanentConfirmDetail : deleteTargetPolicy === 'unavailable' ? text.deleteUnavailableDetail : text.deleteConfirmDetail}</p>
+            {error && <p className="member-error">{text.error}: {error}</p>}
             <p className="member-modal-hint"><strong>{deleteTarget.name}</strong></p>
-            <div><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDeleteConfirmed()} disabled={deleteBusy}>{text.deleteFile}</button></div>
+            <div><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDeleteConfirmed()} disabled={deleteBusy || deleteTargetPolicy === 'unavailable'}>{text.deleteFile}</button></div>
           </div>
         </div>
       )}

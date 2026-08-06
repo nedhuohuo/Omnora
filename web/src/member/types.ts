@@ -11,20 +11,21 @@ export type MemberMount = {
   id: string;
   name: string;
   space: string;
-  kind?: 'external' | 'managed';
+  kind: 'external' | 'managed';
   mode: 'read-write' | 'read-only';
   index: string;
   health: string;
   tone: string;
 };
 
-export type MountDeletePolicy = 'trash' | 'permanent';
+export type MountDeletePolicy = 'trash' | 'permanent' | 'unavailable';
 
 export function mountSupportsTrash(mount: Pick<MemberMount, 'kind'> | null | undefined) {
   return mount?.kind === 'managed';
 }
 
 export function mountDeletePolicy(mount: Pick<MemberMount, 'kind'> | null | undefined): MountDeletePolicy {
+  if (!mount?.kind) return 'unavailable';
   return mountSupportsTrash(mount) ? 'trash' : 'permanent';
 }
 

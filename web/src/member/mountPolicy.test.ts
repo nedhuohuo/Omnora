@@ -9,9 +9,9 @@ describe('mount file policies', () => {
     expect(mountSupportsTrash(undefined)).toBe(false);
   });
 
-  it('requires permanent deletion when a mount has no recycle bin', () => {
+  it('requires permanent deletion only for known external mounts', () => {
     expect(mountDeletePolicy({ kind: 'managed' })).toBe('trash');
     expect(mountDeletePolicy({ kind: 'external' })).toBe('permanent');
-    expect(mountDeletePolicy(undefined)).toBe('permanent');
+    expect(mountDeletePolicy(undefined)).toBe('unavailable');
   });
 });
