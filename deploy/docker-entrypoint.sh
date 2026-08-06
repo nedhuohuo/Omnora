@@ -3,6 +3,7 @@ set -eu
 
 CONFIG_DIR="${OMNORA_CONFIG_DIR:-/etc/omnora}"
 DATA_DIR="${OMNORA_DATA_DIR:-/var/lib/omnora}"
+DB_PATH="${OMNORA_DB_PATH:-$DATA_DIR/omnora.db}"
 MANAGED_DIR="${OMNORA_MANAGED_STORAGE_DIR:-/srv/omnora/managed}"
 SECRETS_FILE="${OMNORA_SECRETS_FILE:-$CONFIG_DIR/runtime.env}"
 CONFIG_INSTANCE_FILE="${OMNORA_CONFIG_INSTANCE_FILE:-$CONFIG_DIR/.omnora-instance-id}"
@@ -31,15 +32,28 @@ write_instance_file() {
 config_instance_id=''
 data_instance_id=''
 persistent_instance_exists=false
-if [ -f "$CONFIG_INSTANCE_FILE" ] || [ -f "$DATA_INSTANCE_FILE" ]; then
+if [ -f "$CONFIG_INSTANCE_FILE" ] || [ -f "$DATA_INSTANCE_FILE" ] ||
+	[ -f "$SECRETS_FILE" ] || [ -f "$DB_PATH" ] || [ -f "$DB_PATH-wal" ] || [ -f "$DB_PATH-shm" ]; then
 	persistent_instance_exists=true
-	[ -f "$CONFIG_INSTANCE_FILE" ] || fail_persistence_check "missing $CONFIG_INSTANCE_FILE; check the config bind mount"
-	[ -f "$DATA_INSTANCE_FILE" ] || fail_persistence_check "missing $DATA_INSTANCE_FILE; check the data bind mount"
-	config_instance_id="$(tr -d ' \r\n\t' < "$CONFIG_INSTANCE_FILE")"
-	data_instance_id="$(tr -d ' \r\n\t' < "$DATA_INSTANCE_FILE")"
-	[ -n "$config_instance_id" ] || fail_persistence_check "$CONFIG_INSTANCE_FILE is empty"
-	[ "$config_instance_id" = "$data_instance_id" ] || fail_persistence_check "config and data bind mounts belong to different Omnora instances"
-	INSTANCE_ID="$config_instance_id"
+	if [ -f "$CONFIG_INSTANCE_FILE" ] || [ -f "$DATA_INSTANCE_FILE" ]; then
+		[ -f "$CONFIG_INSTANCE_FILE" ] || fail_persistence_check "missing $CONFIG_INSTANCE_FILE; check the config bind mount"
+		[ -f "$DATA_INSTANCE_FILE" ] || fail_persistence_check "missing $DATA_INSTANCE_FILE; check the data bind mount"
+		[ -f "$DB_PATH" ] || fail_persistence_check "missing $DB_PATH; check the data bind mount before redeploying"
+		config_instance_id="$(tr -d ' \r\n\t' < "$CONFIG_INSTANCE_FILE")"
+		data_instance_id="$(tr -d ' \r\n\t' < "$DATA_INSTANCE_FILE")"
+		[ -n "$config_instance_id" ] || fail_persistence_check "$CONFIG_INSTANCE_FILE is empty"
+		[ "$config_instance_id" = "$data_instance_id" ] || fail_persistence_check "config and data bind mounts belong to different Omnora instances"
+		INSTANCE_ID="$config_instance_id"
+	elif [ -f "$DB_PATH" ]; then
+		# Adopt a database created before instance markers were introduced, but
+		# never create a new database when persistent state is incomplete.
+		INSTANCE_ID="$(random_hex)"
+		umask 077
+		write_instance_file "$CONFIG_INSTANCE_FILE"
+		write_instance_file "$DATA_INSTANCE_FILE"
+	else
+		fail_persistence_check "persistent state exists but $DB_PATH is missing; check the config/data bind mounts"
+	fi
 else
 	INSTANCE_ID="$(random_hex)"
 	umask 077
