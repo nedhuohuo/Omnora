@@ -16,6 +16,10 @@
 .member-nav, .member-space, .member-mount { display: flex; width: 100%; align-items: center; justify-content: space-between; min-height: 37px; padding: 0 11px; border-radius: 5px; color: var(--text-muted); text-align: left; font-size: 14px; }
 .member-nav.active, .member-space.selected, .member-mount.selected { background: var(--accent-soft); color: var(--accent-text); font-weight: 700; }
 .member-nav:disabled { opacity: 0.45; cursor: not-allowed; }
+.member-admin-subnav { display: inline-flex; max-width: 100%; overflow-x: auto; margin: 0 0 16px; padding: 3px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-2); }
+.member-admin-subnav button { flex: 0 0 auto; min-height: 31px; padding: 0 12px; border: 0; border-radius: 4px; background: transparent; color: var(--text-soft); cursor: pointer; font-size: 13px; white-space: nowrap; }
+.member-admin-subnav button:hover { color: var(--accent-text); }
+.member-admin-subnav button[aria-selected="true"] { background: var(--surface); color: var(--text-strong); font-weight: 700; box-shadow: 0 1px 2px rgb(37 58 85 / 0.08); }
 .member-sidebar-section { margin-top: 23px; }
 .member-sidebar-section p { margin: 0 10px 6px; color: var(--text-faint); font-size: 12px; }
 .member-space small, .member-mount small { color: var(--text-faint); font-size: 11px; font-weight: 500; }
