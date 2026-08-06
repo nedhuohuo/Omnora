@@ -19,6 +19,23 @@ pass() {
   printf 'ok: %s\n' "$1"
 }
 
+require_operation_status() {
+  path="$1"
+  method="$2"
+  status="$3"
+  label="$4"
+  if ! awk -v wanted_path="  $path:" -v wanted_method="    $method:" -v wanted_status="        \"$status\":" '
+    $0 == wanted_path { in_path = 1; next }
+    in_path && /^  \/[^[:space:]]/ { in_path = 0; in_method = 0 }
+    in_path && $0 == wanted_method { in_method = 1; next }
+    in_method && /^    [[:alpha:]]+:/ { in_method = 0 }
+    in_method && $0 == wanted_status { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$OPENAPI"; then
+    fail "$label must document HTTP $status"
+  fi
+}
+
 for path in "$OPENAPI" "$OPENAPI_ASSET" "$OPENAPI_SYNC" "$REST_DOC" "$MCP_DOC" "$ROOT_README" "$DOCS_README"; do
   [ -f "$path" ] || fail "missing API documentation file: $path"
 done
@@ -50,6 +67,10 @@ fi
 grep -Fq 'protected:' "$OPENAPI" || fail "OpenAPI User schema must retain protected"
 grep -Fq 'initial_admin_protected' "$OPENAPI" || fail "OpenAPI must document initial admin protection errors"
 grep -Fq 'mount_root_not_allowed' "$OPENAPI" || fail "OpenAPI must document mount root allowlist errors"
+grep -Fq 'mount_not_writable' "$OPENAPI" || fail "OpenAPI must document mount not writable errors"
+grep -Fq 'mount_not_writable' "$REST_DOC" || fail "REST guide must document mount not writable errors"
+require_operation_status '/admin/mounts' post 409 'Create mount operation'
+require_operation_status '/admin/mounts/{mountId}/reverify' post 409 'Re-verify mount operation'
 grep -Fq 'AdminSpaceMember' "$OPENAPI" || fail "OpenAPI must describe protected admin space members"
 grep -Fq 'MountDeletion' "$OPENAPI" || fail "OpenAPI must describe the admin mount deletion response"
 pass "OpenAPI source reflects current MCP and runtime error contracts"

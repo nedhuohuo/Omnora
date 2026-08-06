@@ -105,7 +105,9 @@ curl -fsS -b /tmp/omnora.cookies \
 }
 ```
 
-客户端应按 `error.code` 做机器判断，把 `error.message` 作为诊断信息，并在工单或日志关联时保留 `error.request_id`。常见错误包括 `unauthorized`、`forbidden`、`route_group_disabled`、`not_found`、`invalid_input`、`readonly_mount`、`mount_identity_unverifiable` 和 `upload_conflict`；完整路径级响应仍以 OpenAPI 为准。
+客户端应按 `error.code` 做机器判断，把 `error.message` 作为诊断信息，并在工单或日志关联时保留 `error.request_id`。常见错误包括 `unauthorized`、`forbidden`、`route_group_disabled`、`not_found`、`invalid_input`、`readonly_mount`、`mount_identity_unverifiable`、`mount_not_writable`、`upload_conflict`、`personal_space_protected` 和 `confirmation_required`；完整路径级响应仍以 OpenAPI 为准。
+
+创建或重新验证读写挂载时，如果容器内实际文件系统无法创建并删除探针文件，服务返回 `409 mount_not_writable`；调用方不应把它当作请求字段格式错误。
 
 ## 常用业务流程
 
@@ -133,6 +135,12 @@ REST 上传当前采用会话 Cookie 认证的会话式流程：
 ### 分享
 
 分享创建、撤销和分享会话交换属于独立的 REST/Share 能力。分享 URL 的秘密只应通过受保护的片段和一次性交换流程处理，具体边界见 OpenAPI 的 `shares` 与 `share-sessions` 定义以及[安全模型](../security/security-model.md)。
+
+### 管理员共享空间生命周期
+
+系统管理员使用 `PATCH /api/v1/admin/spaces/{spaceId}` 和 `{ "name": "新名称" }` 重命名共享空间。重命名只改变显示名称，不改变空间 ID、ACL、挂载归属、分享或 Token 边界。个人空间请求返回 `409 personal_space_protected`。
+
+永久删除共享空间使用 `DELETE /api/v1/admin/spaces/{spaceId}`，请求体必须以 `{ "name": "当前空间名称" }` 精确确认；不匹配返回 `409 confirmation_required`。成功响应明确包含 `deleted: true`、`deleteData: false` 和 `dataDeleted: false`。删除不可恢复，会清理空间、成员、挂载注册、索引、分享及派生会话、Token 边界和上传记录，同时取消相关活动任务并保留其终态记录，但绝不删除服务器上的真实目录、用户文件或上传临时文件。共享空间没有停用或恢复 API。
 
 ## 变更与验证
 

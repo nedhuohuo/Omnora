@@ -18,6 +18,16 @@ export type MemberMount = {
   tone: string;
 };
 
+export type MountDeletePolicy = 'trash' | 'permanent';
+
+export function mountSupportsTrash(mount: Pick<MemberMount, 'kind'> | null | undefined) {
+  return mount?.kind === 'managed';
+}
+
+export function mountDeletePolicy(mount: Pick<MemberMount, 'kind'> | null | undefined): MountDeletePolicy {
+  return mountSupportsTrash(mount) ? 'trash' : 'permanent';
+}
+
 export type MemberDirectoryEntry = {
   mountId?: string;
   mountName?: string;

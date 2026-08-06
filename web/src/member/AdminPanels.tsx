@@ -13,6 +13,7 @@ import {
   createAdminBackup,
   createAdminSpace,
   createAdminUser,
+  deleteAdminSpace,
   deleteAdminAiToken,
   disableAdminUser,
   enableAdminUser,
@@ -25,6 +26,7 @@ import {
   listSpaceMembers,
   putSpaceMember,
   removeSpaceMember,
+  renameAdminSpace,
   restoreAdminBackup,
   revokeAdminShare,
   revokeAdminUserSessions,
@@ -318,7 +320,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
               <td>{user.totpRequired ? text.accountTotpEnabled : text.accountTotpDisabledLabel}</td>
               <td>{user.role === 'admin' ? text.userStatusActive : '--'}</td>
               <td><div className="member-admin-table-actions">
-                {user.protected && user.status === 'active' ? <span className="member-readonly">{text.userProtected}</span> : <button className="member-table-action" type="button" onClick={() => void onToggleStatus(user)} disabled={loading}>{user.status === 'active' ? text.userDisable : text.userEnable}</button>}
+                {!(user.protected && user.status === 'active') && <button className="member-table-action" type="button" onClick={() => void onToggleStatus(user)} disabled={loading}>{user.status === 'active' ? text.userDisable : text.userEnable}</button>}
                 <button className="member-table-action member-table-danger" type="button" onClick={() => void onRevokeSessions(user)} disabled={loading}>{text.userRevokeSessions}</button>
               </div></td>
             </tr>
@@ -357,6 +359,11 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
   const [creating, setCreating] = useState(false);
   const [memberAccountId, setMemberAccountId] = useState('');
   const [memberPermission, setMemberPermission] = useState<SpaceMemberRole>('viewer');
+  const [renameTarget, setRenameTarget] = useState<AdminSpacePayload | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<AdminSpacePayload | null>(null);
+  const [deleteConfirmValue, setDeleteConfirmValue] = useState('');
+  const selectedSpace = spaces.find((space) => space.id === selectedSpaceId);
 
   const loadSpaces = useCallback(async () => {
     setLoading(true);
@@ -406,6 +413,52 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
       setError(describeError(caught));
     } finally {
       setCreating(false);
+    }
+  }
+
+  function openRenameSpace(space: AdminSpacePayload) {
+    setError('');
+    setRenameTarget(space);
+    setRenameValue(space.name);
+  }
+
+  function openDeleteSpace(space: AdminSpacePayload) {
+    setError('');
+    setDeleteTarget(space);
+    setDeleteConfirmValue('');
+  }
+
+  async function onRenameSpace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!renameTarget || !renameValue.trim()) return;
+    setLoading(true);
+    setError('');
+    try {
+      await renameAdminSpace(renameTarget.id, renameValue.trim());
+      setRenameTarget(null);
+      setRenameValue('');
+      await loadSpaces();
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onDeleteSpace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!deleteTarget || deleteConfirmValue !== deleteTarget.name) return;
+    setLoading(true);
+    setError('');
+    try {
+      await deleteAdminSpace(deleteTarget.id, deleteConfirmValue);
+      setDeleteTarget(null);
+      setDeleteConfirmValue('');
+      await loadSpaces();
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -465,6 +518,12 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
               {spaces.map((space) => <option key={space.id} value={space.id}>{space.name} ({space.type})</option>)}
             </select>
           </label>
+          {selectedSpace?.type === 'shared' && (
+            <div className="member-admin-table-actions">
+              <button className="member-table-action" type="button" onClick={() => openRenameSpace(selectedSpace)} disabled={loading}>{text.spaceRename}</button>
+              <button className="member-table-action member-table-danger" type="button" onClick={() => openDeleteSpace(selectedSpace)} disabled={loading}>{text.spaceDelete}</button>
+            </div>
+          )}
 
           <h2>{text.spaceMembersTitle}</h2>
           {members.length === 0 ? <div className="member-empty">{text.spaceNoMembers}</div> : (
@@ -476,13 +535,13 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
                   <tr key={member.accountId}>
                     <td>{account.primary}{account.secondary && <small>{account.secondary}</small>}</td>
                     <td>
-                      {member.protected ? <span className="member-readonly">{text.spaceMemberProtected}</span> : <select value={member.permission} onChange={(event) => void onUpdatePermission(member.accountId, event.target.value as SpaceMemberRole)}>
+                      {member.protected ? text.userColumnAdmin : <select value={member.permission} onChange={(event) => void onUpdatePermission(member.accountId, event.target.value as SpaceMemberRole)}>
                         <option value="viewer">{text.spaceRoleViewer}</option>
                         <option value="editor">{text.spaceRoleEditor}</option>
                         <option value="manager">{text.spaceRoleManager}</option>
                       </select>}
                     </td>
-                    <td>{member.protected ? <span className="member-readonly">{text.spaceMemberProtected}</span> : <button className="member-table-action member-table-danger" type="button" onClick={() => void onRemoveMember(member.accountId)}>{text.spaceMemberRemove}</button>}</td>
+                    <td>{member.protected ? '--' : <button className="member-table-action member-table-danger" type="button" onClick={() => void onRemoveMember(member.accountId)}>{text.spaceMemberRemove}</button>}</td>
                   </tr>
                 );
               })}</tbody>
@@ -500,6 +559,36 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
             </label>
             <button className="member-primary" type="submit" disabled={loading}>{text.spaceMemberAdd}</button>
           </form>
+
+          {renameTarget && (
+            <div className="member-modal-backdrop">
+              <form className="member-modal" onSubmit={onRenameSpace}>
+                <h2>{text.spaceRenameTitle}</h2>
+                <label>{text.spaceName}<input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} required /></label>
+                {error && <div className="member-error">{text.error}: {error}</div>}
+                <div>
+                  <button type="button" onClick={() => setRenameTarget(null)}>{text.cancel}</button>
+                  <button className="member-primary" type="submit" disabled={loading || !renameValue.trim()}>{text.spaceRenameSave}</button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {deleteTarget && (
+            <div className="member-modal-backdrop">
+              <form className="member-modal" onSubmit={onDeleteSpace}>
+                <h2>{text.spaceDeleteTitle}</h2>
+                <p className="member-modal-hint">{text.spaceDeleteDetail}</p>
+                <p className="member-modal-hint"><strong>{deleteTarget.name}</strong></p>
+                <label>{text.spaceDeleteConfirmLabel}<input autoFocus value={deleteConfirmValue} onChange={(event) => setDeleteConfirmValue(event.target.value)} required /></label>
+                {error && <div className="member-error">{text.error}: {error}</div>}
+                <div>
+                  <button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button>
+                  <button className="member-modal-danger" type="submit" disabled={loading || deleteConfirmValue !== deleteTarget.name}>{text.spaceDeleteSubmit}</button>
+                </div>
+              </form>
+            </div>
+          )}
         </>
       )}
     </div>

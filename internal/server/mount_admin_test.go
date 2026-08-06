@@ -192,3 +192,43 @@ VALUES ('mnt-wipe', 'space-wipe', 'temp', ?, 'managed', 'read_write', 0, 'active
 		t.Fatalf("expected user file to remain: %v", err)
 	}
 }
+
+func TestAdminMountReverifyReportsNotWritable(t *testing.T) {
+	db, handler := newAPITestServer(t)
+	admin, _ := createAPITestAccounts(t, db)
+	root := createTestSpaceAndMount(t, db, "space-reverify", "mnt-reverify", admin.ID, "read_write")
+	if _, err := db.SQL().ExecContext(context.Background(), `UPDATE mounts SET status = 'unavailable' WHERE id = 'mnt-reverify'`); err != nil {
+		t.Fatalf("mark mount unavailable: %v", err)
+	}
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatalf("make mount root read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/mounts/mnt-reverify/reverify", nil)
+	req.AddCookie(issueAPITestSession(t, db, admin.ID))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	var response struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v; body = %s", err, rec.Body.String())
+	}
+	if response.Error.Code != "mount_not_writable" {
+		t.Fatalf("error code = %q, want mount_not_writable; body = %s", response.Error.Code, rec.Body.String())
+	}
+	var status string
+	if err := db.SQL().QueryRowContext(context.Background(), `SELECT status FROM mounts WHERE id = 'mnt-reverify'`).Scan(&status); err != nil {
+		t.Fatalf("load mount status: %v", err)
+	}
+	if status != "unavailable" {
+		t.Fatalf("status = %q; failed re-verification must not reactivate the mount", status)
+	}
+}

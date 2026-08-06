@@ -110,6 +110,8 @@ paths:
                 $ref: "#/components/schemas/Session"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
     post:
       tags: [Identity]
       summary: Create a browser session after password and required TOTP checks.
@@ -767,7 +769,11 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/Conflict"
+          description: Registration conflicts with an existing mount, its identity cannot be verified, or the requested read-write root is not writable (`mount_conflict`, `mount_identity_unverifiable`, or `mount_not_writable`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /admin/index-jobs:
     get:
       tags: [Admin]
@@ -1223,6 +1229,16 @@ paths:
                 additionalProperties: true
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The mount conflicts with another identity, its identity cannot be verified, or its read-write root is not writable (`mount_conflict`, `mount_identity_unverifiable`, or `mount_not_writable`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /admin/overview:
     get:
@@ -1330,30 +1346,123 @@ paths:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminSpace"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
     post:
       tags: [Admin]
       summary: Implemented endpoint POST /admin/spaces.
       x-omnora-route-group: rest
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: "#/components/schemas/CreateAdminSpaceRequest"
       responses:
         "201":
           description: Success.
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/AdminSpace"
+        "400":
+          description: The shared-space name is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/spaces/{spaceId}:
+    patch:
+      tags: [Admin]
+      summary: Rename a shared space without changing its identity or authorization references.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAdminSpaceRequest"
+      responses:
+        "200":
+          description: Shared space renamed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminSpace"
+        "400":
+          description: The shared-space name is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Personal spaces are system-managed and cannot be renamed (`personal_space_protected`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      tags: [Admin]
+      summary: Permanently delete a shared-space registration without deleting server files.
+      description: >
+        Deletes the shared space and its related control-plane records in one
+        transaction. Real directories, user files, and upload temporary files
+        on the server are retained. This operation cannot be restored.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteAdminSpaceRequest"
+      responses:
+        "200":
+          description: Shared-space control-plane records deleted; server data retained.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpaceDeletion"
+        "400":
+          description: The confirmation request is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The space is personal (`personal_space_protected`) or the exact current name was not supplied (`confirmation_required`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /admin/spaces/{spaceId}/members:
     get:
@@ -2099,7 +2208,8 @@ components:
                 mount_offline, readonly_mount, object_changed,
                 preview_not_supported, share_password_required, share_invalid,
                 upload_conflict, totp_required, initial_admin_protected,
-                mount_root_not_allowed, and not_implemented.
+                personal_space_protected, confirmation_required,
+                mount_root_not_allowed, mount_not_writable, and not_implemented.
             message:
               type: string
               description: Human-readable error message safe to show to the caller.
@@ -2204,6 +2314,64 @@ components:
         role:
           type: string
           enum: [viewer, editor, manager]
+    AdminSpace:
+      type: object
+      required: [id, type, name]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        type:
+          type: string
+          enum: [personal, shared]
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+    CreateAdminSpaceRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Display name after trimming; control characters are rejected.
+    UpdateAdminSpaceRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: New display name after trimming; control characters are rejected.
+    DeleteAdminSpaceRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Must exactly match the shared space's current name.
+    SpaceDeletion:
+      type: object
+      required: [id, deleted, deleteData, dataDeleted]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        deleted:
+          type: boolean
+          const: true
+        deleteData:
+          type: boolean
+          const: false
+        dataDeleted:
+          type: boolean
+          const: false
+          description: Server directories, user files, and upload temporary files are retained.
     SpaceAclEntry:
       type: object
       required: [userId, role]

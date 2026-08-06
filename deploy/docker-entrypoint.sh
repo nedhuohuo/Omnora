@@ -11,6 +11,7 @@ DATA_INSTANCE_FILE="${OMNORA_DATA_INSTANCE_FILE:-$DATA_DIR/.omnora-instance-id}"
 ROOT_CONFIG_DIR=/etc/omnora
 ROOT_DATA_DIR=/var/lib/omnora
 ROOT_MANAGED_DIR=/srv/omnora/managed
+ROOT_PREDECLARED_MOUNT_ROOT=/mnt/omnora
 
 fail_persistence_check() {
 	printf 'Omnora persistent state check failed: %s\n' "$1" >&2
@@ -25,6 +26,9 @@ drop_privileges_for_persistence() {
 		fail_persistence_check "cannot prepare persistent directories"
 	chown 1000:1000 "$ROOT_CONFIG_DIR" "$ROOT_DATA_DIR" "$ROOT_MANAGED_DIR" ||
 		fail_persistence_check "cannot prepare persistent directory ownership"
+	if ! chown 1000:1000 "$ROOT_PREDECLARED_MOUNT_ROOT"; then
+		printf 'Omnora warning: cannot prepare external mount root ownership at %s; read-write mounts may be unavailable\n' "$ROOT_PREDECLARED_MOUNT_ROOT" >&2
+	fi
 	exec su-exec 1000:1000 "$0" "$@"
 }
 

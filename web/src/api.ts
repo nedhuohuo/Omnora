@@ -155,6 +155,13 @@ export type AdminSpacePayload = {
   name: string;
 };
 
+export type SpaceDeletionPayload = {
+  id: string;
+  deleted: boolean;
+  deleteData: boolean;
+  dataDeleted: boolean;
+};
+
 export type AdminMountListItem = {
   id: string;
   name: string;
@@ -1000,6 +1007,22 @@ export function createAdminSpace(payload: CreateAdminSpacePayload, signal?: Abor
   return requestJson<AdminSpacePayload>('/api/v1/admin/spaces', {
     method: 'POST',
     body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function renameAdminSpace(spaceId: string, name: string, signal?: AbortSignal) {
+  return requestJson<AdminSpacePayload>(`/api/v1/admin/spaces/${encodeURIComponent(spaceId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+    signal,
+  });
+}
+
+export function deleteAdminSpace(spaceId: string, name: string, signal?: AbortSignal) {
+  return requestJson<SpaceDeletionPayload>(`/api/v1/admin/spaces/${encodeURIComponent(spaceId)}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ name }),
     signal,
   });
 }

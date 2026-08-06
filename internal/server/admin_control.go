@@ -11,7 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"omnora/internal/audit"
 	"omnora/internal/domain"
 	"omnora/internal/httpx"
 	"omnora/internal/identity"
@@ -420,9 +423,9 @@ func (s *Server) createAdminSpace(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "name is required")
+	name, err := normalizeAdminSpaceName(req.Name)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
 	spaceID := "spc_" + httpx.NewRequestID()
@@ -453,6 +456,331 @@ VALUES (?, ?, 'manager', ?, ?)
 	}
 	_ = s.recordAudit(r, "admin_space_create", "space", spaceID, "{}")
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": spaceID, "type": "shared", "name": name})
+}
+
+func normalizeAdminSpaceName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("name is required")
+	}
+	if utf8.RuneCountInString(value) > 128 {
+		return "", fmt.Errorf("name is too long")
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return "", fmt.Errorf("name contains invalid characters")
+		}
+	}
+	return value, nil
+}
+
+func (s *Server) renameAdminSpace(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	name, err := normalizeAdminSpaceName(req.Name)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
+		return
+	}
+	spaceID := strings.TrimSpace(r.PathValue("spaceId"))
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	var kind, oldName string
+	err = tx.QueryRowContext(r.Context(), `
+SELECT kind, name
+FROM spaces
+WHERE id = ? AND status = 'active'
+`, spaceID).Scan(&kind, &oldName)
+	if errors.Is(err, sql.ErrNoRows) {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "space was not found")
+		return
+	}
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if kind != "shared" {
+		httpx.WriteError(w, r, http.StatusConflict, "personal_space_protected", "personal spaces cannot be renamed")
+		return
+	}
+	now := nowRFC3339()
+	result, err := tx.ExecContext(r.Context(), `
+UPDATE spaces
+SET name = ?, updated_at = ?
+WHERE id = ? AND kind = 'shared' AND status = 'active'
+`, name, now, spaceID)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if affected == 0 {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "space was not found")
+		return
+	}
+	metadata := fmt.Sprintf(`{"from":%q,"to":%q}`, oldName, name)
+	if _, err := tx.ExecContext(r.Context(), `
+INSERT INTO audit_events(actor_account_id, route_group, action, target_type, target_id, ip_hash, user_agent_hash, metadata_json)
+VALUES (?, 'rest', 'admin_space_rename', 'space', ?, ?, ?, ?)
+	`, session.AccountID, spaceID, audit.HashForAudit(r.RemoteAddr), audit.HashForAudit(r.UserAgent()), metadata); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": spaceID, "type": "shared", "name": name})
+}
+
+func (s *Server) deleteAdminSpace(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	spaceID := strings.TrimSpace(r.PathValue("spaceId"))
+	var kind, spaceName string
+	err := s.sqlDB().QueryRowContext(r.Context(), `
+SELECT kind, name
+FROM spaces
+WHERE id = ? AND status = 'active'
+`, spaceID).Scan(&kind, &spaceName)
+	if errors.Is(err, sql.ErrNoRows) {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "space was not found")
+		return
+	}
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if kind != "shared" {
+		httpx.WriteError(w, r, http.StatusConflict, "personal_space_protected", "personal spaces cannot be deleted")
+		return
+	}
+	if req.Name != spaceName {
+		httpx.WriteError(w, r, http.StatusConflict, "confirmation_required", "type the current space name to confirm deletion")
+		return
+	}
+
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var txKind, txSpaceName string
+	if err := tx.QueryRowContext(r.Context(), `
+SELECT kind, name
+FROM spaces
+WHERE id = ? AND status = 'active'
+`, spaceID).Scan(&txKind, &txSpaceName); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "space was not found")
+			return
+		}
+		writeDBError(w, r, err)
+		return
+	}
+	if txKind != "shared" {
+		httpx.WriteError(w, r, http.StatusConflict, "personal_space_protected", "personal spaces cannot be deleted")
+		return
+	}
+	if req.Name != txSpaceName {
+		httpx.WriteError(w, r, http.StatusConflict, "confirmation_required", "type the current space name to confirm deletion")
+		return
+	}
+
+	rows, err := tx.QueryContext(r.Context(), `SELECT id FROM mounts WHERE space_id = ?`, spaceID)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	mountIDs := make([]string, 0)
+	for rows.Next() {
+		var mountID string
+		if err := rows.Scan(&mountID); err != nil {
+			_ = rows.Close()
+			writeDBError(w, r, err)
+			return
+		}
+		mountIDs = append(mountIDs, mountID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		writeDBError(w, r, err)
+		return
+	}
+	_ = rows.Close()
+
+	metadata, err := json.Marshal(map[string]any{
+		"spaceName":   txSpaceName,
+		"mountIds":    mountIDs,
+		"deleteData":  false,
+		"dataDeleted": false,
+	})
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `
+INSERT INTO audit_events(actor_account_id, route_group, action, target_type, target_id, ip_hash, user_agent_hash, metadata_json)
+VALUES (?, 'rest', 'admin_space_delete', 'space', ?, ?, ?, ?)
+`, session.AccountID, spaceID, audit.HashForAudit(r.RemoteAddr), audit.HashForAudit(r.UserAgent()), string(metadata)); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+
+	if err := cancelAdminSpaceJobs(r.Context(), tx, spaceID, mountIDs, nowRFC3339()); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM catalog_entries WHERE space_id = ?`, spaceID); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM file_objects WHERE space_id = ?`, spaceID); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM ai_token_boundaries WHERE space_id = ?`, spaceID); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM upload_sessions WHERE space_id = ?`, spaceID); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM mounts WHERE space_id = ?`, spaceID); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	result, err := tx.ExecContext(r.Context(), `
+DELETE FROM spaces
+WHERE id = ? AND kind = 'shared' AND status = 'active'
+`, spaceID)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if affected == 0 {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "space was not found")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"id":          spaceID,
+		"deleted":     true,
+		"deleteData":  false,
+		"dataDeleted": false,
+	})
+}
+
+func cancelAdminSpaceJobs(ctx context.Context, tx *sql.Tx, spaceID string, mountIDs []string, now string) error {
+	referencedIDs := make(map[string]struct{}, len(mountIDs)+1)
+	referencedIDs[spaceID] = struct{}{}
+	for _, mountID := range mountIDs {
+		referencedIDs[mountID] = struct{}{}
+	}
+	rows, err := tx.QueryContext(ctx, `
+SELECT id, payload_json
+FROM jobs
+WHERE status IN ('queued', 'running', 'paused')
+`)
+	if err != nil {
+		return err
+	}
+	jobIDs := make([]string, 0)
+	for rows.Next() {
+		var jobID, payload string
+		if err := rows.Scan(&jobID, &payload); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if adminSpaceJobReferences(payload, referencedIDs) {
+			jobIDs = append(jobIDs, jobID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, jobID := range jobIDs {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE jobs
+SET status = 'canceled', updated_at = ?, completed_at = COALESCE(completed_at, ?)
+WHERE id = ? AND status IN ('queued', 'running', 'paused')
+`, now, now, jobID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func adminSpaceJobReferences(payload string, referencedIDs map[string]struct{}) bool {
+	var value any
+	if err := json.Unmarshal([]byte(payload), &value); err != nil {
+		return false
+	}
+	return adminSpaceJobValueReferences(value, referencedIDs)
+}
+
+func adminSpaceJobValueReferences(value any, referencedIDs map[string]struct{}) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "mountId" || key == "mount_id" || key == "spaceId" || key == "space_id" {
+				if id, ok := child.(string); ok {
+					if _, exists := referencedIDs[id]; exists {
+						return true
+					}
+				}
+			}
+			if adminSpaceJobValueReferences(child, referencedIDs) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if adminSpaceJobValueReferences(child, referencedIDs) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) initialAdminID(ctx context.Context) (string, error) {

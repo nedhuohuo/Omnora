@@ -73,6 +73,7 @@ run_entrypoint_as_root() {
 	db_path="$data_dir/omnora.db"
 	PATH="$fake_bin:$PATH" \
 	CHOWN_RECORD="$chown_record" \
+	CHOWN_FAIL_PATH=/mnt/omnora \
 	MKDIR_RECORD="$mkdir_record" \
 	SU_EXEC_RECORD="$su_exec_record" \
 	PUID=2000 \
@@ -111,6 +112,9 @@ EOF
 cat > "$fake_bin/chown" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$CHOWN_RECORD"
+case " $* " in
+	*" ${CHOWN_FAIL_PATH:-/path-that-never-matches} "*) exit 1 ;;
+esac
 EOF
 
 cat > "$fake_bin/mkdir" <<'EOF'
@@ -135,9 +139,10 @@ chmod 755 "$fake_bin/id" "$fake_bin/chown" "$fake_bin/mkdir" "$fake_bin/su-exec"
 root_config_dir="$TMP_ROOT/root-config"
 root_data_dir="$TMP_ROOT/root-data"
 root_managed_dir="$TMP_ROOT/root-managed"
+root_stderr="$TMP_ROOT/root-stderr"
 mkdir -p "$root_config_dir" "$root_data_dir" "$root_managed_dir"
 
-[ "$(run_entrypoint_as_root "$root_config_dir" "$root_data_dir" "$root_managed_dir")" = root-ready ] || exit 1
+[ "$(run_entrypoint_as_root "$root_config_dir" "$root_data_dir" "$root_managed_dir" 2>"$root_stderr")" = root-ready ] || exit 1
 if [ ! -s "$su_exec_record" ]; then
 	printf 'FAIL: root entrypoint did not drop privileges before persistence setup\n' >&2
 	exit 1
@@ -145,6 +150,14 @@ fi
 [ "$(sed -n '1p' "$su_exec_record")" = 1000:1000 ] || exit 1
 grep -Fx '1000:1000 /etc/omnora /var/lib/omnora /srv/omnora/managed' "$chown_record" >/dev/null || {
 	printf 'FAIL: root entrypoint chowned configurable paths instead of fixed persistence roots\n' >&2
+	exit 1
+}
+grep -Fx '1000:1000 /mnt/omnora' "$chown_record" >/dev/null || {
+	printf 'FAIL: root entrypoint did not prepare the default external mount root for UID 1000\n' >&2
+	exit 1
+}
+grep -Fq 'Omnora warning: cannot prepare external mount root ownership at /mnt/omnora' "$root_stderr" || {
+	printf 'FAIL: root entrypoint did not warn when external mount ownership preparation failed\n' >&2
 	exit 1
 }
 grep -Fx 'root:-p /etc/omnora /var/lib/omnora /srv/omnora/managed' "$mkdir_record" >/dev/null || {

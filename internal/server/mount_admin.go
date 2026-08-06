@@ -141,7 +141,7 @@ func (s *Server) reverifyMount(w http.ResponseWriter, r *http.Request) {
 	}
 	if mount.Mode == domain.MountModeReadWrite {
 		if err := probeMountWritable(identity.Path); err != nil {
-			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
+			httpx.WriteError(w, r, http.StatusConflict, "mount_not_writable", err.Error())
 			return
 		}
 	}

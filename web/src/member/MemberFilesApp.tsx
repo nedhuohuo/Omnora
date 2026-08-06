@@ -37,7 +37,7 @@ import AdminWorkspace, { type AdminTab } from './AdminWorkspace';
 import MemberSharesPanel, { ShareCreateModal, ShareCreatedResult } from './MemberSharesPanel';
 import MemberTokensPanel from './MemberTokensPanel';
 import MemberAccountPanel, { applyThemePreference } from './MemberAccountPanel';
-import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, type MemberSearchResult, type MemberSpace, type TransferItem } from './types';
+import { formatDirectoryChildren, mountDeletePolicy, mountSupportsTrash, type MemberDirectoryEntry, type MemberMount, type MemberSearchResult, type MemberSpace, type TransferItem } from './types';
 import { resumedUploadProgress, uploadStorageKey } from './uploadQueue';
 import { createClientId } from './clientId';
 import { useLocale } from './useLocale';
@@ -174,6 +174,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
 
   const activeSpace = useMemo(() => spaces.find((space) => space.id === activeSpaceId) ?? null, [activeSpaceId, spaces]);
   const activeMount = useMemo(() => mounts.find((mount) => mount.id === activeMountId) ?? null, [activeMountId, mounts]);
+  const activeMountSupportsTrash = mountSupportsTrash(activeMount);
   const mountUnavailable = activeMount?.health === 'unavailable' || activeMount?.health === 'disabled';
   const writeBlocked = readOnly || mountUnavailable;
 
@@ -210,8 +211,33 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     }
   }, []);
 
+  function selectSpace(spaceId: string) {
+    setActiveSpaceId(spaceId);
+    setActiveTab('files');
+    setMounts([]);
+    setActiveMountId('');
+    setTrashItems([]);
+    setEntries([]);
+    setRelativePath('.');
+    setSearchResults(null);
+    setSearchNextCursor('');
+    setError('');
+  }
+
+  function selectMount(mount: MemberMount) {
+    setActiveMountId(mount.id);
+    if (!mountSupportsTrash(mount)) {
+      setActiveTab('files');
+      setTrashItems([]);
+      setError('');
+    }
+  }
+
   const refreshTrash = useCallback(async () => {
-    if (!activeSpaceId || !activeMountId) return;
+    if (!activeSpaceId || !activeMountId || !activeMountSupportsTrash) {
+      setTrashItems([]);
+      return;
+    }
     setLoading(true);
     setError('');
     try {
@@ -223,7 +249,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     } finally {
       setLoading(false);
     }
-  }, [activeMountId, activeSpaceId]);
+  }, [activeMountId, activeMountSupportsTrash, activeSpaceId]);
 
   useEffect(() => {
     void (async () => {
@@ -282,8 +308,15 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   }, [activeMountId, activeSpaceId, refreshDirectory, sessionState]);
 
   useEffect(() => {
-    if (activeTab === 'trash' && sessionState === 'ready') void refreshTrash();
-  }, [activeTab, refreshTrash, sessionState]);
+    if (activeTab !== 'trash') return;
+    if (!activeMountSupportsTrash) {
+      setActiveTab('files');
+      setTrashItems([]);
+      setError('');
+      return;
+    }
+    if (sessionState === 'ready') void refreshTrash();
+  }, [activeMountSupportsTrash, activeTab, refreshTrash, sessionState]);
 
   useEffect(() => {
     if (!operationTarget || !destinationSpaceId) {
@@ -527,7 +560,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     setError('');
     try {
       await deleteObject(activeSpaceId, mountId, deleteTarget.relativePath, {
-        permanent: mount?.kind !== 'managed',
+        permanent: mountDeletePolicy(mount) === 'permanent',
       });
       setDeleteTarget(null);
       await refreshDirectory(activeSpaceId, activeMountId, relativePath);
@@ -798,6 +831,8 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const previewDownload = preview ? downloadURL(activeSpaceId, preview.mountId, preview.relativePath) : '';
   const canManageShares = entry === 'member' && activeSpace?.role === 'manager';
   const canEditFiles = entry === 'member' && (activeSpace?.role === 'editor' || activeSpace?.role === 'manager');
+  const deleteTargetMount = deleteTarget ? mounts.find((mount) => mount.id === (deleteTarget.mountId ?? activeMountId)) ?? activeMount : null;
+  const deleteTargetPolicy = mountDeletePolicy(deleteTargetMount);
   const adminNavigation: AdminNavGroupItem[] = [
     { id: 'overview', label: text.adminOverview, tabs: [{ id: 'overview', label: text.adminOverview }] },
     { id: 'identity-space', label: text.adminIdentitySpace, tabs: [{ id: 'users', label: text.adminUsers }, { id: 'spaces', label: text.adminSpaces }] },
@@ -825,13 +860,13 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
           </nav>}
           {entry === 'member' && <nav aria-label="Member workspace">
             <button className={`member-nav ${activeTab === 'files' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('files')}>{text.files}</button>
-            <button className={`member-nav ${activeTab === 'trash' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('trash')}>{text.recycleBin}</button>
+            {activeMountSupportsTrash && <button className={`member-nav ${activeTab === 'trash' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('trash')}>{text.recycleBin}</button>}
             <button className={`member-nav ${activeTab === 'shares' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('shares')}>{text.navShares}</button>
             <button className={`member-nav ${activeTab === 'tokens' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('tokens')}>{text.navTokens}</button>
             <button className={`member-nav ${activeTab === 'account' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('account')}>{text.account}</button>
           </nav>}
-          {(activeTab === 'files' || activeTab === 'trash') && <><div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => setActiveSpaceId(space.id)}>{space.name}<small>{space.role}</small></button>)}</div>
-          <div className="member-sidebar-section"><p>{text.mounts}</p>{mounts.map((mount) => <button className={`member-mount ${mount.id === activeMountId ? 'selected' : ''}`} key={mount.id} type="button" onClick={() => setActiveMountId(mount.id)}><span>{mount.name}</span><small>{mount.health === 'unavailable' ? text.statusUnavailable : mount.mode === 'read-only' ? text.readOnly : text.readWrite}</small></button>)}</div></>}
+          {(activeTab === 'files' || activeTab === 'trash') && <><div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => selectSpace(space.id)}>{space.name}<small>{space.role}</small></button>)}</div>
+          <div className="member-sidebar-section"><p>{text.mounts}</p>{mounts.map((mount) => <button className={`member-mount ${mount.id === activeMountId ? 'selected' : ''}`} key={mount.id} type="button" onClick={() => selectMount(mount)}><span>{mount.name}</span><small>{mount.health === 'unavailable' ? text.statusUnavailable : mount.mode === 'read-only' ? text.readOnly : text.readWrite}</small></button>)}</div></>}
         </aside>
 
         <section className="member-content">
@@ -929,7 +964,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
         <div className="member-modal-backdrop">
           <div className="member-modal">
             <h2>{text.deleteConfirmTitle}</h2>
-            <p className="member-modal-hint">{text.deleteConfirmDetail}</p>
+            <p className="member-modal-hint">{deleteTargetPolicy === 'permanent' ? text.deletePermanentConfirmDetail : text.deleteConfirmDetail}</p>
             <p className="member-modal-hint"><strong>{deleteTarget.name}</strong></p>
             <div><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDeleteConfirmed()} disabled={deleteBusy}>{text.deleteFile}</button></div>
           </div>

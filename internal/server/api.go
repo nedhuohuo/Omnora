@@ -176,6 +176,8 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("GET /api/v1/admin/spaces/{spaceId}/members", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminSpaceMembers)))
 	s.mux.Handle("PUT /api/v1/admin/spaces/{spaceId}/members/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putAdminSpaceMember)))
 	s.mux.Handle("DELETE /api/v1/admin/spaces/{spaceId}/members/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteAdminSpaceMember)))
+	s.mux.Handle("PATCH /api/v1/admin/spaces/{spaceId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.renameAdminSpace)))
+	s.mux.Handle("DELETE /api/v1/admin/spaces/{spaceId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteAdminSpace)))
 	s.mux.Handle("POST /api/v1/admin/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createAdminSpace)))
 	s.mux.Handle("GET /api/v1/admin/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminShares)))
 	s.mux.Handle("DELETE /api/v1/admin/shares/{shareId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAdminShare)))
@@ -1459,6 +1461,10 @@ func (s *Server) createMount(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusForbidden
 			code = "mount_root_not_allowed"
 		}
+		if errors.Is(err, errMountNotWritable) {
+			status = http.StatusConflict
+			code = "mount_not_writable"
+		}
 		httpx.WriteError(w, r, status, code, err.Error())
 		return
 	}
@@ -2082,6 +2088,7 @@ var (
 	errMountConflict             = errors.New("mount conflicts with an existing mount")
 	errMountIdentityUnverifiable = errors.New("mount identity is unverifiable")
 	errMountRootNotAllowed       = errors.New("mount root is outside the configured storage root")
+	errMountNotWritable          = errors.New("mount root is not writable at the container filesystem layer")
 	errMountUnavailable          = errors.New("mount is unavailable")
 )
 
@@ -2175,12 +2182,12 @@ func (s *Server) mountRootAllowedForKind(kind, candidatePath string) bool {
 func probeMountWritable(rootPath string) error {
 	file, err := os.CreateTemp(rootPath, ".omnora-write-probe-*")
 	if err != nil {
-		return fmt.Errorf("mount root is not writable at the container filesystem layer: %w", err)
+		return fmt.Errorf("%w: %w", errMountNotWritable, err)
 	}
 	name := file.Name()
 	_ = file.Close()
 	if err := os.Remove(name); err != nil {
-		return fmt.Errorf("mount root is not writable at the container filesystem layer: %w", err)
+		return fmt.Errorf("%w: %w", errMountNotWritable, err)
 	}
 	return nil
 }

@@ -147,6 +147,80 @@ VALUES ('space-allowlist', 'shared', 'Allowlist Test', ?, 'active')
 	}
 }
 
+func TestCreateReadWriteMountReportsNotWritable(t *testing.T) {
+	workspace, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("resolve workspace: %v", err)
+	}
+	base, err := os.MkdirTemp(workspace, ".mount-not-writable-")
+	if err != nil {
+		t.Fatalf("create test directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+
+	managed := filepath.Join(base, "managed")
+	external := filepath.Join(base, "mounts")
+	root := filepath.Join(external, "photos")
+	for _, path := range []string{managed, root} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("create %s: %v", path, err)
+		}
+	}
+
+	db, handler := newMountAllowlistAPITestServer(t, managed, external)
+	admin, _ := createAPITestAccounts(t, db)
+	if _, err := db.SQL().ExecContext(context.Background(), `
+INSERT INTO spaces(id, kind, name, owner_account_id, status)
+VALUES ('space-not-writable', 'shared', 'Not Writable Test', ?, 'active')
+`, admin.ID); err != nil {
+		t.Fatalf("insert space: %v", err)
+	}
+
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatalf("make mount root read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+
+	body, err := json.Marshal(map[string]any{
+		"spaceId":      "space-not-writable",
+		"displayName":  "Photos",
+		"rootPath":     root,
+		"kind":         "external",
+		"mode":         "read_write",
+		"indexEnabled": false,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/mounts", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(issueAPITestSession(t, db, admin.ID))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	var response struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode error response: %v; body = %s", err, rec.Body.String())
+	}
+	if response.Error.Code != "mount_not_writable" {
+		t.Fatalf("error code = %q, want mount_not_writable; body = %s", response.Error.Code, rec.Body.String())
+	}
+	var count int
+	if err := db.SQL().QueryRowContext(context.Background(), `SELECT COUNT(1) FROM mounts WHERE root_path = ?`, root).Scan(&count); err != nil {
+		t.Fatalf("count mounts: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("mount count = %d; rejected mount must not be stored", count)
+	}
+}
+
 func newMountAllowlistAPITestServer(t *testing.T, managed, external string) (*store.DB, http.Handler) {
 	t.Helper()
 	db, err := store.OpenSQLite(context.Background(), store.SQLiteOptions{
