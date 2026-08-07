@@ -46,6 +46,14 @@ This checklist is local scaffolding for implementers. It summarizes release chec
 - `scripts/verification/verify-nas-record.sh <record-file>` verifies a completed NAS deployment evidence record from `docs/deployment/nas-verification.md`.
 - Use `scripts/verification/release-gate.sh --strict` for release candidates; strict mode fails when image, deployed HTTP, or NAS evidence inputs are missing.
 
+## MCP Inspector and Protocol Gates
+
+- `scripts/verification/verify-mcp-protocol.sh` runs the official Go SDK Streamable HTTP client tests, raw protocol negative tests, transfer coverage, and the catalogue/documentation contract without external network access.
+- `internal/server` protocol tests negotiate modern `2026-07-28`, cover tested `2025-11-25` compatibility, verify the 24-tool/15-scope contract, and confirm form Elicitation MRTR retry for high-risk operations.
+- `scripts/verification/verify-mcp-inspector.sh` is an operator-only live check. Run it only with a short-lived scoped `OMNORA_MCP_AI_TOKEN`, `OMNORA_MCP_URL`, and a separate completed evidence file based on `docs/verification/mcp-inspector-checklist.md`.
+- The Inspector check is conditional in `release-gate.sh`; when URL and token are absent the deterministic protocol gate still runs and the live check is skipped. When supplied, the gate rejects evidence with unchecked `- [ ]` items, requires all 22 checklist items from `docs/verification/mcp-inspector-checklist.md` to be checked, and requires `Status: COMPLETE` plus a redacted evidence summary. The token is never printed, but is visible to the local Inspector process while the command runs.
+- Acceptance evidence is limited to MCP Inspector Modern / Streamable HTTP and protocol responses; no specific desktop or product client is required.
+
 ## Future Implementation Gates
 
 - Web, REST, MCP, and share entry points call the same application services and authorization policy.
