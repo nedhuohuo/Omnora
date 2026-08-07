@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"omnora/internal/access"
 	"omnora/internal/aitoken"
 	"omnora/internal/audit"
 	"omnora/internal/catalog"
@@ -28,6 +29,8 @@ import (
 	"omnora/internal/httpx"
 	"omnora/internal/identity"
 	"omnora/internal/jobs"
+	"omnora/internal/memberfiles"
+	"omnora/internal/membershare"
 	"omnora/internal/mountid"
 	"omnora/internal/share"
 	"omnora/internal/storage"
@@ -143,6 +146,7 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("GET /api/v1/auth/session", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.currentSession)))
 	s.mux.Handle("POST /api/v1/auth/session", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createSession)))
 	s.mux.Handle("DELETE /api/v1/auth/session", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeSession)))
+	s.mux.Handle("POST /api/v1/account/reauthenticate", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.reauthenticateAccount)))
 	s.mux.Handle("POST /api/v1/account/totp/setup", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.setupTOTP)))
 	s.mux.Handle("POST /api/v1/account/totp/confirm", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.confirmTOTP)))
 	s.mux.Handle("GET /api/v1/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listSpaces)))
@@ -215,7 +219,6 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("PATCH /api/v1/admin/route-groups/{groupId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.updateAdminRouteGroup)))
 	s.mux.Handle("GET /api/v1/audit/events", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAuditEvents)))
 	s.mux.Handle("POST /api/v1/share-sessions", s.gate(domain.RouteGroupShare, http.HandlerFunc(s.createShareSession)))
-	s.mux.Handle("POST /mcp", s.gate(domain.RouteGroupMCP, http.HandlerFunc(s.handleMCP)))
 }
 
 func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
@@ -324,6 +327,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Login       string `json:"login"`
 		Password    string `json:"password"`
+		NewPassword string `json:"newPassword"`
 		TOTPCode    string `json:"totpCode"`
 		TOTPCodeAlt string `json:"totp_code"`
 	}
@@ -339,16 +343,50 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		s.writeIdentityError(w, r, err)
 		return
 	}
-	if ok, err := s.verifyLoginTOTP(r, account.ID, req.TOTPCode); err != nil {
-		writeDBError(w, r, err)
-		return
-	} else if !ok {
-		httpx.WriteError(w, r, http.StatusUnauthorized, "totp_required", "a valid TOTP code is required")
-		return
+	if account.PasswordResetRequired {
+		if strings.TrimSpace(req.NewPassword) == "" {
+			httpx.WriteError(w, r, http.StatusUnauthorized, "password_reset_required", "a new password is required")
+			return
+		}
+		if err := svc.ChangePassword(r.Context(), account.ID, req.Password, req.NewPassword); err != nil {
+			s.writeIdentityError(w, r, err)
+			return
+		}
+		account.PasswordResetRequired = false
+		// A recovery-required password change invalidates every pre-recovery
+		// session before the replacement login is issued.
+		if err := svc.RevokeAllSessions(r.Context(), account.ID, ""); err != nil {
+			s.writeIdentityError(w, r, err)
+			return
+		}
+	}
+
+	purpose := identity.SessionPurposeFull
+	adminEnrollment := account.Role == domain.AccountRoleAdmin &&
+		(account.TOTPResetRequired || !account.TOTPRequired || account.TOTPConfirmedAt.IsZero())
+	if adminEnrollment {
+		// A TOTP reset must not leave an older full session usable for member
+		// file operations while the administrator is completing enrollment.
+		if account.TOTPResetRequired {
+			if err := svc.RevokeAllSessions(r.Context(), account.ID, ""); err != nil {
+				s.writeIdentityError(w, r, err)
+				return
+			}
+		}
+		purpose = identity.SessionPurposeTOTPEnrollment
+	} else {
+		if ok, err := s.verifyLoginTOTP(r, account.ID, req.TOTPCode); err != nil {
+			writeDBError(w, r, err)
+			return
+		} else if !ok {
+			httpx.WriteError(w, r, http.StatusUnauthorized, "totp_required", "a valid TOTP code is required")
+			return
+		}
 	}
 	issued, err := svc.CreateSession(r.Context(), identity.SessionRequest{
 		AccountID: account.ID,
 		TTL:       8 * time.Hour,
+		Purpose:   purpose,
 	})
 	if err != nil {
 		s.writeIdentityError(w, r, err)
@@ -357,22 +395,88 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, sessionCookie(r, issued.Token, issued.Session.ExpiresAt))
 	_ = s.recordAudit(r, "login", "account", account.ID, "{}")
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
-		"userId":    account.ID,
-		"expiresAt": issued.Session.ExpiresAt,
-		"isAdmin":   s.isAdmin(r, account.ID),
+		"userId":                 account.ID,
+		"expiresAt":              issued.Session.ExpiresAt,
+		"isAdmin":                s.isAdmin(r, account.ID),
+		"purpose":                issued.Session.Purpose,
+		"requiresTotpEnrollment": issued.Session.Purpose == identity.SessionPurposeTOTPEnrollment,
 	})
 }
 
 func (s *Server) currentSession(w http.ResponseWriter, r *http.Request) {
-	session, err := s.requireSession(r)
+	session, err := s.requireAuthenticatedSession(r)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"userId":    session.AccountID,
-		"expiresAt": session.ExpiresAt,
-		"isAdmin":   s.isAdmin(r, session.AccountID),
+		"userId":                 session.AccountID,
+		"expiresAt":              session.ExpiresAt,
+		"isAdmin":                s.isAdmin(r, session.AccountID),
+		"purpose":                session.Purpose,
+		"requiresTotpEnrollment": session.Purpose == identity.SessionPurposeTOTPEnrollment,
+	})
+}
+
+// reauthenticateAccount verifies the current credential set and rotates the
+// session without changing its absolute expiry. The replacement session is
+// the only row carrying the short-lived recent-reauthentication marker.
+func (s *Server) reauthenticateAccount(w http.ResponseWriter, r *http.Request) {
+	session, err := s.requireAuthenticatedSession(r)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
+		return
+	}
+	if session.Purpose != identity.SessionPurposeFull {
+		httpx.WriteError(w, r, http.StatusForbidden, "enrollment_session", "TOTP enrollment sessions cannot reauthenticate")
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+		TOTPCode string `json:"totpCode"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	svc := identity.New(s.sqlDB(), identity.Options{})
+	material, err := svc.LoadCredentialMaterial(r.Context(), session.AccountID)
+	if err != nil || !svc.VerifyPassword(req.Password, material.PasswordHash) {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
+		return
+	}
+	if material.TOTPRequired {
+		secret, decryptErr := s.decryptTOTPSecret(material.TOTPSecretCiphertext)
+		if decryptErr != nil || secret == "" || !totp.Verify(secret, req.TOTPCode, time.Now().UTC()) {
+			httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
+			return
+		}
+	}
+	now := time.Now().UTC()
+	rotated, err := svc.RotateSession(r.Context(), session, now)
+	if err != nil {
+		s.writeIdentityError(w, r, err)
+		return
+	}
+	http.SetCookie(w, sessionCookie(r, rotated.Token, rotated.Session.ExpiresAt))
+	until := rotated.Session.ReauthenticatedAt.Add(identity.RecentReauthenticationTTL)
+	if until.After(rotated.Session.ExpiresAt) {
+		until = rotated.Session.ExpiresAt
+	}
+	if err := s.auditRecorder.Record(r.Context(), audit.Event{
+		ActorAccountID: session.AccountID,
+		RouteGroup:     domain.RouteGroupREST,
+		Action:         "account_reauthenticate",
+		TargetType:     "account",
+		TargetID:       session.AccountID,
+		MetadataJSON:   "{}",
+		IPHash:         audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainClientIP, clientIPFromRequest(r)),
+		UserAgentHash:  audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainUserAgent, r.UserAgent()),
+	}); err != nil {
+		_ = s.auditRecorder.MarkReadinessRisk(r.Context(), err)
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"status":               "reauthenticated",
+		"reauthenticatedUntil": until,
 	})
 }
 
@@ -395,7 +499,7 @@ func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setupTOTP(w http.ResponseWriter, r *http.Request) {
-	session, err := s.requireSession(r)
+	session, err := s.requireAuthenticatedSession(r)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
@@ -405,14 +509,19 @@ func (s *Server) setupTOTP(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, r, err)
 		return
 	}
-	account, err := s.loadAccountForTOTP(r, session.AccountID)
+	var email string
+	err = s.sqlDB().QueryRowContext(r.Context(), `
+SELECT email
+FROM accounts
+WHERE id = ? AND status = 'active'
+`, session.AccountID).Scan(&email)
 	if err != nil {
 		writeDBError(w, r, err)
 		return
 	}
 	uri, err := totp.OTPAuthURI(totp.URIOptions{
 		Issuer:      "Omnora",
-		AccountName: account.Email,
+		AccountName: email,
 		Secret:      secret,
 	})
 	if err != nil {
@@ -424,12 +533,9 @@ func (s *Server) setupTOTP(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "totp_key_unavailable", err.Error())
 		return
 	}
-	_, err = s.sqlDB().ExecContext(r.Context(), `
-	UPDATE accounts
-	SET totp_secret_ciphertext = ?, totp_confirmed_at = NULL, updated_at = ?
-	WHERE id = ? AND status = 'active'
-	`, sealedSecret, time.Now().UTC().Format(time.RFC3339Nano), session.AccountID)
-	if err != nil {
+	if err := identity.New(s.sqlDB(), identity.Options{}).SavePendingTOTP(
+		r.Context(), session.AccountID, sealedSecret, time.Now().UTC().Add(identity.PendingTOTPDuration),
+	); err != nil {
 		writeDBError(w, r, err)
 		return
 	}
@@ -441,7 +547,7 @@ func (s *Server) setupTOTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) confirmTOTP(w http.ResponseWriter, r *http.Request) {
-	session, err := s.requireSession(r)
+	session, err := s.requireAuthenticatedSession(r)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
@@ -452,21 +558,31 @@ func (s *Server) confirmTOTP(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	account, err := s.loadAccountForTOTP(r, session.AccountID)
+	svc := identity.New(s.sqlDB(), identity.Options{})
+	state, err := svc.LoadTOTPState(r.Context(), session.AccountID)
 	if err != nil {
+		if errors.Is(err, identity.ErrInvalidCredential) {
+			httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+			return
+		}
 		writeDBError(w, r, err)
 		return
 	}
-	if account.TOTPSecret == "" || !totp.Verify(account.TOTPSecret, req.Code, time.Now().UTC()) {
+	now := time.Now().UTC()
+	if state.PendingCiphertext == "" || state.PendingExpiresAt.IsZero() || !now.Before(state.PendingExpiresAt) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_totp", "TOTP code is not valid")
 		return
 	}
-	_, err = s.sqlDB().ExecContext(r.Context(), `
-UPDATE accounts
-SET totp_required = 1, totp_confirmed_at = ?, updated_at = ?
-WHERE id = ? AND status = 'active'
-`, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano), session.AccountID)
-	if err != nil {
+	pendingSecret, err := s.decryptTOTPSecret(state.PendingCiphertext)
+	if err != nil || pendingSecret == "" || !totp.Verify(pendingSecret, req.Code, now) {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_totp", "TOTP code is not valid")
+		return
+	}
+	if err := svc.PromotePendingTOTPAndRevokeOtherSessions(r.Context(), session.AccountID, session.ID, state.PendingCiphertext, now); err != nil {
+		if errors.Is(err, identity.ErrInvalidCredential) || errors.Is(err, identity.ErrSessionInvalid) {
+			httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_totp", "TOTP code is not valid")
+			return
+		}
 		writeDBError(w, r, err)
 		return
 	}
@@ -480,33 +596,37 @@ func (s *Server) listSpaces(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	rows, err := s.sqlDB().QueryContext(r.Context(), `
-SELECT sp.id, sp.kind, sp.name, sm.permission
-FROM spaces sp
-JOIN space_members sm ON sm.space_id = sp.id
-WHERE sm.account_id = ? AND sp.status = 'active'
-ORDER BY sp.kind, sp.name
-`, session.AccountID)
+	spaces, err := s.memberFiles.ListSpaces(r.Context(), access.Subject{AccountID: session.AccountID})
 	if err != nil {
-		writeDBError(w, r, err)
+		writeMemberFilesError(w, r, err, "space is not available to this session")
 		return
 	}
-	defer rows.Close()
-
-	items := make([]map[string]string, 0)
-	for rows.Next() {
-		var id, kind, name, permission string
-		if err := rows.Scan(&id, &kind, &name, &permission); err != nil {
+	// Keep the legacy role field in the REST representation. Visibility and
+	// mount/account liveness come from MemberFileService; this query is only
+	// presentation metadata and cannot broaden the returned set.
+	roles := make(map[string]string, len(spaces))
+	for _, space := range spaces {
+		var role string
+		if err := s.sqlDB().QueryRowContext(r.Context(), `
+SELECT permission FROM space_members WHERE space_id = ? AND account_id = ?
+`, space.ID, session.AccountID).Scan(&role); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
 			writeDBError(w, r, err)
 			return
 		}
-		items = append(items, map[string]string{
-			"id": id, "type": kind, "name": name, "role": permission,
-		})
+		roles[space.ID] = role
 	}
-	if err := rows.Err(); err != nil {
-		writeDBError(w, r, err)
-		return
+	items := make([]map[string]string, 0, len(spaces))
+	for _, space := range spaces {
+		role, ok := roles[space.ID]
+		if !ok {
+			continue
+		}
+		items = append(items, map[string]string{
+			"id": space.ID, "type": space.Kind, "name": space.Name, "role": role,
+		})
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -608,16 +728,30 @@ func (s *Server) listMounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spaceID := r.PathValue("spaceId")
-	if !s.canReadSpace(r, session.AccountID, spaceID) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "space is not available to this session")
+	// MemberFileService intentionally returns only active, identity-verified
+	// mounts. Disabled/unavailable mounts are fail-closed and must not be
+	// presented as usable REST or MCP targets.
+	visible, err := s.memberFiles.ListMounts(r.Context(), access.Subject{AccountID: session.AccountID}, spaceID)
+	if err != nil {
+		writeMemberFilesError(w, r, err, "space is not available to this session")
 		return
+	}
+	allowed := make(map[string]struct{}, len(visible))
+	for _, mount := range visible {
+		allowed[mount.ID] = struct{}{}
 	}
 	mounts, err := queryMounts(r, s.sqlDB(), session.AccountID, spaceID)
 	if err != nil {
 		writeDBError(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": mounts})
+	filtered := mounts[:0]
+	for _, mount := range mounts {
+		if _, ok := allowed[mount.ID]; ok {
+			filtered = append(filtered, mount)
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": filtered})
 }
 
 func (s *Server) listChildren(w http.ResponseWriter, r *http.Request) {
@@ -628,21 +762,11 @@ func (s *Server) listChildren(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.canReadSpace(r, session.AccountID, spaceID) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "space is not available to this session")
-		return
-	}
-	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
-		return
-	}
-	listing, err := files.NewService().ListDirectory(files.Mount{Root: mount.Root, Mode: mount.Mode}, r.URL.Query().Get("path"))
+	listing, err := s.memberFiles.List(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
+		SpaceID: spaceID, MountID: mountID, Path: r.URL.Query().Get("path"),
+	})
 	if err != nil {
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
+		writeMemberFilesError(w, r, err, "space is not available to this session")
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
@@ -724,10 +848,6 @@ func (s *Server) createDirectory(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "creating a directory requires editor permission")
-		return
-	}
 	var req struct {
 		ParentPath string `json:"parentPath"`
 		Name       string `json:"name"`
@@ -735,29 +855,15 @@ func (s *Server) createDirectory(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if mount.Mode != domain.MountModeReadWrite {
-		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
-		return
-	}
-	created, err := files.NewService().CreateDirectory(files.Mount{Root: mount.Root, Mode: mount.Mode}, req.ParentPath, req.Name)
+	result, err := s.memberFiles.CreateDirectory(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
+		SpaceID: spaceID, MountID: mountID, Path: req.ParentPath,
+	}, req.Name)
 	if err != nil {
-		if isReadOnlyFilesystem(err) {
-			httpx.WriteError(w, r, http.StatusConflict, "mount_not_writable", "mount root is not writable at the container filesystem layer")
-			return
-		}
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
+		writeMemberFilesError(w, r, err, "creating a directory requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "directory_create", "directory", created, "{}")
-	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"relativePath": created})
+	_ = s.recordAudit(r, "directory_create", "directory", result.RelativePath, "{}")
+	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"relativePath": result.RelativePath})
 }
 
 func (s *Server) searchSpace(w http.ResponseWriter, r *http.Request) {
@@ -800,59 +906,17 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if !s.hasSpacePermission(r, session.AccountID, req.SpaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "upload requires editor permission")
-		return
-	}
-	mount, err := loadMountForListing(r, s.sqlDB(), req.SpaceID, req.MountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if mount.Mode != domain.MountModeReadWrite {
-		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
-		return
-	}
 	targetPath := pathJoinForUpload(req.ParentPath, req.FileName)
-	if err := files.NewService().ValidateWritableTarget(files.Mount{Root: mount.Root, Mode: mount.Mode}, targetPath); err != nil {
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
-		return
-	}
-	service, err := transfer.NewService(transfer.Options{
-		MountRoot: mount.Root,
-		TempRoot:  filepath.Join(mount.Root, ".omnora", "tmp", "uploads"),
-	})
-	if err != nil {
-		if isReadOnlyFilesystem(err) {
-			httpx.WriteError(w, r, http.StatusConflict, "mount_not_writable", "mount root is not writable at the container filesystem layer")
-			return
-		}
-		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
-		return
-	}
-	defer service.Close()
-	upload, err := service.CreateUploadSession(transfer.CreateUploadSessionRequest{
-		TargetPath:   targetPath,
+	result, err := s.memberFiles.PrepareUpload(r.Context(), access.Subject{AccountID: session.AccountID}, memberfiles.UploadRequest{
+		Locator:      access.Locator{SpaceID: req.SpaceID, MountID: req.MountID, Path: targetPath},
 		ExpectedSize: req.Size,
 	})
 	if err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
+		writeMemberFilesError(w, r, err, "upload requires editor permission")
 		return
 	}
-	expiresAt := time.Now().UTC().Add(24 * time.Hour)
-	_, err = s.sqlDB().ExecContext(r.Context(), `
-INSERT INTO upload_sessions(id, account_id, space_id, mount_id, target_relative_path, declared_size, part_size, temp_dir, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, upload.ID, session.AccountID, req.SpaceID, req.MountID, upload.TargetPath, upload.ExpectedSize, 32*1024, filepath.Join(mount.Root, ".omnora", "tmp", "uploads"), expiresAt.Format(time.RFC3339Nano))
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	_ = s.recordAudit(r, "upload_create", "upload", upload.ID, "{}")
-	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"id": upload.ID, "expiresAt": expiresAt, "partSize": 32 * 1024})
+	_ = s.recordAudit(r, "upload_create", "upload", result.ID, "{}")
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"id": result.ID, "expiresAt": result.ExpiresAt, "partSize": result.PartSize})
 }
 
 func (s *Server) getUpload(w http.ResponseWriter, r *http.Request) {
@@ -861,33 +925,19 @@ func (s *Server) getUpload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	upload, mount, err := s.loadUpload(r, session.AccountID, r.PathValue("uploadId"))
+	result, err := s.memberFiles.UploadStatus(r.Context(), access.Subject{AccountID: session.AccountID}, r.PathValue("uploadId"))
 	if err != nil {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "upload session was not found")
-		return
-	}
-	if !s.canContinueUpload(w, r, session.AccountID, upload.SpaceID, mount) {
-		return
-	}
-	service, err := transfer.NewService(transfer.Options{MountRoot: mount.Root, TempRoot: upload.TempDir})
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
-		return
-	}
-	defer service.Close()
-	resumed, err := service.ResumeUploadSession(upload.ID)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
+		writeMemberFilesError(w, r, err, "upload requires current editor permission")
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"id":           resumed.ID,
-		"targetPath":   resumed.TargetPath,
-		"expectedSize": resumed.ExpectedSize,
-		"receivedSize": resumed.ReceivedSize,
-		"parts":        resumed.Parts,
-		"partSize":     upload.PartSize,
-		"expiresAt":    upload.ExpiresAt,
+		"id":           result.ID,
+		"targetPath":   result.TargetPath,
+		"expectedSize": result.ExpectedSize,
+		"receivedSize": result.ReceivedSize,
+		"parts":        result.Parts,
+		"partSize":     result.PartSize,
+		"expiresAt":    result.ExpiresAt,
 	})
 }
 
@@ -897,35 +947,16 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	upload, mount, err := s.loadUpload(r, session.AccountID, r.PathValue("uploadId"))
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "upload session was not found")
-		return
-	}
-	if !s.canContinueUpload(w, r, session.AccountID, upload.SpaceID, mount) {
-		return
-	}
 	partNumber, err := strconv.Atoi(r.PathValue("partNumber"))
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "part number is invalid")
 		return
 	}
-	service, err := transfer.NewService(transfer.Options{MountRoot: mount.Root, TempRoot: upload.TempDir})
+	err = s.memberFiles.WriteUploadPart(r.Context(), access.Subject{AccountID: session.AccountID}, r.PathValue("uploadId"), partNumber, r.Body)
 	if err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
+		writeMemberFilesError(w, r, err, "upload requires current editor permission")
 		return
 	}
-	defer service.Close()
-	part, err := service.WritePart(upload.ID, partNumber, r.Body)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
-		return
-	}
-	_, _ = s.sqlDB().ExecContext(r.Context(), `
-INSERT INTO upload_parts(upload_id, part_number, size_bytes)
-VALUES (?, ?, ?)
-ON CONFLICT(upload_id, part_number) DO UPDATE SET size_bytes = excluded.size_bytes, created_at = CURRENT_TIMESTAMP
-`, upload.ID, part.Number, part.Size)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -935,29 +966,13 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	upload, mount, err := s.loadUpload(r, session.AccountID, r.PathValue("uploadId"))
+	result, err := s.memberFiles.CompleteUpload(r.Context(), access.Subject{AccountID: session.AccountID}, r.PathValue("uploadId"))
 	if err != nil {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "upload session was not found")
+		writeMemberFilesError(w, r, err, "upload requires current editor permission")
 		return
 	}
-	if !s.canContinueUpload(w, r, session.AccountID, upload.SpaceID, mount) {
-		return
-	}
-	service, err := transfer.NewService(transfer.Options{MountRoot: mount.Root, TempRoot: upload.TempDir})
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
-		return
-	}
-	defer service.Close()
-	completed, err := service.CompleteUpload(upload.ID)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "upload_conflict", err.Error())
-		return
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = s.sqlDB().ExecContext(r.Context(), "UPDATE upload_sessions SET status = 'completed', completed_at = ? WHERE id = ?", now, upload.ID)
-	_ = s.recordAudit(r, "upload_complete", "upload", upload.ID, "{}")
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"targetPath": completed.TargetPath, "size": completed.Size})
+	_ = s.recordAudit(r, "upload_complete", "upload", r.PathValue("uploadId"), "{}")
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"targetPath": result.RelativePath, "size": result.TotalBytes})
 }
 
 func (s *Server) cancelUpload(w http.ResponseWriter, r *http.Request) {
@@ -966,20 +981,13 @@ func (s *Server) cancelUpload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	upload, mount, err := s.loadUpload(r, session.AccountID, r.PathValue("uploadId"))
-	if err != nil {
-		w.WriteHeader(http.StatusNoContent)
-		return
+	if err := s.memberFiles.CancelUpload(r.Context(), access.Subject{AccountID: session.AccountID}, r.PathValue("uploadId")); err != nil {
+		// The legacy DELETE endpoint is idempotent for unknown/expired uploads.
+		if !errors.Is(err, memberfiles.ErrUploadNotFound) && !errors.Is(err, memberfiles.ErrUploadExpired) {
+			writeMemberFilesError(w, r, err, "upload requires current editor permission")
+			return
+		}
 	}
-	if !s.canContinueUpload(w, r, session.AccountID, upload.SpaceID, mount) {
-		return
-	}
-	if service, err := transfer.NewService(transfer.Options{MountRoot: mount.Root, TempRoot: upload.TempDir}); err == nil {
-		_ = service.CancelUpload(upload.ID)
-		_ = service.Close()
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = s.sqlDB().ExecContext(r.Context(), "UPDATE upload_sessions SET status = 'canceled', canceled_at = ? WHERE id = ?", now, upload.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1231,161 +1239,6 @@ LIMIT ?
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
-	principal, err := s.requireAIPrincipal(r)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "AI token is not valid")
-		return
-	}
-	var req struct {
-		Method string         `json:"method"`
-		Params map[string]any `json:"params"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	switch req.Method {
-	case "tools/list":
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{"tools": []string{
-			"spaces.list", "files.search", "files.list", "files.metadata", "files.read_text",
-		}})
-	case "spaces.list":
-		if !principal.HasScope(aitoken.ScopeSpacesRead) {
-			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "scope is not allowed")
-			return
-		}
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{"boundaries": principal.Boundaries})
-	case "files.search":
-		if !principal.HasScope(aitoken.ScopeSearchRead) {
-			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "scope is not allowed")
-			return
-		}
-		if len(principal.Boundaries) == 0 {
-			httpx.WriteJSON(w, http.StatusOK, catalog.SearchResult{})
-			return
-		}
-		query, _ := req.Params["q"].(string)
-		result, err := s.searchAIPrincipal(r, principal, query, 20)
-		if err != nil {
-			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_search", err.Error())
-			return
-		}
-		httpx.WriteJSON(w, http.StatusOK, result)
-	case "files.list":
-		if !principal.HasScope(aitoken.ScopeFilesList) {
-			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "scope is not allowed")
-			return
-		}
-		mount, cleaned, err := s.resolveAIPrincipalPath(r, principal, req.Params)
-		if err != nil {
-			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", err.Error())
-			return
-		}
-		listing, err := files.NewService().ListDirectory(files.Mount{Root: mount.Root, Mode: mount.Mode}, cleaned)
-		if err != nil {
-			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
-			return
-		}
-		httpx.WriteJSON(w, http.StatusOK, listing)
-	case "files.metadata":
-		if !principal.HasScope(aitoken.ScopeFilesMetadata) {
-			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "scope is not allowed")
-			return
-		}
-		mount, cleaned, err := s.resolveAIPrincipalPath(r, principal, req.Params)
-		if err != nil {
-			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", err.Error())
-			return
-		}
-		entry, err := lookupMountEntry(files.Mount{Root: mount.Root, Mode: mount.Mode}, cleaned)
-		if err != nil {
-			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "path was not found")
-			return
-		}
-		httpx.WriteJSON(w, http.StatusOK, entry)
-	case "files.read_text":
-		if !principal.HasScope(aitoken.ScopeFilesText) {
-			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "scope is not allowed")
-			return
-		}
-		mount, cleaned, err := s.resolveAIPrincipalPath(r, principal, req.Params)
-		if err != nil {
-			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", err.Error())
-			return
-		}
-		maxBytes := 65536
-		if raw, ok := req.Params["maxBytes"].(float64); ok && raw > 0 {
-			maxBytes = int(raw)
-		}
-		if maxBytes > 1<<20 {
-			maxBytes = 1 << 20
-		}
-		file, _, err := files.NewService().OpenFile(files.Mount{Root: mount.Root, Mode: mount.Mode}, cleaned)
-		if err != nil {
-			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "file was not found")
-			return
-		}
-		defer file.Close()
-		data, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
-		if err != nil {
-			writeDBError(w, r, err)
-			return
-		}
-		truncated := len(data) > maxBytes
-		if truncated {
-			data = data[:maxBytes]
-		}
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{
-			"path":      cleaned,
-			"content":   string(data),
-			"truncated": truncated,
-		})
-	default:
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "MCP method is not available")
-	}
-}
-
-// resolveAIPrincipalPath validates that an MCP request's spaceId/mountId/path
-// parameters fall within one of the AI token's directory boundaries and
-// returns the mount to operate on plus the cleaned mount-relative path.
-func (s *Server) resolveAIPrincipalPath(r *http.Request, principal aitoken.Principal, params map[string]any) (mountForListing, string, error) {
-	spaceID, _ := params["spaceId"].(string)
-	mountID, _ := params["mountId"].(string)
-	requestedPath, _ := params["path"].(string)
-	if !s.canReadSpace(r, principal.AccountID, spaceID) || !s.mountBelongsToSpace(r, spaceID, mountID) {
-		return mountForListing{}, "", fmt.Errorf("space or mount is not authorized for this token")
-	}
-	cleaned, err := storage.CleanRelativePath(requestedPath)
-	if err != nil {
-		return mountForListing{}, "", err
-	}
-	matched := false
-	for _, boundary := range principal.Boundaries {
-		if boundary.SpaceID != spaceID || boundary.MountID != mountID {
-			continue
-		}
-		boundaryPath := boundary.RelativePath
-		if boundaryPath == "" {
-			boundaryPath = "."
-		}
-		if boundaryPath == "." || cleaned == boundaryPath || strings.HasPrefix(cleaned, boundaryPath+"/") {
-			matched = true
-			break
-		}
-	}
-	if !matched {
-		return mountForListing{}, "", fmt.Errorf("path is outside this token's directory boundaries")
-	}
-	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if err != nil {
-		return mountForListing{}, "", err
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
-		return mountForListing{}, "", err
-	}
-	return mount, cleaned, nil
-}
-
 // lookupMountEntry resolves metadata for a single mount-relative path by
 // listing its parent directory, since files.Service does not expose a
 // direct single-entry stat primitive.
@@ -1546,25 +1399,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	if req.ExpiresAt == "" {
 		req.ExpiresAt = req.ExpiresAtAlt
 	}
-	if !s.hasSpacePermission(r, session.AccountID, req.SpaceID, domain.SpacePermissionManager) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "creating shares requires manager permission")
-		return
-	}
-	mount, err := loadMountForListing(r, s.sqlDB(), req.SpaceID, req.MountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	relativePath, err := s.validateShareTarget(r, mount, req.RelativePath)
-	if err != nil {
-		if errors.Is(err, errMountIdentityUnverifiable) {
-			httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
-			return
-		}
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
-		return
-	}
-
-	expiresAt := time.Now().UTC().Add(7 * 24 * time.Hour)
+	var expiresAt time.Time
 	if req.ExpiresAt != "" {
 		parsed, err := time.Parse(time.RFC3339, req.ExpiresAt)
 		if err != nil {
@@ -1573,59 +1408,31 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		}
 		expiresAt = parsed.UTC()
 	}
-	if !time.Now().UTC().Before(expiresAt) {
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "expiresAt must be in the future")
-		return
-	}
-	allowPreview := boolDefault(req.AllowPreview, true)
-	allowDownload := boolDefault(req.AllowDownload, true)
-	secret, err := share.NewSecret()
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	publicID := "pub_" + httpx.NewRequestID()
-	shareID := "shr_" + httpx.NewRequestID()
-	var passwordHash any
-	if req.Password != "" {
-		hash, err := share.HashPassword(req.Password)
-		if err != nil {
-			writeDBError(w, r, err)
-			return
-		}
-		passwordHash = hash
-	}
-	var maxVisits any
+	var maxVisits, maxDownloads *int64
 	if req.MaxVisits != nil {
-		if *req.MaxVisits <= 0 {
-			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "maxVisits must be positive")
-			return
-		}
-		maxVisits = *req.MaxVisits
+		value := int64(*req.MaxVisits)
+		maxVisits = &value
 	}
-	var maxDownloads any
 	if req.MaxDownloads != nil {
-		if *req.MaxDownloads <= 0 {
-			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "maxDownloads must be positive")
-			return
-		}
-		maxDownloads = *req.MaxDownloads
+		value := int64(*req.MaxDownloads)
+		maxDownloads = &value
 	}
-	_, err = s.sqlDB().ExecContext(r.Context(), `
-	INSERT INTO shares(id, public_id, secret_hash, fragment_secret, password_hash, creator_account_id, space_id, mount_id, relative_path, allow_preview, allow_download, max_visits, max_downloads, expires_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, shareID, publicID, share.HashSecret(secret), secret, passwordHash, session.AccountID, req.SpaceID, req.MountID, relativePath, boolInt(allowPreview), boolInt(allowDownload), maxVisits, maxDownloads, expiresAt.Format(time.RFC3339Nano))
+	issued, err := s.memberShares.Create(r.Context(), access.Subject{AccountID: session.AccountID}, membershare.CreateRequest{
+		Locator:  access.Locator{SpaceID: req.SpaceID, MountID: req.MountID, Path: req.RelativePath},
+		Password: req.Password, AllowPreview: req.AllowPreview, AllowDownload: req.AllowDownload,
+		MaxVisits: maxVisits, MaxDownloads: maxDownloads, ExpiresAt: expiresAt,
+	})
 	if err != nil {
-		writeDBError(w, r, err)
+		writeMemberShareError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "share_create", "share", shareID, "{}")
+	_ = s.recordAudit(r, "share_create", "share", issued.ID, "{}")
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
-		"id":        shareID,
-		"publicId":  publicID,
-		"secret":    secret,
-		"fragment":  publicID + "." + secret,
-		"expiresAt": expiresAt,
+		"id":        issued.ID,
+		"publicId":  issued.PublicID,
+		"secret":    issued.Secret,
+		"fragment":  issued.Fragment,
+		"expiresAt": issued.ExpiresAt,
 	})
 }
 
@@ -1719,7 +1526,12 @@ func (s *Server) createAIToken(w http.ResponseWriter, r *http.Request) {
 		if relativePath == "" {
 			relativePath = raw.RelativePath
 		}
-		if !s.canReadSpace(r, session.AccountID, spaceID) || !s.mountBelongsToSpace(r, spaceID, mountID) {
+		if _, err := access.NewGuard(s.sqlDB()).Authorize(r.Context(), access.CheckRequest{
+			Subject:            access.Subject{AccountID: session.AccountID},
+			Scope:              aitoken.ScopeSpacesRead,
+			Locator:            access.Locator{SpaceID: spaceID, MountID: mountID, Path: relativePath},
+			RequiredPermission: domain.SpacePermissionViewer,
+		}); err != nil {
 			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "token boundary is outside this session")
 			return
 		}
@@ -1729,13 +1541,19 @@ func (s *Server) createAIToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if scopeIncluded(scopes, aitoken.ScopeUploadsCreate) {
 		for _, boundary := range boundaries {
-			if !s.hasSpacePermission(r, session.AccountID, boundary.SpaceID, domain.SpacePermissionEditor) || !s.mountAllowsUpload(r, boundary.SpaceID, boundary.MountID) {
+			if _, err := access.NewGuard(s.sqlDB()).Authorize(r.Context(), access.CheckRequest{
+				Subject:            access.Subject{AccountID: session.AccountID},
+				Scope:              aitoken.ScopeUploadsCreate,
+				Locator:            access.Locator{SpaceID: boundary.SpaceID, MountID: boundary.MountID, Path: boundary.RelativePath},
+				RequiredPermission: domain.SpacePermissionEditor,
+				Write:              true,
+			}); err != nil {
 				httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "upload scope requires editor permission on a read-write mount")
 				return
 			}
 		}
 	}
-	issued, err := aitoken.NewService(s.sqlDB()).Create(r.Context(), aitoken.CreateRequest{
+	issued, err := s.tokens.Create(r.Context(), aitoken.CreateRequest{
 		AccountID:  session.AccountID,
 		Name:       req.Name,
 		Scopes:     scopes,
@@ -1865,6 +1683,17 @@ func (s *Server) optionalSession(r *http.Request) (identity.Session, bool) {
 }
 
 func (s *Server) requireSession(r *http.Request) (identity.Session, error) {
+	session, err := s.requireAuthenticatedSession(r)
+	if err != nil {
+		return identity.Session{}, err
+	}
+	if session.Purpose != identity.SessionPurposeFull {
+		return identity.Session{}, identity.ErrSessionInvalid
+	}
+	return session, nil
+}
+
+func (s *Server) requireAuthenticatedSession(r *http.Request) (identity.Session, error) {
 	db := s.sqlDB()
 	if db == nil {
 		return identity.Session{}, identity.ErrSessionInvalid
@@ -1880,61 +1709,8 @@ func (s *Server) requireSession(r *http.Request) (identity.Session, error) {
 	return session, nil
 }
 
-func (s *Server) requireAIPrincipal(r *http.Request) (aitoken.Principal, error) {
-	if s.sqlDB() == nil {
-		return aitoken.Principal{}, aitoken.ErrInvalidToken
-	}
-	return aitoken.NewService(s.sqlDB()).VerifyBearer(r.Context(), r.Header.Get("Authorization"))
-}
-
-func (s *Server) searchAIPrincipal(r *http.Request, principal aitoken.Principal, query string, limit int) (catalog.SearchResult, error) {
-	limit = parseIntDefault(strconv.Itoa(limit), 20)
-	boundariesBySpace := map[string][]catalog.SearchBoundary{}
-	for _, boundary := range principal.Boundaries {
-		if !s.canReadSpace(r, principal.AccountID, boundary.SpaceID) || !s.mountBelongsToSpace(r, boundary.SpaceID, boundary.MountID) {
-			return catalog.SearchResult{}, fmt.Errorf("AI token boundary is no longer authorized")
-		}
-		boundariesBySpace[boundary.SpaceID] = append(boundariesBySpace[boundary.SpaceID], catalog.SearchBoundary{
-			MountID:      boundary.MountID,
-			RelativePath: boundary.RelativePath,
-		})
-	}
-
-	service := catalog.NewService(s.sqlDB())
-	merged := catalog.SearchResult{}
-	remaining := limit
-	for spaceID, boundaries := range boundariesBySpace {
-		if remaining <= 0 {
-			break
-		}
-		result, err := service.Search(r.Context(), catalog.SearchOptions{
-			SpaceID:    spaceID,
-			Query:      query,
-			Limit:      remaining,
-			Boundaries: boundaries,
-		})
-		if err != nil {
-			return catalog.SearchResult{}, err
-		}
-		merged.Items = append(merged.Items, result.Items...)
-		merged.ExcludedMounts = append(merged.ExcludedMounts, result.ExcludedMounts...)
-		remaining = limit - len(merged.Items)
-	}
-	return merged, nil
-}
-
 func (s *Server) canReadSpace(r *http.Request, accountID, spaceID string) bool {
-	var count int
-	err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT COUNT(1)
-FROM space_members sm
-JOIN spaces sp ON sp.id = sm.space_id
-WHERE sm.account_id = ? AND sm.space_id = ? AND sp.status = 'active'
-`, accountID, spaceID).Scan(&count)
-	if err == nil && count == 1 {
-		return true
-	}
-	return false
+	return access.NewGuard(s.sqlDB()).HasSpacePermission(r.Context(), accountID, spaceID, domain.SpacePermissionViewer)
 }
 
 type accountTOTP struct {
@@ -2031,23 +1807,7 @@ func (s *Server) totpAEAD() (cipher.AEAD, error) {
 }
 
 func (s *Server) hasSpacePermission(r *http.Request, accountID, spaceID string, required domain.SpacePermission) bool {
-	var permission domain.SpacePermission
-	err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT sm.permission
-FROM space_members sm
-JOIN spaces sp ON sp.id = sm.space_id
-WHERE sm.account_id = ? AND sm.space_id = ? AND sp.status = 'active'
-`, accountID, spaceID).Scan(&permission)
-	if err != nil {
-		return false
-	}
-	if required == domain.SpacePermissionViewer {
-		return accessRank(permission) >= accessRank(domain.SpacePermissionViewer)
-	}
-	if required == domain.SpacePermissionEditor {
-		return accessRank(permission) >= accessRank(domain.SpacePermissionEditor)
-	}
-	return permission == domain.SpacePermissionManager
+	return access.NewGuard(s.sqlDB()).HasSpacePermission(r.Context(), accountID, spaceID, required)
 }
 
 func (s *Server) isAdmin(r *http.Request, accountID string) bool {
@@ -2086,10 +1846,10 @@ func writeTokenError(w http.ResponseWriter, r *http.Request, err error) {
 
 var (
 	errMountConflict             = errors.New("mount conflicts with an existing mount")
-	errMountIdentityUnverifiable = errors.New("mount identity is unverifiable")
+	errMountIdentityUnverifiable = access.ErrMountIdentityUnverifiable
 	errMountRootNotAllowed       = errors.New("mount root is outside the configured storage root")
 	errMountNotWritable          = errors.New("mount root is not writable at the container filesystem layer")
-	errMountUnavailable          = errors.New("mount is unavailable")
+	errMountUnavailable          = access.ErrMountUnavailable
 )
 
 type validatedMount struct {
@@ -2319,23 +2079,13 @@ func scopeIncluded(scopes []aitoken.Scope, want aitoken.Scope) bool {
 }
 
 func (s *Server) mountBelongsToSpace(r *http.Request, spaceID, mountID string) bool {
-	var count int
-	err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT COUNT(1)
-FROM mounts
-WHERE id = ? AND space_id = ? AND status = 'active'
-	`, mountID, spaceID).Scan(&count)
-	return err == nil && count == 1
+	_, err := access.NewGuard(s.sqlDB()).LoadMount(r.Context(), spaceID, mountID)
+	return err == nil
 }
 
 func (s *Server) mountAllowsUpload(r *http.Request, spaceID, mountID string) bool {
-	var count int
-	err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT COUNT(1)
-FROM mounts
-WHERE id = ? AND space_id = ? AND status = 'active' AND mode = 'read_write'
-	`, mountID, spaceID).Scan(&count)
-	return err == nil && count == 1
+	mount, err := access.NewGuard(s.sqlDB()).LoadMount(r.Context(), spaceID, mountID)
+	return err == nil && mount.Mode == domain.MountModeReadWrite
 }
 
 func (s *Server) aiTokenBoundaries(r *http.Request, tokenID string) ([]map[string]string, error) {
@@ -2466,6 +2216,9 @@ func parseIntDefault(value string, fallback int) int {
 
 // isSecureRequest reports whether the client connection is HTTPS.
 func isSecureRequest(r *http.Request) bool {
+	if secure, ok := r.Context().Value(secureRequestContext).(bool); ok {
+		return secure
+	}
 	return r.TLS != nil
 }
 
@@ -2541,20 +2294,17 @@ type mountForListing struct {
 }
 
 func loadMountForListing(r *http.Request, db *sql.DB, spaceID, mountID string) (mountForListing, error) {
-	var mount mountForListing
-	var status string
-	err := db.QueryRowContext(r.Context(), `
-SELECT id, root_path, mode, kind, COALESCE(mount_identity_json, ''), status
-FROM mounts
-WHERE id = ? AND space_id = ? AND status <> 'deleted'
-	`, mountID, spaceID).Scan(&mount.ID, &mount.Root, &mount.Mode, &mount.Kind, &mount.IdentityJSON, &status)
+	loaded, err := access.NewGuard(db).LoadMount(r.Context(), spaceID, mountID)
 	if err != nil {
 		return mountForListing{}, err
 	}
-	if status != "active" {
-		return mountForListing{}, errMountUnavailable
-	}
-	return mount, nil
+	return mountForListing{
+		ID:           loaded.ID,
+		Root:         loaded.Root,
+		Mode:         loaded.Mode,
+		Kind:         loaded.Kind,
+		IdentityJSON: loaded.IdentityJSON,
+	}, nil
 }
 
 func writeMountLoadError(w http.ResponseWriter, r *http.Request, err error) bool {
@@ -2590,28 +2340,13 @@ func (s *Server) canContinueUpload(w http.ResponseWriter, r *http.Request, accou
 }
 
 func (s *Server) verifyLoadedMountIdentity(r *http.Request, mount mountForListing) error {
-	if strings.TrimSpace(mount.IdentityJSON) == "" {
-		_ = s.markMountUnavailable(r, mount.ID)
-		return errMountIdentityUnverifiable
-	}
-	var stored mountid.Identity
-	if err := json.Unmarshal([]byte(mount.IdentityJSON), &stored); err != nil {
-		_ = s.markMountUnavailable(r, mount.ID)
-		return fmt.Errorf("%w: %v", errMountIdentityUnverifiable, err)
-	}
-	current, err := mountid.Capture(mount.Root)
-	if err != nil {
-		_ = s.markMountUnavailable(r, mount.ID)
-		return fmt.Errorf("%w: %v", errMountIdentityUnverifiable, err)
-	}
-	if !mountIdentityMatches(stored, current) {
-		_ = s.markMountUnavailable(r, mount.ID)
-		return fmt.Errorf("%w: mount root identity drifted", errMountIdentityUnverifiable)
-	}
-	if mountIdentityNeedsRefresh(stored, current) {
-		_ = s.refreshMountIdentity(r.Context(), mount.ID, current)
-	}
-	return nil
+	return access.NewGuard(s.sqlDB()).VerifyMountIdentity(r.Context(), access.AuthorizedMount{
+		ID:           mount.ID,
+		Root:         mount.Root,
+		Mode:         mount.Mode,
+		Kind:         mount.Kind,
+		IdentityJSON: mount.IdentityJSON,
+	})
 }
 
 func (s *Server) validateShareTarget(r *http.Request, mount mountForListing, requestedPath string) (string, error) {
@@ -2657,38 +2392,11 @@ WHERE id = ? AND status = 'active'
 // Kernel mount IDs (mountinfo ID / statx mount_id) are intentionally ignored because
 // they change whenever a container or bind mount is recreated, even for the same directory.
 func mountIdentityMatches(stored, current mountid.Identity) bool {
-	if filepath.Clean(stored.Path) != filepath.Clean(current.Path) || stored.Device != current.Device || stored.Inode != current.Inode {
-		return false
-	}
-	if stored.Statx.Available || current.Statx.Available {
-		if stored.Statx.Available != current.Statx.Available ||
-			stored.Statx.DeviceMajor != current.Statx.DeviceMajor ||
-			stored.Statx.DeviceMinor != current.Statx.DeviceMinor ||
-			stored.Statx.Inode != current.Statx.Inode {
-			return false
-		}
-	}
-	if stored.Mount.Available != current.Mount.Available {
-		return false
-	}
-	if !stored.Mount.Available {
-		return true
-	}
-	return stored.Mount.Device == current.Mount.Device &&
-		stored.Mount.Root == current.Mount.Root &&
-		stored.Mount.Point == current.Mount.Point &&
-		stored.Mount.FSType == current.Mount.FSType &&
-		stored.Mount.Source == current.Mount.Source
+	return access.MountIdentityMatches(stored, current)
 }
 
 func mountIdentityNeedsRefresh(stored, current mountid.Identity) bool {
-	if stored.Statx.MountID != current.Statx.MountID {
-		return true
-	}
-	if stored.Mount.Available && current.Mount.Available && stored.Mount.ID != current.Mount.ID {
-		return true
-	}
-	return false
+	return access.MountIdentityNeedsRefresh(stored, current)
 }
 
 func queryMounts(r *http.Request, db *sql.DB, accountID, spaceID string) ([]mountDTO, error) {
@@ -2974,10 +2682,15 @@ func (s *Server) recordAudit(r *http.Request, action, targetType, targetID, meta
 		TargetType:     targetType,
 		TargetID:       targetID,
 		MetadataJSON:   metadata,
-		IPHash:         audit.HashForAudit(r.RemoteAddr),
-		UserAgentHash:  audit.HashForAudit(r.UserAgent()),
+		IPHash:         audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainClientIP, clientIPFromRequest(r)),
+		UserAgentHash:  audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainUserAgent, r.UserAgent()),
 	}
-	return audit.NewRecorder(db).Record(r.Context(), event)
+	recorder := s.auditRecorder
+	if err := recorder.Record(r.Context(), event); err != nil {
+		_ = recorder.MarkReadinessRisk(r.Context(), err)
+		return err
+	}
+	return nil
 }
 
 func displayMountMode(mode domain.MountMode) string {

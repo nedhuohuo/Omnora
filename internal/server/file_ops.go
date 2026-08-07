@@ -1,15 +1,18 @@
 package server
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 
-	"omnora/internal/domain"
+	"omnora/internal/access"
 	"omnora/internal/files"
 	"omnora/internal/httpx"
+	"omnora/internal/memberfiles"
 	"omnora/internal/storage"
 )
 
@@ -21,10 +24,6 @@ func (s *Server) renameObject(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "renaming requires editor permission")
-		return
-	}
 	var req struct {
 		From   string `json:"from"`
 		ToName string `json:"toName"`
@@ -38,25 +37,15 @@ func (s *Server) renameObject(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
-	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if mount.Mode != domain.MountModeReadWrite {
-		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
-		return
-	}
-	renamed, err := files.NewService().Rename(filesMount(mount), req.From, target)
+	result, err := s.memberFiles.Rename(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
+		SpaceID: spaceID, MountID: mountID, Path: req.From,
+	}, target)
 	if err != nil {
-		writeFileOpError(w, r, err)
+		writeMemberFilesError(w, r, err, "renaming requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "object_rename", "file_object", renamed, `{}`)
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": renamed})
+	_ = s.recordAudit(r, "object_rename", "file_object", result.RelativePath, `{}`)
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": result.RelativePath})
 }
 
 func (s *Server) moveObject(w http.ResponseWriter, r *http.Request) {
@@ -67,10 +56,6 @@ func (s *Server) moveObject(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "moving requires editor permission")
-		return
-	}
 	var req struct {
 		From  string `json:"from"`
 		ToDir string `json:"toDir"`
@@ -82,25 +67,15 @@ func (s *Server) moveObject(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "from is required")
 		return
 	}
-	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if mount.Mode != domain.MountModeReadWrite {
-		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
-		return
-	}
-	moved, err := files.NewService().Move(filesMount(mount), req.From, req.ToDir)
+	result, err := s.memberFiles.Move(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
+		SpaceID: spaceID, MountID: mountID, Path: req.From,
+	}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: req.ToDir})
 	if err != nil {
-		writeFileOpError(w, r, err)
+		writeMemberFilesError(w, r, err, "moving requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "object_move", "file_object", moved, `{}`)
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": moved})
+	_ = s.recordAudit(r, "object_move", "file_object", result.RelativePath, `{}`)
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": result.RelativePath})
 }
 
 func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
@@ -111,51 +86,42 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "deleting requires editor permission")
-		return
-	}
 	relativePath := r.URL.Query().Get("path")
 	if strings.TrimSpace(relativePath) == "" {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "path is required")
 		return
 	}
 	permanent := r.URL.Query().Get("permanent") == "1" || strings.EqualFold(r.URL.Query().Get("permanent"), "true")
-	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if mount.Mode != domain.MountModeReadWrite {
-		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
-		return
-	}
-	svc := files.NewService()
-	if mount.Kind == "managed" && !permanent {
-		item, err := svc.SoftDelete(filesMount(mount), relativePath)
+	if !permanent {
+		item, err := s.memberFiles.Trash(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: relativePath})
 		if err != nil {
-			writeFileOpError(w, r, err)
+			if errors.Is(err, files.ErrNotManagedMount) {
+				httpx.WriteError(w, r, http.StatusBadRequest, "confirm_permanent_delete", "external mounts require permanent=true after explicit confirmation")
+				return
+			}
+			writeMemberFilesError(w, r, err, "deleting requires editor permission")
 			return
 		}
-		_ = s.revokeSharesForPath(r, spaceID, mountID, relativePath)
-		_ = s.recordAudit(r, "object_trash", "file_object", relativePath, fmt.Sprintf(`{"trashId":%q}`, item.ID))
-		httpx.WriteJSON(w, http.StatusOK, item)
+		_ = s.recordAudit(r, "object_trash", "file_object", relativePath, fmt.Sprintf(`{"trashId":%q}`, item.TrashID))
+		// Keep the legacy trash-item response shape while the shared service
+		// owns authorization, mutation, and share invalidation.
+		legacy := map[string]any{
+			"id": item.TrashID, "originalPath": item.OriginalPath, "name": item.Name,
+			"kind": item.Kind, "size": item.Size, "deletedAt": item.DeletedAt,
+			"trashRelativePath": item.TrashRelativePath,
+		}
+		httpx.WriteJSON(w, http.StatusOK, legacy)
 		return
 	}
-	if mount.Kind != "managed" && !permanent {
-		httpx.WriteError(w, r, http.StatusBadRequest, "confirm_permanent_delete", "external mounts require permanent=true after explicit confirmation")
+	result, err := s.memberFiles.DeletePermanently(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: relativePath})
+	if err != nil {
+		writeMemberFilesError(w, r, err, "deleting requires editor permission")
 		return
 	}
-	if err := svc.Delete(filesMount(mount), relativePath); err != nil {
-		writeFileOpError(w, r, err)
-		return
-	}
-	_ = s.revokeSharesForPath(r, spaceID, mountID, relativePath)
 	_ = s.recordAudit(r, "object_delete", "file_object", relativePath, `{}`)
+	_ = result
 	w.WriteHeader(http.StatusNoContent)
+	return
 }
 
 func (s *Server) listTrash(w http.ResponseWriter, r *http.Request) {
@@ -166,24 +132,12 @@ func (s *Server) listTrash(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionViewer) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "listing trash requires viewer permission")
-		return
-	}
-	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
-		return
-	}
-	items, err := files.NewService().ListTrash(filesMount(mount))
+	result, err := s.memberFiles.ListTrashViewer(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: "."})
 	if err != nil {
-		writeFileOpError(w, r, err)
+		writeMemberFilesError(w, r, err, "listing trash requires viewer permission")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": result.Items})
 }
 
 func (s *Server) restoreTrash(w http.ResponseWriter, r *http.Request) {
@@ -195,29 +149,13 @@ func (s *Server) restoreTrash(w http.ResponseWriter, r *http.Request) {
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	trashID := r.PathValue("trashId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "restoring trash requires editor permission")
-		return
-	}
-	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if mount.Mode != domain.MountModeReadWrite {
-		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
-		return
-	}
-	restored, err := files.NewService().RestoreTrash(filesMount(mount), trashID)
+	result, err := s.memberFiles.RestoreTrash(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: "."}, trashID)
 	if err != nil {
-		writeFileOpError(w, r, err)
+		writeMemberFilesError(w, r, err, "restoring trash requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "object_trash_restore", "file_object", restored, fmt.Sprintf(`{"trashId":%q}`, trashID))
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": restored})
+	_ = s.recordAudit(r, "object_trash_restore", "file_object", result.RelativePath, fmt.Sprintf(`{"trashId":%q}`, trashID))
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": result.RelativePath})
 }
 
 func (s *Server) purgeTrash(w http.ResponseWriter, r *http.Request) {
@@ -229,24 +167,8 @@ func (s *Server) purgeTrash(w http.ResponseWriter, r *http.Request) {
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	trashID := r.PathValue("trashId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "purging trash requires editor permission")
-		return
-	}
-	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if mount.Mode != domain.MountModeReadWrite {
-		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
-		return
-	}
-	if err := files.NewService().PurgeTrash(filesMount(mount), trashID); err != nil {
-		writeFileOpError(w, r, err)
+	if _, err := s.memberFiles.PurgeTrash(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: "."}, trashID); err != nil {
+		writeMemberFilesError(w, r, err, "purging trash requires editor permission")
 		return
 	}
 	_ = s.recordAudit(r, "object_trash_purge", "file_object", trashID, `{}`)
@@ -261,29 +183,13 @@ func (s *Server) emptyTrash(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "emptying trash requires editor permission")
-		return
-	}
-	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if mount.Mode != domain.MountModeReadWrite {
-		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
-		return
-	}
-	removed, err := files.NewService().EmptyTrash(filesMount(mount))
+	result, err := s.memberFiles.EmptyTrash(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: "."})
 	if err != nil {
-		writeFileOpError(w, r, err)
+		writeMemberFilesError(w, r, err, "emptying trash requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "object_trash_empty", "file_object", mountID, fmt.Sprintf(`{"removed":%d}`, removed))
-	httpx.WriteJSON(w, http.StatusOK, map[string]int{"removed": removed})
+	_ = s.recordAudit(r, "object_trash_empty", "file_object", mountID, fmt.Sprintf(`{"removed":%d}`, result.AffectedCount))
+	httpx.WriteJSON(w, http.StatusOK, map[string]int{"removed": result.AffectedCount})
 }
 
 func (s *Server) crossMountCopy(w http.ResponseWriter, r *http.Request) {
@@ -315,79 +221,50 @@ func (s *Server) handleCrossMount(w http.ResponseWriter, r *http.Request, move b
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "from, toSpaceId and toMountId are required")
 		return
 	}
-	sourcePerm := domain.SpacePermissionViewer
+	subject := access.Subject{AccountID: session.AccountID}
+	var mutation memberfiles.MutationResult
 	if move {
-		sourcePerm = domain.SpacePermissionEditor
-	}
-	if !s.hasSpacePermission(r, session.AccountID, sourceSpaceID, sourcePerm) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "insufficient permission on source space")
-		return
-	}
-	if !s.hasSpacePermission(r, session.AccountID, req.ToSpaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "destination requires editor permission")
-		return
-	}
-	source, err := loadMountForListing(r, s.sqlDB(), sourceSpaceID, sourceMountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	dest, err := loadMountForListing(r, s.sqlDB(), req.ToSpaceID, req.ToMountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if source.ID == dest.ID {
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "source and destination mounts must differ")
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, source); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "source mount identity could not be verified")
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, dest); err != nil {
-		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "destination mount identity could not be verified")
-		return
-	}
-	svc := files.NewService()
-	var result string
-	if move {
-		result, err = svc.MoveAcrossMounts(filesMount(source), filesMount(dest), req.From, req.ToDir)
+		mutation, err = s.memberFiles.CrossMountMove(r.Context(), subject,
+			access.Locator{SpaceID: sourceSpaceID, MountID: sourceMountID, Path: req.From},
+			access.Locator{SpaceID: req.ToSpaceID, MountID: req.ToMountID, Path: req.ToDir})
 	} else {
-		result, err = svc.CopyAcrossMounts(filesMount(source), filesMount(dest), req.From, req.ToDir)
+		mutation, err = s.memberFiles.CrossMountCopy(r.Context(), subject,
+			access.Locator{SpaceID: sourceSpaceID, MountID: sourceMountID, Path: req.From},
+			access.Locator{SpaceID: req.ToSpaceID, MountID: req.ToMountID, Path: req.ToDir})
 	}
 	if err != nil {
+		if errors.Is(err, memberfiles.ErrCrossMountSameMount) {
+			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "source and destination mounts must differ")
+			return
+		}
 		if errors.Is(err, files.ErrCrossMountIncomplete) {
-			_ = s.recordAudit(r, "object_cross_mount_incomplete", "file_object", result, fmt.Sprintf(`{"error":%q}`, err.Error()))
+			_ = s.recordAudit(r, "object_cross_mount_incomplete", "file_object", mutation.RelativePath, fmt.Sprintf(`{"error":%q}`, err.Error()))
 			httpx.WriteError(w, r, http.StatusConflict, "cross_mount_incomplete", err.Error())
 			return
 		}
-		writeFileOpError(w, r, err)
+		writeMemberFilesError(w, r, err, "cross-mount operation requires editor permission")
 		return
 	}
 	action := "object_cross_mount_copy"
 	if move {
 		action = "object_cross_mount_move"
-		_ = s.revokeSharesForPath(r, sourceSpaceID, sourceMountID, req.From)
 	}
-	_ = s.recordAudit(r, action, "file_object", result, fmt.Sprintf(`{"fromMount":%q,"toMount":%q}`, source.ID, dest.ID))
+	_ = s.recordAudit(r, action, "file_object", mutation.RelativePath, fmt.Sprintf(`{"fromMount":%q,"toMount":%q}`, sourceMountID, req.ToMountID))
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{
-		"relativePath": result,
+		"relativePath": mutation.RelativePath,
 		"spaceId":      req.ToSpaceID,
 		"mountId":      req.ToMountID,
 	})
 }
 
-func (s *Server) revokeSharesForPath(r *http.Request, spaceID, mountID, relativePath string) error {
-	cleaned, err := storage.CleanRelativePath(relativePath)
-	if err != nil {
-		return err
+func mountForListingFromAuthorized(mount access.AuthorizedMount) mountForListing {
+	return mountForListing{
+		ID:           mount.ID,
+		Root:         mount.Root,
+		Mode:         mount.Mode,
+		Kind:         mount.Kind,
+		IdentityJSON: mount.IdentityJSON,
 	}
-	now := nowRFC3339()
-	_, err = s.sqlDB().ExecContext(r.Context(), `
-UPDATE shares
-SET revoked_at = ?, updated_at = ?
-WHERE space_id = ? AND mount_id = ? AND (relative_path = ? OR relative_path LIKE ?) AND revoked_at IS NULL
-`, now, now, spaceID, mountID, cleaned, cleaned+"/%")
-	return err
 }
 
 func filesMount(mount mountForListing) files.Mount {
@@ -444,5 +321,70 @@ func writeFileOpError(w http.ResponseWriter, r *http.Request, err error) {
 			return
 		}
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
+	}
+}
+
+// writeMemberFilesError translates shared application errors to the stable
+// REST envelope. The service owns authorization and filesystem policy; this
+// adapter owns only HTTP status/code/message compatibility.
+func writeMemberFilesError(w http.ResponseWriter, r *http.Request, err error, forbiddenMessage string) {
+	if err == nil {
+		return
+	}
+	switch {
+	case errors.Is(err, memberfiles.ErrCrossMountSameMount):
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "source and destination mounts must differ")
+	case errors.Is(err, memberfiles.ErrUploadNotFound), errors.Is(err, memberfiles.ErrUploadExpired):
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "upload session was not found")
+	case errors.Is(err, files.ErrTrashItemNotFound):
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "trash item was not found")
+	case errors.Is(err, os.ErrNotExist):
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "file or directory was not found")
+	case errors.Is(err, sql.ErrNoRows):
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "mount was not found")
+	case errors.Is(err, files.ErrInvalidMount):
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
+	case errors.Is(err, memberfiles.ErrMutationInvalidPath):
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", "path is invalid")
+	case errors.Is(err, memberfiles.ErrUploadConflict), errors.Is(err, memberfiles.ErrMutationConflict):
+		code := "upload_conflict"
+		message := "upload could not be completed"
+		if errors.Is(err, memberfiles.ErrMutationConflict) {
+			code = "conflict"
+			message = "file operation conflicts with the current object"
+		}
+		httpx.WriteError(w, r, http.StatusConflict, code, message)
+	case errors.Is(err, access.ErrMountIdentityUnverifiable):
+		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
+	case errors.Is(err, access.ErrMountUnavailable):
+		httpx.WriteError(w, r, http.StatusConflict, "mount_unavailable", "mount is unavailable and must be re-verified by an administrator")
+	case errors.Is(err, access.ErrReadonlyMount), errors.Is(err, files.ErrInvalidMountMode):
+		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
+	case errors.Is(err, access.ErrUnauthorized):
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+	case errors.Is(err, access.ErrForbidden):
+		if forbiddenMessage == "" {
+			forbiddenMessage = "insufficient space permission"
+		}
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", forbiddenMessage)
+	case errors.Is(err, access.ErrBoundaryViolation), errors.Is(err, memberfiles.ErrInvalidInput), errors.Is(err, files.ErrNotFile), errors.Is(err, files.ErrNotDirectory), errors.Is(err, files.ErrSymlinkPath):
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", "path is invalid")
+	case errors.Is(err, files.ErrNotManagedMount):
+		httpx.WriteError(w, r, http.StatusBadRequest, "not_managed_mount", "operation requires a managed mount")
+	default:
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "target already exists") {
+			httpx.WriteError(w, r, http.StatusConflict, "conflict", "target already exists")
+			return
+		}
+		if strings.Contains(lower, "path is invalid") || strings.Contains(lower, "paths are not allowed") || strings.Contains(lower, "path traversal") || strings.Contains(lower, "reserved namespace") {
+			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", "path is invalid")
+			return
+		}
+		if isReadOnlyFilesystem(err) {
+			httpx.WriteError(w, r, http.StatusConflict, "mount_not_writable", "mount root is not writable at the container filesystem layer")
+			return
+		}
+		writeDBError(w, r, err)
 	}
 }
