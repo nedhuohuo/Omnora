@@ -18,6 +18,7 @@ import (
 	"omnora/internal/domain"
 	"omnora/internal/httpx"
 	"omnora/internal/identity"
+	"omnora/internal/recovery"
 	"omnora/internal/store"
 )
 
@@ -29,7 +30,23 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (identity.
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return identity.Session{}, false
 	}
-	if !s.isAdmin(r, session.AccountID) {
+	if session.Purpose != identity.SessionPurposeFull {
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "TOTP enrollment sessions cannot access administrator actions")
+		return identity.Session{}, false
+	}
+	var role string
+	var totpRequired, passwordResetRequired, totpResetRequired int
+	var confirmedAt sql.NullString
+	err = s.sqlDB().QueryRowContext(r.Context(), `
+SELECT role, totp_required, totp_confirmed_at, password_reset_required, totp_reset_required
+FROM accounts
+WHERE id = ? AND status = 'active'
+`, session.AccountID).Scan(&role, &totpRequired, &confirmedAt, &passwordResetRequired, &totpResetRequired)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return identity.Session{}, false
+	}
+	if session.Purpose != identity.SessionPurposeFull || role != string(domain.AccountRoleAdmin) || totpRequired != 1 || !confirmedAt.Valid || passwordResetRequired != 0 || totpResetRequired != 0 {
 		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "only system administrators can perform this action")
 		return identity.Session{}, false
 	}
@@ -164,7 +181,8 @@ ORDER BY created_at
 }
 
 func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	adminSession, ok := s.requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -180,17 +198,18 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 	if req.Role == string(domain.AccountRoleAdmin) {
 		role = domain.AccountRoleAdmin
 	}
-	created, err := identity.New(s.sqlDB(), identity.Options{}).CreateAccount(r.Context(), identity.CreateAccountRequest{
+	created, err := identity.New(s.sqlDB(), identity.Options{}).CreateAccountSecure(r.Context(), identity.CreateAccountRequest{
 		Email:       req.Email,
 		DisplayName: req.DisplayName,
 		Password:    req.Password,
 		Role:        role,
+	}, func(ctx context.Context, tx *sql.Tx, created identity.AccountWithPersonalSpace) error {
+		return s.recordAuditTx(ctx, tx, r, adminSession.AccountID, "admin_user_create", "account", created.Account.ID, "{}")
 	})
 	if err != nil {
 		s.writeIdentityError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "admin_user_create", "account", created.Account.ID, "{}")
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"user":  accountResponse(created.Account),
 		"space": spaceResponse(created.PersonalSpace, domain.SpacePermissionManager),
@@ -198,7 +217,8 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setAdminUserEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	adminSession, ok := s.requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	userID := r.PathValue("userId")
@@ -209,27 +229,54 @@ func (s *Server) setAdminUserEnabled(w http.ResponseWriter, r *http.Request, ena
 	if enabled {
 		status = "active"
 	}
-	now := nowRFC3339()
-	result, err := s.sqlDB().ExecContext(r.Context(), `
-UPDATE accounts SET status = ?, updated_at = ? WHERE id = ? AND status <> 'deleted'
-`, status, now, userID)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if affected == 0 {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "user was not found")
-		return
-	}
+	svc := identity.New(s.sqlDB(), identity.Options{})
 	if !enabled {
-		_ = identity.New(s.sqlDB(), identity.Options{}).RevokeAllSessions(r.Context(), userID, "")
+		err := svc.DisableAccountSecure(r.Context(), userID, func(ctx context.Context, tx *sql.Tx) error {
+			return s.recordAuditTx(ctx, tx, r, adminSession.AccountID, "admin_user_disabled", "account", userID, "{}")
+		})
+		if err != nil {
+			s.markAuditRiskIfNeeded(r.Context(), err)
+			if errors.Is(err, identity.ErrInvalidCredential) {
+				httpx.WriteError(w, r, http.StatusNotFound, "not_found", "user was not found")
+			} else {
+				writeDBError(w, r, err)
+			}
+			return
+		}
+	} else {
+		tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+		if err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		defer tx.Rollback()
+		result, err := tx.ExecContext(r.Context(), `
+UPDATE accounts SET status = 'active', updated_at = ?
+WHERE id = ? AND status <> 'deleted'
+`, nowRFC3339(), userID)
+		if err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		if affected == 0 {
+			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "user was not found")
+			return
+		}
+		if err := s.recordAuditTx(r.Context(), tx, r, adminSession.AccountID, "admin_user_active", "account", userID, "{}"); err != nil {
+			s.markAuditRiskIfNeeded(r.Context(), err)
+			writeDBError(w, r, err)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
 	}
-	_ = s.recordAudit(r, "admin_user_"+status, "account", userID, "{}")
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"id": userID, "status": status})
 }
 
@@ -242,15 +289,18 @@ func (s *Server) enableAdminUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) revokeAdminUserSessions(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	adminSession, ok := s.requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	userID := r.PathValue("userId")
-	if err := identity.New(s.sqlDB(), identity.Options{}).RevokeAllSessions(r.Context(), userID, ""); err != nil {
+	if err := identity.New(s.sqlDB(), identity.Options{}).RevokeAllSessionsSecure(r.Context(), userID, "", func(ctx context.Context, tx *sql.Tx) error {
+		return s.recordAuditTx(ctx, tx, r, adminSession.AccountID, "admin_user_revoke_sessions", "account", userID, "{}")
+	}); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
 		writeDBError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "admin_user_revoke_sessions", "account", userID, "{}")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -300,7 +350,8 @@ ORDER BY a.display_name
 }
 
 func (s *Server) putAdminSpaceMember(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	adminSession, ok := s.requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	spaceID := r.PathValue("spaceId")
@@ -333,7 +384,13 @@ func (s *Server) putAdminSpaceMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := nowRFC3339()
-	_, err := s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(r.Context(), `
 INSERT INTO space_members(space_id, account_id, permission, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(space_id, account_id) DO UPDATE SET permission = excluded.permission, updated_at = excluded.updated_at
@@ -342,7 +399,15 @@ ON CONFLICT(space_id, account_id) DO UPDATE SET permission = excluded.permission
 		writeDBError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "admin_space_member_set", "space", spaceID, fmt.Sprintf(`{"accountId":%q,"permission":%q}`, member.AccountID, permission))
+	if err := s.recordAuditTx(r.Context(), tx, r, adminSession.AccountID, "admin_space_member_set", "space", spaceID, fmt.Sprintf(`{"accountId":%q,"permission":%q}`, member.AccountID, permission)); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	member.Permission = string(permission)
 	httpx.WriteJSON(w, http.StatusOK, member)
 }
@@ -384,7 +449,8 @@ WHERE id = ? OR email = ?
 }
 
 func (s *Server) deleteAdminSpaceMember(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	adminSession, ok := s.requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	spaceID := r.PathValue("spaceId")
@@ -392,7 +458,13 @@ func (s *Server) deleteAdminSpaceMember(w http.ResponseWriter, r *http.Request) 
 	if s.rejectInitialAdminMutation(w, r, accountID, "the initial administrator cannot be removed from a space") {
 		return
 	}
-	result, err := s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(r.Context(), `
 DELETE FROM space_members WHERE space_id = ? AND account_id = ?
 `, spaceID, accountID)
 	if err != nil {
@@ -408,7 +480,15 @@ DELETE FROM space_members WHERE space_id = ? AND account_id = ?
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "membership was not found")
 		return
 	}
-	_ = s.recordAudit(r, "admin_space_member_remove", "space", spaceID, fmt.Sprintf(`{"accountId":%q}`, accountID))
+	if err := s.recordAuditTx(r.Context(), tx, r, adminSession.AccountID, "admin_space_member_remove", "space", spaceID, fmt.Sprintf(`{"accountId":%q}`, accountID)); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -450,11 +530,15 @@ VALUES (?, ?, 'manager', ?, ?)
 		writeDBError(w, r, err)
 		return
 	}
+	if err := s.recordAuditTx(r.Context(), tx, r, session.AccountID, "admin_space_create", "space", spaceID, "{}"); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeDBError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "admin_space_create", "space", spaceID, "{}")
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": spaceID, "type": "shared", "name": name})
 }
 
@@ -538,7 +622,7 @@ WHERE id = ? AND kind = 'shared' AND status = 'active'
 	if _, err := tx.ExecContext(r.Context(), `
 INSERT INTO audit_events(actor_account_id, route_group, action, target_type, target_id, ip_hash, user_agent_hash, metadata_json)
 VALUES (?, 'rest', 'admin_space_rename', 'space', ?, ?, ?, ?)
-	`, session.AccountID, spaceID, audit.HashForAudit(r.RemoteAddr), audit.HashForAudit(r.UserAgent()), metadata); err != nil {
+	`, session.AccountID, spaceID, audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainClientIP, clientIPFromRequest(r)), audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainUserAgent, r.UserAgent()), metadata); err != nil {
 		writeDBError(w, r, err)
 		return
 	}
@@ -648,7 +732,7 @@ WHERE id = ? AND status = 'active'
 	if _, err := tx.ExecContext(r.Context(), `
 INSERT INTO audit_events(actor_account_id, route_group, action, target_type, target_id, ip_hash, user_agent_hash, metadata_json)
 VALUES (?, 'rest', 'admin_space_delete', 'space', ?, ?, ?, ?)
-`, session.AccountID, spaceID, audit.HashForAudit(r.RemoteAddr), audit.HashForAudit(r.UserAgent()), string(metadata)); err != nil {
+`, session.AccountID, spaceID, audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainClientIP, clientIPFromRequest(r)), audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainUserAgent, r.UserAgent()), string(metadata)); err != nil {
 		writeDBError(w, r, err)
 		return
 	}
@@ -858,12 +942,19 @@ LIMIT ?
 }
 
 func (s *Server) revokeAdminShare(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	session, ok := s.requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	shareID := r.PathValue("shareId")
 	now := nowRFC3339()
-	result, err := s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(r.Context(), `
 UPDATE shares SET revoked_at = ?, updated_at = ? WHERE id = ? AND revoked_at IS NULL
 `, now, now, shareID)
 	if err != nil {
@@ -879,7 +970,15 @@ UPDATE shares SET revoked_at = ?, updated_at = ? WHERE id = ? AND revoked_at IS 
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "share was not found")
 		return
 	}
-	_ = s.recordAudit(r, "admin_share_revoke", "share", shareID, "{}")
+	if err := s.recordAuditTx(r.Context(), tx, r, session.AccountID, "admin_share_revoke", "share", shareID, "{}"); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -918,12 +1017,19 @@ LIMIT ?
 }
 
 func (s *Server) revokeAdminAIToken(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	session, ok := s.requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	tokenID := r.PathValue("tokenId")
 	now := nowRFC3339()
-	result, err := s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(r.Context(), `
 UPDATE ai_tokens SET revoked_at = ?, updated_at = ? WHERE id = ? AND revoked_at IS NULL
 `, now, now, tokenID)
 	if err != nil {
@@ -939,7 +1045,15 @@ UPDATE ai_tokens SET revoked_at = ?, updated_at = ? WHERE id = ? AND revoked_at 
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "AI token was not found")
 		return
 	}
-	_ = s.recordAudit(r, "admin_ai_token_revoke", "ai_token", tokenID, "{}")
+	if err := s.recordAuditTx(r.Context(), tx, r, session.AccountID, "admin_ai_token_revoke", "ai_token", tokenID, "{}"); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -989,6 +1103,37 @@ LIMIT ?
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+// recoveryCoordinator returns a Coordinator configured with the durable
+// offline recovery journal path for this instance's database. The journal
+// lives outside the SQLite file itself, next to it, so it survives an
+// offline recovery worker replacing that file wholesale with a backup
+// snapshot; see cmd/omnora-recovery for the process that reads it back.
+func (s *Server) recoveryCoordinator() *recovery.Coordinator {
+	return recovery.NewCoordinator(s.sqlDB(), recovery.WithJournalPath(recovery.DefaultJournalPath(s.cfg.Database.Path)))
+}
+
+func (s *Server) recoveryStatus(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	control, err := s.recoveryCoordinator().Control(r.Context())
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"state":               control.State,
+		"ready":               control.Ready,
+		"requestId":           control.RequestID,
+		"reasonCode":          control.ReasonCode,
+		"cleanupPending":      control.CleanupPending,
+		"sourceSchemaVersion": control.SourceSchemaVersion,
+		"requestedAt":         control.RequestedAt,
+		"completedAt":         control.CompletedAt,
+		"updatedAt":           control.UpdatedAt,
+	})
+}
+
 func (s *Server) loadLatestBackup(r *http.Request) (*backupDTO, error) {
 	var item backupDTO
 	err := s.sqlDB().QueryRowContext(r.Context(), `
@@ -1028,29 +1173,24 @@ func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) {
 		completedAt = nil
 	} else {
 		backupsDir := filepath.Join(strings.TrimSpace(s.cfg.Storage.ManagedDir), "backups")
-		if err := os.MkdirAll(backupsDir, 0o755); err != nil {
+		artifact, err := recovery.NewBackupPublisher(s.db).Publish(r.Context(), backupsDir)
+		if err != nil {
 			status = "failed"
-			notes = "could not prepare backups directory: " + err.Error()
+			notes = "online backup failed: " + err.Error()
 			completedAt = nil
 		} else {
-			target := filepath.Join(backupsDir, fmt.Sprintf("omnora-%s.db", now.Format("20060102T150405Z0700")))
-			if err := s.db.BackupTo(r.Context(), target); err != nil {
-				status = "failed"
-				notes = "online backup failed: " + err.Error()
-				completedAt = nil
-				_ = os.Remove(target)
-			} else if err := verifyBackupFile(r.Context(), target); err != nil {
-				status = "failed"
-				notes = "backup integrity check failed: " + err.Error()
-				completedAt = nil
-				_ = os.Remove(target)
-			} else {
-				backupPath = target
-			}
+			id = "bkp_" + artifact.ID
+			backupPath = artifact.Path
 		}
 	}
 
-	_, err := s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(r.Context(), `
 INSERT INTO backups(id, status, path, created_by, created_at, completed_at, notes)
 VALUES (?, ?, ?, ?, ?, ?, ?)
 `, id, status, nullIfEmpty(backupPath), session.AccountID, now.Format(time.RFC3339Nano), completedAt, notes)
@@ -1058,7 +1198,15 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 		writeDBError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "admin_backup_create", "backup", id, "{}")
+	if err := s.recordAuditTx(r.Context(), tx, r, session.AccountID, "admin_backup_create", "backup", id, "{}"); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	createdByEmail, createdByDisplayName := s.accountDisplayFields(r, session.AccountID)
 	httpx.WriteJSON(w, http.StatusCreated, backupDTO{
 		ID: id, Status: status, Path: backupPath, CreatedBy: session.AccountID,
@@ -1129,6 +1277,39 @@ FROM backups WHERE id = ?
 		httpx.WriteError(w, r, http.StatusServiceUnavailable, "database_unavailable", "database is required")
 		return
 	}
+	// An externally exposed server never replaces its live SQLite file from an
+	// HTTP request. The coordinator records a durable, audited request and an
+	// offline recovery worker performs staging, schema/integrity validation,
+	// replacement, credential invalidation, and controlled bootstrap.
+	if s.httpPolicy != nil {
+		request, err := s.recoveryCoordinator().BeginRestore(r.Context(), recovery.BeginRestoreRequest{
+			BackupID:       backupID,
+			ActorAccountID: session.AccountID,
+		})
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusConflict, "restore_unavailable", err.Error())
+			return
+		}
+		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
+			"status":    "restore_accepted",
+			"requestId": request.ID,
+			"backupId":  backupID,
+			"state":     request.State,
+			"notes":     "restore is staged for the offline recovery coordinator; this process is exiting so it never serves business routes against a database the recovery worker is about to replace",
+		})
+		// The 202 body is already written above; requesting shutdown here
+		// only asks the process entry point to begin a graceful exit once
+		// this handler returns and the response has flushed. It never
+		// touches the live database itself. Run `omnora-recovery restore`
+		// (see cmd/omnora-recovery) once this process has exited to perform
+		// the actual offline replacement.
+		s.RequestShutdown()
+		return
+	}
+
+	// In-process test/CLI fixtures without an external trust policy retain the
+	// legacy synchronous path. Production configuration cannot reach this
+	// branch because ValidateBusinessExposure requires the trust boundary.
 	if err := s.db.RestoreFrom(r.Context(), item.Path); err != nil {
 		httpx.WriteError(w, r, http.StatusInternalServerError, "restore_failed", err.Error())
 		return
@@ -1138,7 +1319,9 @@ FROM backups WHERE id = ?
 		return
 	}
 	_ = s.hydrateRouteGroups(r.Context())
-	_ = s.recordAudit(r, "admin_backup_restore", "backup", backupID, fmt.Sprintf(`{"by":%q}`, session.AccountID))
+	if !s.recordAuditMutation(w, r, "admin_backup_restore", "backup", backupID, fmt.Sprintf(`{"by":%q}`, session.AccountID)) {
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":   "restored",
 		"backupId": backupID,

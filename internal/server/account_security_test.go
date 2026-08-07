@@ -58,3 +58,31 @@ func TestChangeAccountPassword(t *testing.T) {
 		t.Fatalf("expected new password to authenticate, got error: %v", err)
 	}
 }
+
+func TestAdminCannotDisableOwnTOTP(t *testing.T) {
+	db, handler := newAPITestServer(t)
+	admin, _ := createAPITestAccounts(t, db)
+	reqBody, err := json.Marshal(map[string]string{"password": apiTestPassword})
+	if err != nil {
+		t.Fatalf("marshal disable TOTP request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/account/totp/disable", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(issueAPITestSession(t, db, admin.ID))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("admin disable TOTP status = %d, want %d, body = %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode disable TOTP response: %v", err)
+	}
+	if body.Error.Code != "admin_totp_required" {
+		t.Fatalf("disable TOTP error code = %q, want admin_totp_required", body.Error.Code)
+	}
+}

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -53,13 +54,26 @@ func (s *Server) updateAdminRouteGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.persistRouteGroup(r.Context(), group, *req.Exposed, session.AccountID); err != nil {
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	if err := s.persistRouteGroupTx(r.Context(), tx, group, *req.Exposed, session.AccountID); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if err := s.recordAuditTx(r.Context(), tx, r, session.AccountID, "route_group_update", "route_group", string(group), fmt.Sprintf(`{"exposed":%t}`, *req.Exposed)); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeDBError(w, r, err)
 		return
 	}
 	s.setRouteEnabled(group, *req.Exposed)
-
-	_ = s.recordAudit(r, "route_group_update", "route_group", string(group), fmt.Sprintf(`{"exposed":%t}`, *req.Exposed))
 	httpx.WriteJSON(w, http.StatusOK, s.routeGroupDTO(group))
 }
 
@@ -145,6 +159,30 @@ ON CONFLICT(name) DO UPDATE SET
 		return err
 	}
 	return nil
+}
+
+func (s *Server) persistRouteGroupTx(ctx context.Context, tx *sql.Tx, group domain.RouteGroup, exposed bool, updatedBy string) error {
+	if tx == nil {
+		return errors.New("route group transaction is nil")
+	}
+	enabled := 0
+	if exposed {
+		enabled = 1
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `
+INSERT INTO route_groups(name, enabled, updated_by, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(name) DO UPDATE SET
+	enabled = excluded.enabled,
+	updated_by = excluded.updated_by,
+	updated_at = excluded.updated_at
+`, string(group), enabled, nullIfEmpty(updatedBy), now)
+	if err != nil {
+		return err
+	}
+	_, err = result.RowsAffected()
+	return err
 }
 
 func (s *Server) routeGroupDTO(group domain.RouteGroup) routeGroupDTO {

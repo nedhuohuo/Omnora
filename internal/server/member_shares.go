@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -62,11 +63,12 @@ func (s *Server) revokeShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	shareID := r.PathValue("shareId")
-	if err := s.memberShares.Revoke(r.Context(), access.Subject{AccountID: session.AccountID}, shareID); err != nil {
+	if err := s.memberShares.RevokeSecure(r.Context(), access.Subject{AccountID: session.AccountID}, shareID, func(ctx context.Context, tx *sql.Tx, shareID string) error {
+		return s.recordAuditTx(ctx, tx, r, session.AccountID, "share_revoke", "share", shareID, "{}")
+	}); err != nil {
 		writeMemberShareError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "share_revoke", "share", shareID, "{}")
 	w.WriteHeader(http.StatusNoContent)
 }
 

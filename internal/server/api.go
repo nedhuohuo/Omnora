@@ -32,13 +32,14 @@ import (
 	"omnora/internal/memberfiles"
 	"omnora/internal/membershare"
 	"omnora/internal/mountid"
+	"omnora/internal/ratelimit"
 	"omnora/internal/share"
 	"omnora/internal/storage"
 	"omnora/internal/totp"
 	"omnora/internal/transfer"
 )
 
-const sessionCookieName = "omnora_session"
+const sessionCookieName = "omnora_dev_session"
 
 type routeGroupDTO struct {
 	ID      string `json:"id"`
@@ -189,6 +190,7 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("DELETE /api/v1/admin/ai-tokens/{tokenId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAdminAIToken)))
 	s.mux.Handle("GET /api/v1/admin/backups", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listBackups)))
 	s.mux.Handle("POST /api/v1/admin/backups", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createBackup)))
+	s.mux.Handle("GET /api/v1/admin/recovery", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.recoveryStatus)))
 	s.mux.Handle("POST /api/v1/admin/backups/{backupId}/restore", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.restoreBackup)))
 	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/cross-mount-copy", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.crossMountCopy)))
 	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/cross-mount-move", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.crossMountMove)))
@@ -294,25 +296,38 @@ func (s *Server) initialize(w http.ResponseWriter, r *http.Request) {
 	if req.DisplayName == "" {
 		req.DisplayName = req.DisplayNameAlt
 	}
-	created, err := identity.New(db, identity.Options{}).Initialize(r.Context(), identity.InitializationRequest{
+	// Initialization is a single credential bucket. Keying by caller-supplied
+	// email/token would let an attacker rotate subjects to evade the limit.
+	initSubject := "initialization"
+	if decision := s.checkCredentialRateLimit(r, ratelimit.ScopeInitialize, initSubject); !decision.Allowed {
+		writeRateLimited(w, r, decision)
+		return
+	}
+	created, err := identity.New(db, identity.Options{}).InitializeSecure(r.Context(), identity.InitializationRequest{
 		Token:       req.Token,
 		Email:       req.Email,
 		DisplayName: req.DisplayName,
 		Password:    req.Password,
-	})
-	if err != nil {
-		s.writeIdentityError(w, r, err)
-		return
-	}
-	if _, err := db.ExecContext(r.Context(), `
+	}, func(ctx context.Context, tx *sql.Tx, created identity.AccountWithPersonalSpace) error {
+		if _, err := tx.ExecContext(ctx, `
 INSERT INTO system_state(key, value, updated_at)
 VALUES ('initial_admin_account_id', ?, ?)
 ON CONFLICT(key) DO NOTHING
 `, created.Account.ID, nowRFC3339()); err != nil {
-		writeDBError(w, r, err)
+			return err
+		}
+		return s.recordAuditTx(ctx, tx, r, "", "system_initialize", "account", created.Account.ID, "{}")
+	})
+	if err != nil {
+		decision := s.recordCredentialFailure(r, ratelimit.ScopeInitialize, initSubject)
+		if !decision.Allowed {
+			writeRateLimited(w, r, decision)
+			return
+		}
+		s.writeIdentityError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "system_initialize", "account", created.Account.ID, "{}")
+	s.recordCredentialSuccess(r, ratelimit.ScopeInitialize, initSubject)
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"user":  accountResponse(created.Account),
 		"space": spaceResponse(created.PersonalSpace, domain.SpacePermissionManager),
@@ -337,10 +352,19 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	if req.TOTPCode == "" {
 		req.TOTPCode = req.TOTPCodeAlt
 	}
+	if decision := s.checkCredentialRateLimit(r, ratelimit.ScopeLogin, req.Login); !decision.Allowed {
+		writeRateLimited(w, r, decision)
+		return
+	}
 	svc := identity.New(db, identity.Options{})
 	account, err := svc.Authenticate(r.Context(), req.Login, req.Password)
 	if err != nil {
-		s.writeIdentityError(w, r, err)
+		decision := s.recordCredentialFailure(r, ratelimit.ScopeLogin, req.Login)
+		if !decision.Allowed {
+			writeRateLimited(w, r, decision)
+			return
+		}
+		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
 		return
 	}
 	if account.PasswordResetRequired {
@@ -348,17 +372,57 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, r, http.StatusUnauthorized, "password_reset_required", "a new password is required")
 			return
 		}
-		if err := svc.ChangePassword(r.Context(), account.ID, req.Password, req.NewPassword); err != nil {
+		newHash, err := svc.HashPassword(req.NewPassword)
+		if err != nil {
 			s.writeIdentityError(w, r, err)
 			return
 		}
-		account.PasswordResetRequired = false
-		// A recovery-required password change invalidates every pre-recovery
-		// session before the replacement login is issued.
-		if err := svc.RevokeAllSessions(r.Context(), account.ID, ""); err != nil {
+		purpose := identity.SessionPurposeFull
+		adminEnrollment := account.Role == domain.AccountRoleAdmin &&
+			(account.TOTPResetRequired || !account.TOTPRequired || account.TOTPConfirmedAt.IsZero())
+		if adminEnrollment {
+			purpose = identity.SessionPurposeTOTPEnrollment
+		} else {
+			if ok, err := s.verifyLoginTOTP(r, account.ID, req.TOTPCode); err != nil {
+				writeDBError(w, r, err)
+				return
+			} else if !ok {
+				decision := s.recordCredentialFailure(r, ratelimit.ScopeLogin, req.Login)
+				if !decision.Allowed {
+					writeRateLimited(w, r, decision)
+					return
+				}
+				httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
+				return
+			}
+		}
+		issued, err := svc.CompletePasswordResetAndCreateSession(r.Context(), account.ID, account.PasswordHash, newHash, purpose, 8*time.Hour, func(ctx context.Context, tx *sql.Tx) error {
+			if err := s.recordAuditTx(ctx, tx, r, account.ID, "login", "account", account.ID, `{"recoveryReset":true}`); err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			s.markAuditRiskIfNeeded(r.Context(), err)
 			s.writeIdentityError(w, r, err)
 			return
 		}
+		s.recordCredentialSuccess(r, ratelimit.ScopeLogin, req.Login)
+		if s.httpPolicy != nil {
+			if _, err := SetCSRFCookie(w, s.cookieNames(r).CSRF, isSecureRequest(r), time.Now().UTC()); err != nil {
+				writeDBError(w, r, err)
+				return
+			}
+		}
+		http.SetCookie(w, s.sessionCookie(r, issued.Token, issued.Session.ExpiresAt))
+		httpx.WriteJSON(w, http.StatusCreated, map[string]any{
+			"userId":                 account.ID,
+			"expiresAt":              issued.Session.ExpiresAt,
+			"isAdmin":                s.isAdmin(r, account.ID),
+			"purpose":                issued.Session.Purpose,
+			"requiresTotpEnrollment": issued.Session.Purpose == identity.SessionPurposeTOTPEnrollment,
+		})
+		return
 	}
 
 	purpose := identity.SessionPurposeFull
@@ -379,7 +443,12 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 			writeDBError(w, r, err)
 			return
 		} else if !ok {
-			httpx.WriteError(w, r, http.StatusUnauthorized, "totp_required", "a valid TOTP code is required")
+			decision := s.recordCredentialFailure(r, ratelimit.ScopeLogin, req.Login)
+			if !decision.Allowed {
+				writeRateLimited(w, r, decision)
+				return
+			}
+			httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
 			return
 		}
 	}
@@ -392,8 +461,17 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		s.writeIdentityError(w, r, err)
 		return
 	}
-	http.SetCookie(w, sessionCookie(r, issued.Token, issued.Session.ExpiresAt))
-	_ = s.recordAudit(r, "login", "account", account.ID, "{}")
+	s.recordCredentialSuccess(r, ratelimit.ScopeLogin, req.Login)
+	if !s.recordAuditMutation(w, r, "login", "account", account.ID, "{}") {
+		return
+	}
+	if s.httpPolicy != nil {
+		if _, err := SetCSRFCookie(w, s.cookieNames(r).CSRF, isSecureRequest(r), time.Now().UTC()); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+	}
+	http.SetCookie(w, s.sessionCookie(r, issued.Token, issued.Session.ExpiresAt))
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"userId":                 account.ID,
 		"expiresAt":              issued.Session.ExpiresAt,
@@ -438,42 +516,54 @@ func (s *Server) reauthenticateAccount(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if decision := s.checkCredentialRateLimit(r, ratelimit.ScopeReauthenticate, session.AccountID); !decision.Allowed {
+		writeRateLimited(w, r, decision)
+		return
+	}
 	svc := identity.New(s.sqlDB(), identity.Options{})
 	material, err := svc.LoadCredentialMaterial(r.Context(), session.AccountID)
 	if err != nil || !svc.VerifyPassword(req.Password, material.PasswordHash) {
+		decision := s.recordCredentialFailure(r, ratelimit.ScopeReauthenticate, session.AccountID)
+		if !decision.Allowed {
+			writeRateLimited(w, r, decision)
+			return
+		}
 		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
 		return
 	}
 	if material.TOTPRequired {
 		secret, decryptErr := s.decryptTOTPSecret(material.TOTPSecretCiphertext)
 		if decryptErr != nil || secret == "" || !totp.Verify(secret, req.TOTPCode, time.Now().UTC()) {
+			decision := s.recordCredentialFailure(r, ratelimit.ScopeReauthenticate, session.AccountID)
+			if !decision.Allowed {
+				writeRateLimited(w, r, decision)
+				return
+			}
 			httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
 			return
 		}
 	}
 	now := time.Now().UTC()
-	rotated, err := svc.RotateSession(r.Context(), session, now)
+	rotated, err := svc.RotateSessionSecure(r.Context(), session, now, func(ctx context.Context, tx *sql.Tx) error {
+		return s.recordAuditTx(ctx, tx, r, session.AccountID, "account_reauthenticate", "account", session.AccountID, "{}")
+	})
 	if err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
 		s.writeIdentityError(w, r, err)
 		return
 	}
-	http.SetCookie(w, sessionCookie(r, rotated.Token, rotated.Session.ExpiresAt))
+	s.recordCredentialSuccess(r, ratelimit.ScopeReauthenticate, session.AccountID)
 	until := rotated.Session.ReauthenticatedAt.Add(identity.RecentReauthenticationTTL)
 	if until.After(rotated.Session.ExpiresAt) {
 		until = rotated.Session.ExpiresAt
 	}
-	if err := s.auditRecorder.Record(r.Context(), audit.Event{
-		ActorAccountID: session.AccountID,
-		RouteGroup:     domain.RouteGroupREST,
-		Action:         "account_reauthenticate",
-		TargetType:     "account",
-		TargetID:       session.AccountID,
-		MetadataJSON:   "{}",
-		IPHash:         audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainClientIP, clientIPFromRequest(r)),
-		UserAgentHash:  audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainUserAgent, r.UserAgent()),
-	}); err != nil {
-		_ = s.auditRecorder.MarkReadinessRisk(r.Context(), err)
+	if s.httpPolicy != nil {
+		if _, err := SetCSRFCookie(w, s.cookieNames(r).CSRF, isSecureRequest(r), time.Now().UTC()); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
 	}
+	http.SetCookie(w, s.sessionCookie(r, rotated.Token, rotated.Session.ExpiresAt))
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":               "reauthenticated",
 		"reauthenticatedUntil": until,
@@ -485,7 +575,7 @@ func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
 	if db == nil {
 		return
 	}
-	cookie, err := r.Cookie(sessionCookieName)
+	cookie, err := r.Cookie(s.cookieNames(r).Session)
 	if err != nil || cookie.Value == "" {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -494,7 +584,7 @@ func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
 		s.writeIdentityError(w, r, err)
 		return
 	}
-	clearSessionCookie(w, r)
+	s.clearSessionCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -533,13 +623,15 @@ WHERE id = ? AND status = 'active'
 		httpx.WriteError(w, r, http.StatusConflict, "totp_key_unavailable", err.Error())
 		return
 	}
-	if err := identity.New(s.sqlDB(), identity.Options{}).SavePendingTOTP(
+	if err := identity.New(s.sqlDB(), identity.Options{}).SavePendingTOTPSecure(
 		r.Context(), session.AccountID, sealedSecret, time.Now().UTC().Add(identity.PendingTOTPDuration),
+		func(ctx context.Context, tx *sql.Tx) error {
+			return s.recordAuditTx(ctx, tx, r, session.AccountID, "totp_setup", "account", session.AccountID, "{}")
+		},
 	); err != nil {
 		writeDBError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "totp_setup", "account", session.AccountID, "{}")
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"secret":     secret,
 		"otpauthUri": uri,
@@ -558,6 +650,18 @@ func (s *Server) confirmTOTP(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if decision := s.checkCredentialRateLimit(r, ratelimit.ScopeTOTP, session.AccountID); !decision.Allowed {
+		writeRateLimited(w, r, decision)
+		return
+	}
+	rejectTOTP := func() {
+		decision := s.recordCredentialFailure(r, ratelimit.ScopeTOTP, session.AccountID)
+		if !decision.Allowed {
+			writeRateLimited(w, r, decision)
+			return
+		}
+		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_totp", "TOTP code is not valid")
+	}
 	svc := identity.New(s.sqlDB(), identity.Options{})
 	state, err := svc.LoadTOTPState(r.Context(), session.AccountID)
 	if err != nil {
@@ -570,23 +674,37 @@ func (s *Server) confirmTOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	if state.PendingCiphertext == "" || state.PendingExpiresAt.IsZero() || !now.Before(state.PendingExpiresAt) {
-		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_totp", "TOTP code is not valid")
+		rejectTOTP()
 		return
 	}
 	pendingSecret, err := s.decryptTOTPSecret(state.PendingCiphertext)
 	if err != nil || pendingSecret == "" || !totp.Verify(pendingSecret, req.Code, now) {
-		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_totp", "TOTP code is not valid")
+		rejectTOTP()
 		return
 	}
-	if err := svc.PromotePendingTOTPAndRevokeOtherSessions(r.Context(), session.AccountID, session.ID, state.PendingCiphertext, now); err != nil {
+	rotated, err := svc.PromotePendingTOTPAndRotateSessionSecure(r.Context(), session, state.PendingCiphertext, now, func(ctx context.Context, tx *sql.Tx) error {
+		if err := s.recordAuditTx(ctx, tx, r, session.AccountID, "totp_confirm", "account", session.AccountID, "{}"); err != nil {
+			return audit.WrapWriteError(err)
+		}
+		return nil
+	})
+	if err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
 		if errors.Is(err, identity.ErrInvalidCredential) || errors.Is(err, identity.ErrSessionInvalid) {
-			httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_totp", "TOTP code is not valid")
+			rejectTOTP()
 			return
 		}
 		writeDBError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "totp_confirm", "account", session.AccountID, "{}")
+	s.recordCredentialSuccess(r, ratelimit.ScopeTOTP, session.AccountID)
+	if s.httpPolicy != nil {
+		if _, err := SetCSRFCookie(w, s.cookieNames(r).CSRF, isSecureRequest(r), time.Now().UTC()); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+	}
+	http.SetCookie(w, s.sessionCookie(r, rotated.Token, rotated.Session.ExpiresAt))
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "enabled"})
 }
 
@@ -862,7 +980,9 @@ func (s *Server) createDirectory(w http.ResponseWriter, r *http.Request) {
 		writeMemberFilesError(w, r, err, "creating a directory requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "directory_create", "directory", result.RelativePath, "{}")
+	if !s.recordAuditMutation(w, r, "directory_create", "directory", result.RelativePath, "{}") {
+		return
+	}
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"relativePath": result.RelativePath})
 }
 
@@ -915,7 +1035,9 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request) {
 		writeMemberFilesError(w, r, err, "upload requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "upload_create", "upload", result.ID, "{}")
+	if !s.recordAuditMutation(w, r, "upload_create", "upload", result.ID, "{}") {
+		return
+	}
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"id": result.ID, "expiresAt": result.ExpiresAt, "partSize": result.PartSize})
 }
 
@@ -971,7 +1093,9 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		writeMemberFilesError(w, r, err, "upload requires current editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "upload_complete", "upload", r.PathValue("uploadId"), "{}")
+	if !s.recordAuditMutation(w, r, "upload_complete", "upload", r.PathValue("uploadId"), "{}") {
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"targetPath": result.RelativePath, "size": result.TotalBytes})
 }
 
@@ -1119,7 +1243,9 @@ func (s *Server) enqueueIndexJob(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "index_job_enqueue", "job", job.ID, "{}")
+	if !s.recordAuditMutation(w, r, "index_job_enqueue", "job", job.ID, "{}") {
+		return
+	}
 	spaceName, mountName := s.indexJobMountLabels(r, req.MountID)
 	httpx.WriteJSON(w, http.StatusCreated, jobResponse(job, "", "", "", "", spaceName, mountName))
 }
@@ -1170,7 +1296,9 @@ func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusConflict, "index_failed", err.Error())
 		return
 	}
-	_ = s.recordAudit(r, "index_job_run", "job", job.ID, "{}")
+	if !s.recordAuditMutation(w, r, "index_job_run", "job", job.ID, "{}") {
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
@@ -1332,7 +1460,13 @@ func (s *Server) createMount(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, r, err)
 		return
 	}
-	_, err = s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(r.Context(), `
 INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, index_enabled, status, mount_identity_json)
 VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
 `, mountID, req.SpaceID, mount.DisplayName, mount.RootPath, mount.Kind, mount.Mode, indexEnabled, string(identityJSON))
@@ -1344,7 +1478,15 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
 		writeDBError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "mount_create", "mount", mountID, "{}")
+	if err := s.recordAuditTx(r.Context(), tx, r, session.AccountID, "mount_create", "mount", mountID, "{}"); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	httpx.WriteJSON(w, http.StatusCreated, mountDTO{
 		ID: mountID, Name: mount.DisplayName, Space: mount.SpaceName, Mode: displayMountMode(mount.Mode),
 		Index: displayIndex(indexEnabled), Health: "active", Tone: "ok",
@@ -1417,16 +1559,17 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		value := int64(*req.MaxDownloads)
 		maxDownloads = &value
 	}
-	issued, err := s.memberShares.Create(r.Context(), access.Subject{AccountID: session.AccountID}, membershare.CreateRequest{
+	issued, err := s.memberShares.CreateSecure(r.Context(), access.Subject{AccountID: session.AccountID}, membershare.CreateRequest{
 		Locator:  access.Locator{SpaceID: req.SpaceID, MountID: req.MountID, Path: req.RelativePath},
 		Password: req.Password, AllowPreview: req.AllowPreview, AllowDownload: req.AllowDownload,
 		MaxVisits: maxVisits, MaxDownloads: maxDownloads, ExpiresAt: expiresAt,
+	}, func(ctx context.Context, tx *sql.Tx, issued membershare.IssuedShare) error {
+		return s.recordAuditTx(ctx, tx, r, session.AccountID, "share_create", "share", issued.ID, "{}")
 	})
 	if err != nil {
 		writeMemberShareError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "share_create", "share", issued.ID, "{}")
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"id":        issued.ID,
 		"publicId":  issued.PublicID,
@@ -1553,18 +1696,19 @@ func (s *Server) createAIToken(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	issued, err := s.tokens.Create(r.Context(), aitoken.CreateRequest{
+	issued, err := s.tokens.CreateSecure(r.Context(), aitoken.CreateRequest{
 		AccountID:  session.AccountID,
 		Name:       req.Name,
 		Scopes:     scopes,
 		Boundaries: boundaries,
 		ExpiresAt:  expiresAt,
+	}, func(ctx context.Context, tx *sql.Tx, token aitoken.Token) error {
+		return s.recordAuditTx(ctx, tx, r, session.AccountID, "ai_token_create", "ai_token", token.ID, "{}")
 	})
 	if err != nil {
 		writeTokenError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "ai_token_create", "ai_token", issued.Token.ID, "{}")
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"token": map[string]any{
 			"id":        issued.Token.ID,
@@ -1585,7 +1729,13 @@ func (s *Server) revokeAIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(r.Context(), `
 UPDATE ai_tokens
 SET revoked_at = ?, updated_at = ?
 WHERE id = ? AND account_id = ? AND revoked_at IS NULL
@@ -1603,7 +1753,15 @@ WHERE id = ? AND account_id = ? AND revoked_at IS NULL
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "AI token was not found")
 		return
 	}
-	_ = s.recordAudit(r, "ai_token_revoke", "ai_token", r.PathValue("tokenId"), "{}")
+	if err := s.recordAuditTx(r.Context(), tx, r, session.AccountID, "ai_token_revoke", "ai_token", r.PathValue("tokenId"), "{}"); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1624,6 +1782,10 @@ func (s *Server) createShareSession(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if decision := s.checkCredentialRateLimit(r, ratelimit.ScopeShareExchange, req.PublicID); !decision.Allowed {
+		writeRateLimited(w, r, decision)
+		return
+	}
 	result, err := share.NewService(db).Exchange(r.Context(), share.ExchangeRequest{
 		PublicID:       req.PublicID,
 		FragmentSecret: req.Secret,
@@ -1632,6 +1794,11 @@ func (s *Server) createShareSession(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var exchangeErr *share.ExchangeError
 		if errors.As(err, &exchangeErr) {
+			decision := s.recordCredentialFailure(r, ratelimit.ScopeShareExchange, req.PublicID)
+			if !decision.Allowed {
+				writeRateLimited(w, r, decision)
+				return
+			}
 			status := http.StatusUnauthorized
 			if exchangeErr.Code == share.CodeRateLimited {
 				status = http.StatusTooManyRequests
@@ -1642,11 +1809,18 @@ func (s *Server) createShareSession(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, r, err)
 		return
 	}
+	s.recordCredentialSuccess(r, ratelimit.ScopeShareExchange, req.PublicID)
 	if result.PasswordRequired {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "password_required"})
 		return
 	}
-	http.SetCookie(w, shareSessionCookie(r, result.SessionToken, result.ExpiresAt))
+	if s.httpPolicy != nil {
+		if _, err := SetCSRFCookie(w, s.cookieNames(r).ShareCSRF, isSecureRequest(r), time.Now().UTC()); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+	}
+	http.SetCookie(w, s.shareSessionCookie(r, result.SessionToken, result.ExpiresAt))
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"status":         "created",
 		"shareSessionId": result.SessionID,
@@ -1698,7 +1872,7 @@ func (s *Server) requireAuthenticatedSession(r *http.Request) (identity.Session,
 	if db == nil {
 		return identity.Session{}, identity.ErrSessionInvalid
 	}
-	cookie, err := r.Cookie(sessionCookieName)
+	cookie, err := r.Cookie(s.cookieNames(r).Session)
 	if err != nil {
 		return identity.Session{}, identity.ErrSessionInvalid
 	}
@@ -2222,9 +2396,9 @@ func isSecureRequest(r *http.Request) bool {
 	return r.TLS != nil
 }
 
-func sessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {
+func (s *Server) sessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {
 	return &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     s.cookieNames(r).Session,
 		Value:    token,
 		Path:     "/",
 		Expires:  expiresAt,
@@ -2234,9 +2408,9 @@ func sessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Coo
 	}
 }
 
-func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     s.cookieNames(r).Session,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
@@ -2244,13 +2418,14 @@ func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	})
+	ClearCSRFCookie(w, s.cookieNames(r).CSRF, isSecureRequest(r))
 }
 
-const shareSessionCookieName = "omnora_share_session"
+const shareSessionCookieName = "omnora_dev_share_session"
 
-func shareSessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {
+func (s *Server) shareSessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {
 	return &http.Cookie{
-		Name:  shareSessionCookieName,
+		Name:  s.cookieNames(r).ShareSession,
 		Value: token,
 		// Path "/" (rather than "/share/") so both the share portal SPA
 		// (/share/...) and the share portal REST API (/api/v1/share/...)
@@ -2682,15 +2857,59 @@ func (s *Server) recordAudit(r *http.Request, action, targetType, targetID, meta
 		TargetType:     targetType,
 		TargetID:       targetID,
 		MetadataJSON:   metadata,
+		RequestID:      httpx.RequestID(r.Context()),
 		IPHash:         audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainClientIP, clientIPFromRequest(r)),
 		UserAgentHash:  audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainUserAgent, r.UserAgent()),
 	}
 	recorder := s.auditRecorder
 	if err := recorder.Record(r.Context(), event); err != nil {
-		_ = recorder.MarkReadinessRisk(r.Context(), err)
-		return err
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		return audit.WrapWriteError(err)
+	}
+	_ = recorder.ClearReadinessRisk(r.Context())
+	return nil
+}
+
+// recordAuditTx is the database-only mutation path. The caller must have
+// completed authentication and authorization before opening tx; this helper
+// performs no database reads and therefore cannot accidentally re-enter the
+// same SQLite connection while the transaction is open.
+func (s *Server) recordAuditTx(ctx context.Context, tx *sql.Tx, r *http.Request, actorID, action, targetType, targetID, metadata string) error {
+	if tx == nil {
+		return errors.New("audit transaction is nil")
+	}
+	if err := s.auditRecorder.RecordTx(ctx, tx, audit.Event{
+		ActorAccountID: actorID,
+		RouteGroup:     domain.RouteGroupREST,
+		Action:         action,
+		TargetType:     targetType,
+		TargetID:       targetID,
+		MetadataJSON:   metadata,
+		Result:         "success",
+		RequestID:      httpx.RequestID(r.Context()),
+		IPHash:         audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainClientIP, clientIPFromRequest(r)),
+		UserAgentHash:  audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainUserAgent, r.UserAgent()),
+	}); err != nil {
+		return audit.WrapWriteError(err)
 	}
 	return nil
+}
+
+func (s *Server) markAuditRiskIfNeeded(ctx context.Context, err error) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, audit.ErrWriteFailed) {
+		_ = s.auditRecorder.MarkReadinessRisk(ctx, err)
+	}
+}
+
+func (s *Server) recordAuditMutation(w http.ResponseWriter, r *http.Request, action, targetType, targetID, metadata string) bool {
+	if err := s.recordAudit(r, action, targetType, targetID, metadata); err != nil {
+		writeDBError(w, r, err)
+		return false
+	}
+	return true
 }
 
 func displayMountMode(mode domain.MountMode) string {

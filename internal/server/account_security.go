@@ -1,14 +1,18 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
 
+	"omnora/internal/audit"
+	"omnora/internal/domain"
 	"omnora/internal/httpx"
 	"omnora/internal/identity"
+	"omnora/internal/ratelimit"
 	"omnora/internal/totp"
 )
 
@@ -61,23 +65,55 @@ func (s *Server) changeAccountPassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := identity.New(s.sqlDB(), identity.Options{}).ChangePassword(r.Context(), session.AccountID, req.CurrentPassword, req.NewPassword); err != nil {
+	if decision := s.checkCredentialRateLimit(r, ratelimit.ScopeTOTP, session.AccountID); !decision.Allowed {
+		writeRateLimited(w, r, decision)
+		return
+	}
+	svc := identity.New(s.sqlDB(), identity.Options{})
+	material, err := svc.LoadCredentialMaterial(r.Context(), session.AccountID)
+	if err != nil || !svc.VerifyPassword(req.CurrentPassword, material.PasswordHash) {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
+		return
+	}
+	newHash, err := svc.HashPassword(req.NewPassword)
+	if err != nil {
 		s.writeIdentityError(w, r, err)
 		return
 	}
-	if req.RevokeTokens {
-		now := time.Now().UTC().Format(time.RFC3339Nano)
-		_, _ = s.sqlDB().ExecContext(r.Context(), `
-UPDATE ai_tokens SET revoked_at = ?, updated_at = ? WHERE account_id = ? AND revoked_at IS NULL
-`, now, now, session.AccountID)
+	recorder := s.auditRecorder
+	rotated, err := svc.ChangePasswordSecure(r.Context(), identity.ChangePasswordSecureRequest{
+		Session:         session,
+		ExpectedOldHash: material.PasswordHash,
+		NewPasswordHash: newHash,
+		RevokeTokens:    req.RevokeTokens,
+		RevokeShares:    req.RevokeShares,
+	}, func(ctx context.Context, tx *sql.Tx) error {
+		if err := recorder.RecordTx(ctx, tx, audit.Event{
+			ActorAccountID: session.AccountID,
+			RouteGroup:     domain.RouteGroupREST,
+			Action:         "account_password_change",
+			TargetType:     "account",
+			TargetID:       session.AccountID,
+			MetadataJSON:   "{}",
+			IPHash:         audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainClientIP, clientIPFromRequest(r)),
+			UserAgentHash:  audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainUserAgent, r.UserAgent()),
+		}); err != nil {
+			return audit.WrapWriteError(err)
+		}
+		return nil
+	})
+	if err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		s.writeIdentityError(w, r, err)
+		return
 	}
-	if req.RevokeShares {
-		now := time.Now().UTC().Format(time.RFC3339Nano)
-		_, _ = s.sqlDB().ExecContext(r.Context(), `
-UPDATE shares SET revoked_at = ?, updated_at = ? WHERE creator_account_id = ? AND revoked_at IS NULL
-`, now, now, session.AccountID)
+	if s.httpPolicy != nil {
+		if _, err := SetCSRFCookie(w, s.cookieNames(r).CSRF, isSecureRequest(r), time.Now().UTC()); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
 	}
-	_ = s.recordAudit(r, "account_password_change", "account", session.AccountID, "{}")
+	http.SetCookie(w, s.sessionCookie(r, rotated.Token, rotated.Session.ExpiresAt))
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "updated"})
 }
 
@@ -123,17 +159,41 @@ func (s *Server) revokeAccountSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("sessionId")
-	if err := identity.New(s.sqlDB(), identity.Options{}).RevokeSessionByID(r.Context(), session.AccountID, sessionID); err != nil {
-		if errors.Is(err, identity.ErrSessionNotFound) {
-			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "session was not found")
-			return
-		}
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
 		writeDBError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "account_session_revoke", "session", sessionID, "{}")
+	defer tx.Rollback()
+	result, err := tx.ExecContext(r.Context(), `
+UPDATE identity_sessions
+SET revoked_at = ?
+WHERE id = ? AND account_id = ? AND revoked_at IS NULL
+`, time.Now().UTC().Format(time.RFC3339Nano), sessionID, session.AccountID)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if affected != 1 {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "session was not found")
+		return
+	}
+	if err := s.recordAuditTx(r.Context(), tx, r, session.AccountID, "account_session_revoke", "session", sessionID, "{}"); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	if sessionID == session.ID {
-		clearSessionCookie(w, r)
+		s.clearSessionCookie(w, r)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -142,6 +202,17 @@ func (s *Server) disableAccountTOTP(w http.ResponseWriter, r *http.Request) {
 	session, err := s.requireSession(r)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	var role string
+	if err := s.sqlDB().QueryRowContext(r.Context(), `
+SELECT role FROM accounts WHERE id = ? AND status = 'active'
+`, session.AccountID).Scan(&role); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if role == string(domain.AccountRoleAdmin) {
+		httpx.WriteError(w, r, http.StatusForbidden, "admin_totp_required", "administrator TOTP cannot be disabled")
 		return
 	}
 	var req struct {
@@ -160,6 +231,11 @@ SELECT password_hash FROM accounts WHERE id = ? AND status = 'active'
 		return
 	}
 	if !identity.New(s.sqlDB(), identity.Options{}).VerifyPassword(req.Password, passwordHash) {
+		decision := s.recordCredentialFailure(r, ratelimit.ScopeTOTP, session.AccountID)
+		if !decision.Allowed {
+			writeRateLimited(w, r, decision)
+			return
+		}
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "password is not valid")
 		return
 	}
@@ -170,15 +246,22 @@ SELECT password_hash FROM accounts WHERE id = ? AND status = 'active'
 	}
 	if account.Required {
 		if strings.TrimSpace(req.Code) == "" || account.TOTPSecret == "" || !totp.Verify(account.TOTPSecret, req.Code, time.Now().UTC()) {
+			decision := s.recordCredentialFailure(r, ratelimit.ScopeTOTP, session.AccountID)
+			if !decision.Allowed {
+				writeRateLimited(w, r, decision)
+				return
+			}
 			httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_totp", "a valid TOTP code is required to disable TOTP")
 			return
 		}
 	}
-	if err := identity.New(s.sqlDB(), identity.Options{}).DisableTOTP(r.Context(), session.AccountID); err != nil {
+	if err := identity.New(s.sqlDB(), identity.Options{}).DisableTOTPSecure(r.Context(), session.AccountID, func(ctx context.Context, tx *sql.Tx) error {
+		return s.recordAuditTx(ctx, tx, r, session.AccountID, "totp_disable", "account", session.AccountID, "{}")
+	}); err != nil {
 		writeDBError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "totp_disable", "account", session.AccountID, "{}")
+	s.recordCredentialSuccess(r, ratelimit.ScopeTOTP, session.AccountID)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "disabled"})
 }
 

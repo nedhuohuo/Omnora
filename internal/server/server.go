@@ -20,6 +20,7 @@ import (
 	"omnora/internal/config"
 	"omnora/internal/confirmation"
 	"omnora/internal/domain"
+	"omnora/internal/fileops"
 	"omnora/internal/httpx"
 	"omnora/internal/memberfiles"
 	"omnora/internal/membershare"
@@ -44,6 +45,8 @@ type Server struct {
 	memberShares    *membershare.Service
 	routesMu        sync.RWMutex
 	listeners       *ListenerManager
+	shutdownOnce    sync.Once
+	shutdownCh      chan struct{}
 }
 
 const EntryHTTP = "http"
@@ -71,9 +74,10 @@ func New(cfg config.Config, db *store.DB, opts ...Option) http.Handler {
 // registers routes.
 func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 	s := &Server{
-		cfg: cfg,
-		db:  db,
-		mux: http.NewServeMux(),
+		cfg:        cfg,
+		db:         db,
+		mux:        http.NewServeMux(),
+		shutdownCh: make(chan struct{}),
 	}
 	if db != nil {
 		s.guard = access.NewGuard(db.SQL())
@@ -82,7 +86,8 @@ func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 		s.transferTickets = transferticket.NewService(db.SQL(), s.tokens, s.guard)
 		s.auditRecorder = audit.NewRecorder(db.SQL())
 		s.memberShares = membershare.NewService(db.SQL(), s.guard, membershare.WithAITokenService(s.tokens))
-		s.memberFiles = memberfiles.NewService(db.SQL(), s.guard, catalog.NewService(db.SQL()), memberfiles.WithAITokenService(s.tokens), memberfiles.WithShareInvalidator(s.memberShares))
+		fileOpsCoordinator := fileops.NewCoordinator(db.SQL(), fileops.WithShareInvalidator(s.memberShares))
+		s.memberFiles = memberfiles.NewService(db.SQL(), s.guard, catalog.NewService(db.SQL()), memberfiles.WithAITokenService(s.tokens), memberfiles.WithShareInvalidator(s.memberShares), memberfiles.WithFileOpsCoordinator(fileOpsCoordinator))
 	}
 	s.authLimiter = ratelimit.New(ratelimit.Options{})
 	for _, opt := range opts {
@@ -117,6 +122,14 @@ func (s *Server) MarkReady(ctx context.Context) error {
 	if s.startupErr != nil {
 		return s.startupErr
 	}
+	if s.businessRoutesExposed() {
+		if err := s.cfg.ValidateBusinessExposure(); err != nil {
+			return err
+		}
+		if err := s.cfg.ValidateAuditHMACKey(); err != nil {
+			return err
+		}
+	}
 	if s.db == nil {
 		return nil
 	}
@@ -146,6 +159,41 @@ WHERE id = 1 AND state = 'normal'
 		return errors.New("recovery control is not in normal state")
 	}
 	return nil
+}
+
+// RequestShutdown asks the process entry point to begin a controlled exit.
+// A durable restore request must stop this process from continuing to serve
+// business routes against a database that an offline recovery worker is
+// about to replace wholesale; simply marking readiness false is not enough
+// because business routes are not otherwise gated on recovery state. Safe to
+// call multiple times or concurrently; only the first call has an effect.
+func (s *Server) RequestShutdown() {
+	if s == nil {
+		return
+	}
+	s.shutdownOnce.Do(func() {
+		close(s.shutdownCh)
+	})
+}
+
+// ShutdownRequested returns a channel that closes once RequestShutdown has
+// been called. The process entry point selects on it alongside OS signals so
+// it can drain listeners and exit the same way it would for SIGTERM.
+func (s *Server) ShutdownRequested() <-chan struct{} {
+	return s.shutdownCh
+}
+
+func (s *Server) businessRoutesExposed() bool {
+	for _, group := range domain.AllRouteGroups {
+		switch group {
+		case domain.RouteGroupMemberWeb, domain.RouteGroupAdminWeb, domain.RouteGroupShare,
+			domain.RouteGroupREST, domain.RouteGroupMCP, domain.RouteGroupOpenAPI:
+			if s.routeEnabled(group) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Handler returns the fully wrapped HTTP handler.
@@ -258,7 +306,7 @@ func (s *Server) gate(group domain.RouteGroup, next http.Handler) http.Handler {
 			httpx.WriteError(w, r, http.StatusNotFound, "route_group_disabled", "route group is not exposed")
 			return
 		}
-		next.ServeHTTP(w, r)
+		s.routeSecurity(routeRuleFor(r), next).ServeHTTP(w, r)
 	})
 }
 

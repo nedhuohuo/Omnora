@@ -25,7 +25,7 @@ func (s *Server) requireShareSession(r *http.Request) (share.SessionPrincipal, e
 	if requestCarriesShareSecretInURL(r) {
 		return share.SessionPrincipal{}, &share.ExchangeError{Code: share.CodeShareUnavailable}
 	}
-	cookie, err := r.Cookie(shareSessionCookieName)
+	cookie, err := r.Cookie(s.cookieNames(r).ShareSession)
 	if err != nil || cookie.Value == "" {
 		return share.SessionPrincipal{}, &share.ExchangeError{Code: share.CodeShareUnavailable}
 	}
@@ -152,7 +152,9 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		disposition = "inline"
 	}
 	w.Header().Set("Content-Disposition", disposition+"; filename="+strconv.Quote(path.Base(fullPath)))
-	_ = s.recordAudit(r, "share_download", "share", principal.ShareID, "{}")
+	if !s.recordAuditMutation(w, r, "share_download", "share", principal.ShareID, "{}") {
+		return
+	}
 	http.ServeContent(w, r, path.Base(fullPath), metadata.ModTime, file)
 }
 

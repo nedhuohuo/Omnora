@@ -69,7 +69,13 @@ func (s *Server) renameMount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(r.Context(), `
 UPDATE mounts
 SET display_name = ?, updated_at = ?
 WHERE id = ? AND status <> 'deleted'
@@ -87,8 +93,15 @@ WHERE id = ? AND status <> 'deleted'
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "mount was not found")
 		return
 	}
-
-	_ = s.recordAudit(r, "mount_rename", "mount", mount.ID, fmt.Sprintf(`{"from":%q,"to":%q}`, mount.DisplayName, displayName))
+	if err := s.recordAuditTx(r.Context(), tx, r, session.AccountID, "mount_rename", "mount", mount.ID, fmt.Sprintf(`{"from":%q,"to":%q}`, mount.DisplayName, displayName)); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, mountDTO{
 		ID: mount.ID, Name: displayName, Space: mount.SpaceName, Mode: displayMountMode(mount.Mode),
 		Index: displayIndex(mount.IndexEnabled), Health: mount.Status, Tone: toneForStatus(mount.Status),
@@ -152,7 +165,13 @@ func (s *Server) reverifyMount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(r.Context(), `
 UPDATE mounts
 SET status = 'active', root_path = ?, mount_identity_json = ?, updated_at = ?
 WHERE id = ? AND status <> 'deleted'
@@ -162,7 +181,15 @@ WHERE id = ? AND status <> 'deleted'
 		return
 	}
 
-	_ = s.recordAudit(r, "mount_reverify", "mount", mount.ID, "{}")
+	if err := s.recordAuditTx(r.Context(), tx, r, session.AccountID, "mount_reverify", "mount", mount.ID, "{}"); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		writeDBError(w, r, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, mountDTO{
 		ID: mount.ID, Name: mount.DisplayName, Space: mount.SpaceName, Mode: displayMountMode(mount.Mode),
 		Index: displayIndex(mount.IndexEnabled), Health: "active", Tone: "ok",
@@ -204,7 +231,14 @@ func (s *Server) deleteMount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.softDeleteMount(r.Context(), mount); err != nil {
+	metadata, _ := json.Marshal(map[string]any{
+		"deleteData":  false,
+		"dataDeleted": false,
+		"rootPath":    mount.RootPath,
+	})
+	if err := s.softDeleteMount(r.Context(), mount, func(ctx context.Context, tx *sql.Tx) error {
+		return s.recordAuditTx(ctx, tx, r, session.AccountID, "mount_delete", "mount", mount.ID, string(metadata))
+	}); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "mount was not found")
 			return
@@ -212,13 +246,6 @@ func (s *Server) deleteMount(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, r, err)
 		return
 	}
-
-	metadata, _ := json.Marshal(map[string]any{
-		"deleteData":  false,
-		"dataDeleted": false,
-		"rootPath":    mount.RootPath,
-	})
-	_ = s.recordAudit(r, "mount_delete", "mount", mount.ID, string(metadata))
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"id":          mount.ID,
 		"deleted":     true,
@@ -227,7 +254,7 @@ func (s *Server) deleteMount(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) softDeleteMount(ctx context.Context, mount adminMountRecord) error {
+func (s *Server) softDeleteMount(ctx context.Context, mount adminMountRecord, auditWriter func(context.Context, *sql.Tx) error) error {
 	tx, err := s.sqlDB().BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -285,6 +312,11 @@ WHERE status IN ('queued', 'running', 'paused')
   )
 `, now, now, `"mountId":"`+mount.ID+`"`, `"mount_id":"`+mount.ID+`"`); err != nil {
 		return err
+	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx); err != nil {
+			return err
+		}
 	}
 
 	return tx.Commit()
