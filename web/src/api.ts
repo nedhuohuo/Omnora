@@ -84,9 +84,26 @@ export type CreateShareResponse = {
   share?: unknown;
 };
 
+export type AiTokenScope =
+  | 'spaces:read'
+  | 'files:list'
+  | 'files:metadata'
+  | 'files:text'
+  | 'files:download_ticket'
+  | 'search:read'
+  | 'uploads:create'
+  | 'files:write'
+  | 'files:trash'
+  | 'trash:read'
+  | 'files:restore'
+  | 'files:purge'
+  | 'shares:read'
+  | 'shares:create'
+  | 'shares:revoke';
+
 export type CreateAiTokenPayload = {
   name: string;
-  scopes: string[];
+  scopes: AiTokenScope[];
   boundaries: Array<{
     spaceId: string;
     mountId: string;
@@ -96,9 +113,15 @@ export type CreateAiTokenPayload = {
 };
 
 export type CreateAiTokenResponse = {
-  token?: unknown;
-  secret?: string;
-  bearerToken?: string;
+  token: {
+    id: string;
+    publicId: string;
+    name: string;
+    scopes: AiTokenScope[];
+    expiresAt: string;
+  };
+  secret: string;
+  bearerToken: string;
 };
 
 export type CreateUploadPayload = {
@@ -258,7 +281,7 @@ export type AiTokenListItem = {
   accountEmail?: string;
   accountDisplayName?: string;
   name: string;
-  scopes: string[];
+  scopes: AiTokenScope[];
   boundaries?: AiTokenBoundary[];
   expiresAt?: string;
   createdAt?: string;

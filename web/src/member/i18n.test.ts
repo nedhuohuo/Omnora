@@ -55,6 +55,14 @@ describe('member locale', () => {
 
     expect(enKeys).toEqual(zhKeys);
   });
+
+  it('describes MCP as standard Streamable HTTP without claiming OAuth support', () => {
+    expect(localeMessages['zh-CN'].tokenMcpStatusDetail).toContain('Streamable HTTP');
+    expect(localeMessages['zh-CN'].routeDescMcp).toContain('OAuth');
+    expect(localeMessages['zh-CN'].tokenMcpAuth).toContain('认证');
+    expect(localeMessages['en-US'].tokenMcpStatusDetail).toContain('OAuth is not implemented');
+    expect(localeMessages['en-US'].routeDescOpenapi).toContain('Raw OpenAPI 3.1 YAML');
+  });
 });
 
 describe('directory response formatting', () => {

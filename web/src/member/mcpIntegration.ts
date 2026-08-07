@@ -1,0 +1,102 @@
+import type { AiTokenScope } from '../api';
+
+/** The transport contract exposed by the server and MCP Inspector. */
+export const MCP_PATH = '/mcp' as const;
+export const MCP_PROTOCOL_VERSION = '2026-07-28' as const;
+export const MCP_TRANSPORT = 'Streamable HTTP' as const;
+export const MCP_ERA = 'modern' as const;
+export const MCP_OAUTH_STATUS = 'NOT IMPLEMENTED' as const;
+
+/**
+ * Keep this order in sync with the server's allowlist. It is also the order
+ * used when displaying scopes in the token creation form.
+ */
+export const MCP_SCOPES = [
+  'spaces:read',
+  'files:list',
+  'files:metadata',
+  'files:text',
+  'files:download_ticket',
+  'search:read',
+  'uploads:create',
+  'files:write',
+  'files:trash',
+  'trash:read',
+  'files:restore',
+  'files:purge',
+  'shares:read',
+  'shares:create',
+  'shares:revoke',
+] as const satisfies readonly AiTokenScope[];
+
+export const MCP_PRESETS = {
+  readOnly: MCP_SCOPES.slice(0, 6),
+  fileManagement: [
+    ...MCP_SCOPES.slice(0, 6),
+    'uploads:create', 'files:write', 'files:trash', 'trash:read', 'files:restore',
+  ],
+  shareManagement: [
+    ...MCP_SCOPES.slice(0, 6),
+    'shares:read', 'shares:create', 'shares:revoke',
+  ],
+  // Deliberately separate and opt-in. This scope is not implied by any
+  // read, file-management, or share-management preset.
+  permanentDelete: ['files:purge'],
+} as const satisfies Record<string, readonly AiTokenScope[]>;
+
+export type McpPreset = keyof typeof MCP_PRESETS;
+
+export type InspectorConnection = {
+  endpoint: string;
+  transport: typeof MCP_TRANSPORT;
+  protocolVersion: typeof MCP_PROTOCOL_VERSION;
+  era: typeof MCP_ERA;
+  authorization: string;
+  oauth: typeof MCP_OAUTH_STATUS;
+  text: string;
+};
+
+type RouteGroupLike = { id: string; exposed: boolean; entry?: string; risk?: string; tone?: string };
+
+function currentOrigin() {
+  return typeof globalThis.location?.origin === 'string' ? globalThis.location.origin : '';
+}
+
+export function getMcpEndpoint(origin = currentOrigin()) {
+  const normalized = origin.trim().replace(/\/+$/, '');
+  return `${normalized}${MCP_PATH}`;
+}
+
+export function buildInspectorConnection(origin: string, bearerToken: string): InspectorConnection {
+  const endpoint = getMcpEndpoint(origin);
+  const authorization = `Bearer ${bearerToken}`;
+  const text = [
+    `URL: ${endpoint}`,
+    `Transport: ${MCP_TRANSPORT}`,
+    `Protocol: ${MCP_PROTOCOL_VERSION}`,
+    `Mode: ${MCP_ERA}`,
+    `Authorization: ${authorization}`,
+    `OAuth: ${MCP_OAUTH_STATUS}`,
+  ].join('\n');
+  return {
+    endpoint,
+    transport: MCP_TRANSPORT,
+    protocolVersion: MCP_PROTOCOL_VERSION,
+    era: MCP_ERA,
+    authorization,
+    oauth: MCP_OAUTH_STATUS,
+    text,
+  };
+}
+
+export function getMcpRouteState(
+  bootstrap: { routeGroups?: readonly RouteGroupLike[] } | null | undefined,
+  origin = currentOrigin(),
+) {
+  const group = bootstrap?.routeGroups?.find((candidate) => candidate.id === 'mcp');
+  return { exposed: group?.exposed === true, endpoint: getMcpEndpoint(origin) };
+}
+
+// Readable aliases for consumers that prefer noun-oriented names.
+export const mcpEndpoint = getMcpEndpoint;
+export const inspectorConnectionText = (origin: string, bearerToken: string) => buildInspectorConnection(origin, bearerToken).text;

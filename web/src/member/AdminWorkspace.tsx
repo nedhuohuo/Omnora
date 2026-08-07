@@ -25,6 +25,8 @@ import {
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
 import { readableLabel } from './displayLabels';
+import { copyText } from './clipboard';
+import { getMcpEndpoint } from './mcpIntegration';
 import {
   AdminBackupsPanel,
   AdminOverviewPanel,
@@ -140,6 +142,13 @@ function routeGroupDetail(id: string, text: typeof localeMessages[MemberLocale])
   return details[id] ?? '';
 }
 
+function routeGroupEntry(group: AdminRouteGroupItem) {
+  const origin = globalThis.location?.origin ?? '';
+  if (group.id === 'mcp') return getMcpEndpoint(origin);
+  if (group.id === 'openapi') return `${origin.replace(/\/+$/, '')}/openapi/omnora.v1.yaml`;
+  return group.entry;
+}
+
 function auditActorLabel(event: AuditEventPayload) {
   const label = readableLabel(event.actorLabel);
   const displayName = readableLabel(event.actorDisplayName);
@@ -184,6 +193,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
   const [selectedMountId, setSelectedMountId] = useState('');
   const [loading, setLoading] = useState(false);
   const [pendingGroupId, setPendingGroupId] = useState('');
+  const [copiedRouteGroupId, setCopiedRouteGroupId] = useState('');
   const [error, setError] = useState('');
   const [operationComplete, setOperationComplete] = useState(false);
   const [allowedRoots, setAllowedRoots] = useState<HostDirectoryRoot[]>([]);
@@ -314,6 +324,12 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     setOperationComplete(false);
     setDeleteTarget(mount);
+  }
+
+  function copyRouteEntry(group: AdminRouteGroupItem) {
+    void copyText(routeGroupEntry(group)).then((ok) => {
+      setCopiedRouteGroupId(ok ? group.id : '');
+    });
   }
 
   async function onRenameMount(event: FormEvent<HTMLFormElement>) {
@@ -573,7 +589,13 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
                       {group.exposed ? text.routeExposed : text.routeClosed}
                     </span>
                   </td>
-                  <td>{group.entry}</td>
+                  <td>
+                    <code className="member-route-entry">{routeGroupEntry(group)}</code>
+                    {(group.id === 'mcp' || group.id === 'openapi') && (
+                      <button className="member-route-copy" type="button" onClick={() => copyRouteEntry(group)}>{text.routeCopyEntry}</button>
+                    )}
+                    {copiedRouteGroupId === group.id && <small>{text.routeCopied}</small>}
+                  </td>
                   <td>{group.risk}</td>
                   <td>
                     {(!group.exposed || (group.id !== 'member_web' && group.id !== 'admin_web')) && (
@@ -586,6 +608,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
                         {group.exposed ? text.routeDisable : text.routeEnable}
                       </button>
                     )}
+                    {group.exposed && <small className="member-route-next-request">{text.routeDisableNextRequest}</small>}
                   </td>
                 </tr>
               ))}
