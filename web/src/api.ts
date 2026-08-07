@@ -24,6 +24,8 @@ export type SessionPayload = {
   userId?: string;
   expiresAt?: string;
   isAdmin?: boolean;
+  purpose?: 'full' | 'totp_enrollment';
+  requiresTotpEnrollment?: boolean;
 };
 
 export type InitializePayload = {
@@ -36,7 +38,18 @@ export type InitializePayload = {
 export type LoginPayload = {
   login: string;
   password: string;
+  newPassword?: string;
   totpCode?: string;
+};
+
+export type ReauthenticatePayload = {
+  password?: string;
+  totpCode?: string;
+};
+
+export type ReauthenticateResponse = {
+  status?: 'reauthenticated';
+  reauthenticatedUntil?: string;
 };
 
 export type AdminMountPayload = {
@@ -415,6 +428,18 @@ export type BackupPayload = {
   notes?: string;
 };
 
+export type RecoveryControlPayload = {
+  state?: string;
+  ready?: boolean;
+  requestId?: string;
+  reasonCode?: string;
+  cleanupPending?: boolean;
+  sourceSchemaVersion?: number | null;
+  requestedAt?: string;
+  completedAt?: string;
+  updatedAt?: string;
+};
+
 export type TrashItemPayload = {
   id: string;
   originalPath: string;
@@ -451,16 +476,39 @@ async function readJsonResponse(response: Response): Promise<unknown> {
   }
 }
 
-async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
+export type APIAuthContext = 'account' | 'share';
+
+export type APIRequestInit = RequestInit & {
+  authContext?: APIAuthContext;
+};
+
+export function isReauthenticationRequired(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 403) {
+    return false;
+  }
+  const body = error.body as { error?: { code?: string } } | undefined;
+  return body?.error?.code === 'reauthentication_required';
+}
+
+export async function requestJson<T>(path: string, init: APIRequestInit = {}): Promise<T> {
+  const { authContext = 'account', ...requestInit } = init;
+  const headers = new Headers(requestInit.headers);
   headers.set('Accept', 'application/json');
 
-  if (init.body !== undefined && !headers.has('Content-Type')) {
+  const method = (requestInit.method ?? 'GET').toUpperCase();
+  if (!['GET', 'HEAD', 'OPTIONS', 'TRACE'].includes(method)) {
+    const csrf = readCsrfCookie(authContext);
+    if (csrf) {
+      headers.set('X-CSRF-Token', csrf);
+    }
+  }
+
+  if (requestInit.body !== undefined && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
 
   const response = await fetch(path, {
-    ...init,
+    ...requestInit,
     credentials: 'same-origin',
     headers,
   });
@@ -495,6 +543,14 @@ export function getSession(signal?: AbortSignal) {
 
 export function login(payload: LoginPayload, signal?: AbortSignal) {
   return requestJson<SessionPayload>('/api/v1/auth/session', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function reauthenticate(payload: ReauthenticatePayload, signal?: AbortSignal) {
+  return requestJson<ReauthenticateResponse>('/api/v1/account/reauthenticate', {
     method: 'POST',
     body: JSON.stringify(payload),
     signal,
@@ -709,16 +765,41 @@ export function getUpload(uploadId: string, signal?: AbortSignal) {
 }
 
 export async function uploadPart(uploadId: string, partNumber: number, chunk: Blob | string, signal?: AbortSignal) {
+  const headers = new Headers();
+  const csrf = readCsrfCookie('account');
+  if (csrf) {
+    headers.set('X-CSRF-Token', csrf);
+  }
   const response = await fetch(`/api/v1/uploads/${encodeURIComponent(uploadId)}/parts/${partNumber}`, {
     method: 'PUT',
     body: chunk,
     credentials: 'same-origin',
+    headers,
     signal,
   });
   const body = await readJsonResponse(response);
   if (!response.ok) {
     throw new ApiError(`Request failed with ${response.status}`, response.status, body);
   }
+}
+
+function readCsrfCookie(authContext: APIAuthContext = 'account'): string | undefined {
+  if (typeof document === 'undefined') {
+    return undefined;
+  }
+  // Never infer share CSRF from path prefixes: /api/v1/shares must use the
+  // account cookie pair, while only the share portal passes authContext:'share'.
+  const names = authContext === 'share'
+    ? ['__Host-omnora_share_csrf', 'omnora_dev_share_csrf']
+    : ['__Host-omnora_csrf', 'omnora_dev_csrf'];
+  for (const name of names) {
+    const prefix = `${name}=`;
+    const item = document.cookie.split(';').map((value) => value.trim()).find((value) => value.startsWith(prefix));
+    if (item) {
+      return decodeURIComponent(item.slice(prefix.length));
+    }
+  }
+  return undefined;
 }
 
 export function completeUpload(uploadId: string, signal?: AbortSignal) {
@@ -1103,6 +1184,10 @@ export function listAdminBackups(signal?: AbortSignal) {
   return requestJson<{ items?: BackupPayload[] }>('/api/v1/admin/backups', { signal });
 }
 
+export function getAdminRecovery(signal?: AbortSignal) {
+  return requestJson<RecoveryControlPayload>('/api/v1/admin/recovery', { signal });
+}
+
 export function createAdminBackup(signal?: AbortSignal) {
   return requestJson<BackupPayload>('/api/v1/admin/backups', {
     method: 'POST',
@@ -1111,7 +1196,7 @@ export function createAdminBackup(signal?: AbortSignal) {
 }
 
 export function restoreAdminBackup(backupId: string, confirmPhrase: string, signal?: AbortSignal) {
-  return requestJson<{ status: string; backupId: string; notes?: string }>(`/api/v1/admin/backups/${encodeURIComponent(backupId)}/restore`, {
+  return requestJson<{ status: string; requestId?: string; state?: string; backupId: string; notes?: string }>(`/api/v1/admin/backups/${encodeURIComponent(backupId)}/restore`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ confirmPhrase }),

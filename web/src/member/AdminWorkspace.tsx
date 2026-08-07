@@ -24,6 +24,7 @@ import {
   updateAdminRouteGroup,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
+import { useRecentReauth } from './RecentReauthProvider';
 import { readableLabel } from './displayLabels';
 import { copyText } from './clipboard';
 import { getMcpEndpoint } from './mcpIntegration';
@@ -184,6 +185,7 @@ function hostDirectoryRoots(response: HostDirectorySuggestions): HostDirectoryRo
 
 export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [spaces, setSpaces] = useState<AdminSpacePayload[]>([]);
   const [mounts, setMounts] = useState<AdminMountListItem[]>([]);
   const [jobs, setJobs] = useState<JobPayload[]>([]);
@@ -303,7 +305,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     setOperationComplete(false);
     try {
-      await registerAdminMount(mountForm);
+      await runSensitive(() => registerAdminMount(mountForm));
       setMountForm((current) => ({ ...current, displayName: '', rootPath: defaultRootForKind(current.kind, allowedRoots) }));
       setOperationComplete(true);
       await loadMountData();
@@ -339,7 +341,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     setOperationComplete(false);
     try {
-      await renameAdminMount(renameTarget.id, renameValue.trim());
+      await runSensitive(() => renameAdminMount(renameTarget.id, renameValue.trim()));
       setRenameTarget(null);
       setRenameValue('');
       setOperationComplete(true);
@@ -357,7 +359,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     setOperationComplete(false);
     try {
-      await deleteAdminMount(deleteTarget.id);
+      await runSensitive(() => deleteAdminMount(deleteTarget.id));
       setDeleteTarget(null);
       setOperationComplete(true);
       await loadMountData();
@@ -373,7 +375,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     setOperationComplete(false);
     try {
-      await reverifyAdminMount(mount.id);
+      await runSensitive(() => reverifyAdminMount(mount.id));
       setOperationComplete(true);
       await loadMountData();
     } catch (caught) {
@@ -389,7 +391,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     setOperationComplete(false);
     try {
-      await enqueueIndexJob(selectedMountId);
+      await runSensitive(() => enqueueIndexJob(selectedMountId));
       setOperationComplete(true);
       await loadJobs();
     } catch (caught) {
@@ -403,7 +405,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     setOperationComplete(false);
     try {
-      await runIndexJob(jobId);
+      await runSensitive(() => runIndexJob(jobId));
       setOperationComplete(true);
       await loadJobs();
     } catch (caught) {
@@ -422,7 +424,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     setOperationComplete(false);
     try {
-      const updated = await updateAdminRouteGroup(group.id, nextExposed);
+      const updated = await runSensitive(() => updateAdminRouteGroup(group.id, nextExposed));
       setRouteGroups((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       setOperationComplete(true);
     } catch (caught) {

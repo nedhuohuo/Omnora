@@ -15,6 +15,7 @@ import {
   updatePreferences,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
+import { useRecentReauth } from './RecentReauthProvider';
 
 function describeError(error: unknown) {
   if (error instanceof ApiError) {
@@ -57,6 +58,7 @@ export function applyThemePreference(theme: ThemePreference) {
 
 export default function MemberAccountPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [account, setAccount] = useState<AccountPayload | null>(null);
   const [sessions, setSessions] = useState<AccountSessionPayload[]>([]);
   const [theme, setTheme] = useState<ThemePreference>('system');
@@ -110,12 +112,12 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
     }
     setPasswordSaving(true);
     try {
-      await updateAccountPassword({
+      await runSensitive(() => updateAccountPassword({
         currentPassword: passwordForm.current,
         newPassword: passwordForm.next,
         revokeTokens: passwordForm.revokeTokens,
         revokeShares: passwordForm.revokeShares,
-      });
+      }));
       setPasswordForm({ current: '', next: '', confirm: '', revokeTokens: false, revokeShares: false });
       setNotice(text.accountPasswordUpdated);
       await load();
@@ -130,7 +132,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
     setTotpError('');
     setTotpBusy(true);
     try {
-      const response = await setupTOTP();
+      const response = await runSensitive(() => setupTOTP());
       setTotpSetup({ secret: response.secret ?? '', otpauthUri: response.otpauthUri });
     } catch (caught) {
       setTotpError(describeError(caught));
@@ -144,7 +146,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
     setTotpBusy(true);
     setTotpError('');
     try {
-      await confirmTOTP(totpCode.trim());
+      await runSensitive(() => confirmTOTP(totpCode.trim()));
       setTotpSetup(null);
       setTotpCode('');
       await load();
@@ -160,7 +162,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
     setTotpBusy(true);
     setTotpError('');
     try {
-      await disableTOTP(disablePassword, disableCode.trim());
+      await runSensitive(() => disableTOTP(disablePassword, disableCode.trim()));
       setDisableOpen(false);
       setDisablePassword('');
       setDisableCode('');
@@ -176,7 +178,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
     setLoading(true);
     setError('');
     try {
-      await deleteSession(session.id);
+      await runSensitive(() => deleteSession(session.id));
       await load();
     } catch (caught) {
       setError(describeError(caught));

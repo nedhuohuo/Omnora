@@ -27,6 +27,8 @@ import {
   renameObject,
   restoreTrashItem,
   searchSpace,
+  setupTOTP,
+  confirmTOTP,
   uploadPart,
   moveObject,
   type InitializePayload,
@@ -37,6 +39,8 @@ import AdminWorkspace, { type AdminTab } from './AdminWorkspace';
 import MemberSharesPanel, { ShareCreateModal, ShareCreatedResult } from './MemberSharesPanel';
 import MemberTokensPanel from './MemberTokensPanel';
 import MemberAccountPanel, { applyThemePreference } from './MemberAccountPanel';
+import { RecentReauthProvider } from './RecentReauthProvider';
+import { stateForSession } from './sessionFlow';
 import { formatDirectoryChildren, mountDeletePolicy, mountSupportsTrash, type MemberDirectoryEntry, type MemberMount, type MemberSearchResult, type MemberSpace, type TransferItem } from './types';
 import { resumedUploadProgress, uploadStorageKey } from './uploadQueue';
 import { createClientId } from './clientId';
@@ -49,7 +53,7 @@ type AdminNavGroup = 'overview' | 'identity-space' | 'storage-search' | 'access-
 type AdminNavItem = { id: AdminTab; label: string };
 type AdminNavGroupItem = { id: AdminNavGroup; label: string; tabs: AdminNavItem[] };
 
-type SessionState = 'checking' | 'signed-out' | 'ready';
+type SessionState = 'checking' | 'signed-out' | 'enrollment' | 'ready';
 type ViewMode = 'list' | 'grid';
 
 const defaultAdminGroupTabs: Record<AdminNavGroup, AdminTab> = {
@@ -128,7 +132,9 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const [isAdmin, setIsAdmin] = useState(false);
   const [activeTab, setActiveTab] = useState<MemberTab | AdminTab>(entry === 'admin' ? 'overview' : 'files');
   const [adminGroupTabs, setAdminGroupTabs] = useState<Record<AdminNavGroup, AdminTab>>(defaultAdminGroupTabs);
-  const [loginForm, setLoginForm] = useState({ login: '', password: '', totpCode: '' });
+  const [loginForm, setLoginForm] = useState({ login: '', password: '', newPassword: '', totpCode: '' });
+  const [enrollmentSetup, setEnrollmentSetup] = useState<{ secret: string; otpauthUri?: string } | null>(null);
+  const [enrollmentCode, setEnrollmentCode] = useState('');
   const [setupMode, setSetupMode] = useState(false);
   const [initializationAvailable, setInitializationAvailable] = useState(false);
   const [setupForm, setSetupForm] = useState<InitializePayload>({ token: '', email: '', displayName: '', password: '' });
@@ -256,8 +262,11 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       try {
         const session = await getSession();
         setIsAdmin(session.isAdmin === true);
-        setSessionState('ready');
-        await loadSpaces();
+        const nextState = stateForSession(session);
+        setSessionState(nextState);
+        if (nextState === 'ready') {
+          await loadSpaces();
+        }
         try {
           const preferences = await getPreferences();
           applyThemePreference(preferences.theme);
@@ -340,10 +349,48 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     setLoading(true);
     setError('');
     try {
-      const session = await login({ login: loginForm.login, password: loginForm.password, totpCode: loginForm.totpCode || undefined });
+      const session = await login({ login: loginForm.login, password: loginForm.password, newPassword: loginForm.newPassword || undefined, totpCode: loginForm.totpCode || undefined });
       setIsAdmin(session.isAdmin === true);
-      setSessionState('ready');
-      await loadSpaces();
+      const nextState = stateForSession(session);
+      setSessionState(nextState);
+      if (nextState === 'ready') {
+        await loadSpaces();
+      }
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onStartEnrollment() {
+    setLoading(true);
+    setError('');
+    try {
+      const response = await setupTOTP();
+      setEnrollmentSetup({ secret: response.secret ?? '', otpauthUri: response.otpauthUri });
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onConfirmEnrollment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      await confirmTOTP(enrollmentCode.trim());
+      const session = await getSession();
+      setIsAdmin(session.isAdmin === true);
+      setEnrollmentSetup(null);
+      setEnrollmentCode('');
+      const nextState = stateForSession(session);
+      setSessionState(nextState);
+      if (nextState === 'ready') {
+        await loadSpaces();
+      }
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -361,7 +408,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       setSetupNotice(text.setupComplete);
       setSetupMode(false);
       setInitializationAvailable(false);
-      setLoginForm({ login: setupForm.email, password: '', totpCode: '' });
+      setLoginForm({ login: setupForm.email, password: '', newPassword: '', totpCode: '' });
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -796,6 +843,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             <form onSubmit={onLogin}>
               <label>{text.email}<input value={loginForm.login} onChange={(event) => setLoginForm({ ...loginForm, login: event.target.value })} autoComplete="username" required /></label>
               <label>{text.password}<input type="password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} autoComplete="current-password" required /></label>
+              <label>{text.accountNewPassword}<input type="password" value={loginForm.newPassword} onChange={(event) => setLoginForm({ ...loginForm, newPassword: event.target.value })} autoComplete="new-password" /></label>
               {setupNotice && <p className="member-readonly">{setupNotice}</p>}
               {error && <p className="member-error">{text.error}: {error}</p>}
               <button className="member-primary" type="submit" disabled={loading}>{text.signInAction}</button>
@@ -803,6 +851,29 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             </form>
           )}
           <div className="member-language-auth"><button type="button" onClick={() => setLocale('zh-CN')} aria-pressed={locale === 'zh-CN'}>中文</button><button type="button" onClick={() => setLocale('en-US')} aria-pressed={locale === 'en-US'}>EN</button></div>
+        </section>
+      </main>
+    );
+  }
+
+  if (sessionState === 'enrollment') {
+    return (
+      <main className="member-auth-state">
+        <section className="member-login-panel">
+          <div className="member-brand"><span>O</span>Omnora</div>
+          <h1>{text.accountTotpSection}</h1>
+          <p>{text.accountTotpSetupHint}</p>
+          {!enrollmentSetup ? (
+            <button className="member-primary" type="button" onClick={() => void onStartEnrollment()} disabled={loading}>{text.accountTotpSetup}</button>
+          ) : (
+            <form onSubmit={onConfirmEnrollment}>
+              <label>{text.accountTotpSecret}<input readOnly value={enrollmentSetup.secret} /></label>
+              <label>{text.accountTotpCode}<input value={enrollmentCode} onChange={(event) => setEnrollmentCode(event.target.value)} inputMode="numeric" autoComplete="one-time-code" required /></label>
+              {error && <p className="member-error">{text.error}: {error}</p>}
+              <button className="member-primary" type="submit" disabled={loading}>{text.accountTotpConfirm}</button>
+            </form>
+          )}
+          <button className="member-secondary-action" type="button" onClick={() => void onLogout()}>{text.signOut}</button>
         </section>
       </main>
     );
@@ -849,6 +920,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const activeAdminGroup = activeAdminTab ? adminNavigation.find((group) => group.id === adminGroupForTab(activeAdminTab)) ?? adminNavigation[0] : null;
 
   return (
+    <RecentReauthProvider locale={locale}>
     <main className="member-app">
       <header className="member-topbar">
         <div className="member-brand"><span>O</span>Omnora</div>
@@ -1019,5 +1091,6 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
 
       {shareCreatedResult && <ShareCreatedResult text={text} result={shareCreatedResult} onClose={() => setShareCreatedResult(null)} />}
     </main>
+    </RecentReauthProvider>
   );
 }

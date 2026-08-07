@@ -32,6 +32,7 @@ import {
   revokeAdminUserSessions,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
+import { useRecentReauth } from './RecentReauthProvider';
 import { joinReadableLabels, readableLabel } from './displayLabels';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
@@ -207,6 +208,7 @@ export function AdminOverviewPanel({ locale }: { locale: MemberLocale }) {
 
 export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [users, setUsers] = useState<AdminUserPayload[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -261,7 +263,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     setCreating(true);
     setError('');
     try {
-      await createAdminUser(form);
+      await runSensitive(() => createAdminUser(form));
       setForm({ email: '', displayName: '', password: '', role: 'member' });
       setFormOpen(false);
       await load();
@@ -277,9 +279,9 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     setError('');
     try {
       if (user.status === 'active') {
-        await disableAdminUser(user.id);
+        await runSensitive(() => disableAdminUser(user.id));
       } else {
-        await enableAdminUser(user.id);
+        await runSensitive(() => enableAdminUser(user.id));
       }
       await load();
     } catch (caught) {
@@ -292,7 +294,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     setLoading(true);
     setError('');
     try {
-      await revokeAdminUserSessions(user.id);
+      await runSensitive(() => revokeAdminUserSessions(user.id));
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -350,6 +352,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
 
 export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [spaces, setSpaces] = useState<AdminSpacePayload[]>([]);
   const [selectedSpaceId, setSelectedSpaceId] = useState('');
   const [members, setMembers] = useState<AdminSpaceMemberPayload[]>([]);
@@ -406,7 +409,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
     setCreating(true);
     setError('');
     try {
-      await createAdminSpace({ name: spaceName.trim() });
+      await runSensitive(() => createAdminSpace({ name: spaceName.trim() }));
       setSpaceName('');
       await loadSpaces();
     } catch (caught) {
@@ -434,7 +437,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
     setLoading(true);
     setError('');
     try {
-      await renameAdminSpace(renameTarget.id, renameValue.trim());
+      await runSensitive(() => renameAdminSpace(renameTarget.id, renameValue.trim()));
       setRenameTarget(null);
       setRenameValue('');
       await loadSpaces();
@@ -451,7 +454,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
     setLoading(true);
     setError('');
     try {
-      await deleteAdminSpace(deleteTarget.id, deleteConfirmValue);
+      await runSensitive(() => deleteAdminSpace(deleteTarget.id, deleteConfirmValue));
       setDeleteTarget(null);
       setDeleteConfirmValue('');
       await loadSpaces();
@@ -468,7 +471,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
     setLoading(true);
     setError('');
     try {
-      await putSpaceMember(selectedSpaceId, memberAccountId.trim(), memberPermission);
+      await runSensitive(() => putSpaceMember(selectedSpaceId, memberAccountId.trim(), memberPermission));
       setMemberAccountId('');
       await loadMembers(selectedSpaceId);
     } catch (caught) {
@@ -481,7 +484,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
   async function onUpdatePermission(accountId: string, permission: SpaceMemberRole) {
     setError('');
     try {
-      await putSpaceMember(selectedSpaceId, accountId, permission);
+      await runSensitive(() => putSpaceMember(selectedSpaceId, accountId, permission));
       await loadMembers(selectedSpaceId);
     } catch (caught) {
       setError(describeError(caught));
@@ -491,7 +494,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
   async function onRemoveMember(accountId: string) {
     setError('');
     try {
-      await removeSpaceMember(selectedSpaceId, accountId);
+      await runSensitive(() => removeSpaceMember(selectedSpaceId, accountId));
       await loadMembers(selectedSpaceId);
     } catch (caught) {
       setError(describeError(caught));
@@ -599,6 +602,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
 
 export function AdminShareGovernancePanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [shares, setShares] = useState<SharePayload[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -624,7 +628,7 @@ export function AdminShareGovernancePanel({ locale }: { locale: MemberLocale }) 
     setLoading(true);
     setError('');
     try {
-      await revokeAdminShare(share.id);
+      await runSensitive(() => revokeAdminShare(share.id));
       await load();
     } catch (caught) {
       setError(describeError(caught));
@@ -665,6 +669,7 @@ export function AdminShareGovernancePanel({ locale }: { locale: MemberLocale }) 
 
 export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [tokens, setTokens] = useState<AiTokenListItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -690,7 +695,7 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
     setLoading(true);
     setError('');
     try {
-      await deleteAdminAiToken(token.id);
+      await runSensitive(() => deleteAdminAiToken(token.id));
       await load();
     } catch (caught) {
       setError(describeError(caught));
@@ -730,6 +735,7 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
 
 export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [backups, setBackups] = useState<BackupPayload[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -761,7 +767,7 @@ export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
     setError('');
     setNotice('');
     try {
-      await createAdminBackup();
+      await runSensitive(() => createAdminBackup());
       await load();
     } catch (caught) {
       setError(describeError(caught));
@@ -776,8 +782,8 @@ export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
     setError('');
     setNotice('');
     try {
-      await restoreAdminBackup(restoreTarget.id, confirmPhrase.trim());
-      setNotice(text.backupRestored);
+      const accepted = await runSensitive(() => restoreAdminBackup(restoreTarget.id, confirmPhrase.trim()));
+      setNotice(accepted.requestId ? `${text.backupRestored} · ${accepted.state ?? 'preparing'} · ${accepted.requestId}` : text.backupRestored);
       setRestoreTarget(null);
       setConfirmPhrase('');
       await load();

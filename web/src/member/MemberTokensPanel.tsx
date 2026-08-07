@@ -12,6 +12,7 @@ import {
   listSpaces,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
+import { useRecentReauth } from './RecentReauthProvider';
 import type { MemberMount, MemberSpace } from './types';
 import { createClientId } from './clientId';
 import { copyText } from './clipboard';
@@ -67,6 +68,7 @@ function boundarySummary(boundary: AiTokenBoundary, spaces: MemberSpace[], mount
 
 export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [tokens, setTokens] = useState<AiTokenListItem[]>([]);
   const [spaces, setSpaces] = useState<MemberSpace[]>([]);
   const [mountsBySpace, setMountsBySpace] = useState<Record<string, MemberMount[]>>({});
@@ -164,7 +166,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
         ...MCP_PRESETS[preset],
         ...(permanentDelete ? MCP_PRESETS.permanentDelete : []),
       ];
-      const result = await createAiToken({
+      const result = await runSensitive(() => createAiToken({
         name: name.trim(),
         scopes,
         boundaries: validBoundaries.map((boundary) => ({
@@ -173,7 +175,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
           path: boundary.path.trim() || '.',
         })),
         expiresAt: new Date(expiresAt).toISOString(),
-      });
+      }));
       const connection = buildInspectorConnection(globalThis.location?.origin ?? '', result.bearerToken);
       setCreatedToken({ bearerToken: result.bearerToken, connection });
       setCopied(false);
@@ -207,7 +209,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setLoading(true);
     setError('');
     try {
-      await deleteAiToken(deleteTarget.id);
+      await runSensitive(() => deleteAiToken(deleteTarget.id));
       setDeleteTarget(null);
       await load();
     } catch (caught) {
