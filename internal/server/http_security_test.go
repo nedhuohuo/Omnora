@@ -4,9 +4,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"omnora/internal/config"
+	"omnora/internal/domain"
 )
 
 func TestHTTPPolicyDerivesExactHostAndOriginAndSecureCookies(t *testing.T) {
@@ -22,6 +24,33 @@ func TestHTTPPolicyDerivesExactHostAndOriginAndSecureCookies(t *testing.T) {
 	}
 	if !policy.secureExternal {
 		t.Fatal("HTTPS public URL did not enable secure external policy")
+	}
+}
+
+func TestTrustBoundaryFailClosedWithoutPublicURLWhenRequired(t *testing.T) {
+	s := &Server{
+		cfg: config.Config{
+			Routes: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+		},
+	}
+	s.RequireHTTPTrustBoundary()
+	next := s.trustBoundary(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	health := httptest.NewRecorder()
+	next.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusNoContent {
+		t.Fatalf("health status = %d", health.Code)
+	}
+
+	business := httptest.NewRecorder()
+	next.ServeHTTP(business, httptest.NewRequest(http.MethodGet, "/api/v1/session", nil))
+	if business.Code != http.StatusServiceUnavailable {
+		t.Fatalf("business status = %d", business.Code)
+	}
+	if got := business.Body.String(); !strings.Contains(got, "public_url_required") {
+		t.Fatalf("business body = %s", got)
 	}
 }
 

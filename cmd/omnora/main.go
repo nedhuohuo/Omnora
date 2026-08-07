@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"omnora/internal/config"
-	"omnora/internal/domain"
 	"omnora/internal/identity"
 	"omnora/internal/recovery"
 	"omnora/internal/server"
@@ -27,10 +26,17 @@ func main() {
 		os.Exit(2)
 	}
 	if err := cfg.ValidateBusinessExposure(); err != nil {
-		slog.Error("invalid HTTP trust configuration", "error", err)
-		os.Exit(2)
+		// Missing PublicURL is an expected post-deploy configuration step: the
+		// process still binds and serves diagnostics while business routes stay
+		// fail-closed. Malformed PublicURL values remain fatal.
+		if errors.Is(err, config.ErrPublicURLRequired) {
+			slog.Warn("OMNORA_PUBLIC_URL is unset; serving /healthz and /readyz only until the public origin is configured")
+		} else {
+			slog.Error("invalid HTTP trust configuration", "error", err)
+			os.Exit(2)
+		}
 	}
-	if cfg.Routes.Enabled(domain.RouteGroupREST) || cfg.Routes.Enabled(domain.RouteGroupMCP) || cfg.Routes.Enabled(domain.RouteGroupShare) || cfg.Routes.Enabled(domain.RouteGroupMemberWeb) || cfg.Routes.Enabled(domain.RouteGroupAdminWeb) || cfg.Routes.Enabled(domain.RouteGroupOpenAPI) {
+	if cfg.BusinessRoutesExposed() {
 		if err := cfg.ValidateAuditHMACKey(); err != nil {
 			slog.Error("invalid audit HMAC configuration", "error", err)
 			os.Exit(2)
@@ -97,6 +103,10 @@ func main() {
 
 	listeners := server.NewListenerManager()
 	srv := server.NewServer(cfg, db, server.WithListeners(listeners))
+	// Executable deployments enforce the HTTP trust boundary. In-process unit
+	// tests leave the policy unset so handlers remain callable without a public
+	// origin fixture.
+	srv.RequireHTTPTrustBoundary()
 	if err := srv.StartupError(); err != nil {
 		slog.Error("server startup gate failed", "error", err)
 		os.Exit(1)

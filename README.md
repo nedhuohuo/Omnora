@@ -69,6 +69,38 @@ Omnora/
 - Node.js 20+（仅本地前端开发和前端构建需要；NAS 运行时不包含 Node.js）
 - Docker Compose（可选，用于容器化部署验证）
 
+### 部署条件（必读）
+
+业务路由开启后，HTTP 信任边界由环境变量显式配置；**不要从转发头或当前公网 IP 推断**。
+
+| 条件 | 说明 |
+| --- | --- |
+| `OMNORA_PUBLIC_URL` | 浏览器/客户端访问的**稳定绝对 origin**（含 scheme，无 path/query）。**首次启动可留空**：进程会起来并提供 `/healthz`、`/readyz`，但业务路由保持关闭（`public_url_required`）。地址确定后再写入并**重启容器/进程**后生效。 |
+| 动态公网 IP + 端口转发 | **不要**把会变的公网 IP 写进 `OMNORA_PUBLIC_URL`。应使用 DDNS/固定域名，推荐 `https://files.example.com`（反代终止 TLS，Omnora 绑定 `127.0.0.1:8080`）。 |
+| `http://` 非 loopback | 默认拒绝。仅一次性测试盒可设 `OMNORA_ALLOW_INSECURE_PUBLIC_HTTP=true`；正式 NAS / 公网暴露不要长期开启。 |
+| Host / Origin | 未另配时从 `OMNORA_PUBLIC_URL` 派生精确白名单。局域网 IP 与公网域名不一致时，需额外配置 `OMNORA_ALLOWED_HOSTS` / `OMNORA_ALLOWED_ORIGINS`，或统一走同一域名。 |
+| `OMNORA_TRUSTED_PROXY_CIDRS` | 仅填写反代所在网段；为空表示**不信任**任何 `X-Forwarded-*`。禁止填 `0.0.0.0/0`。 |
+| 审计密钥 | 业务路由开启时需要 `OMNORA_AUDIT_HMAC_KEY`（≥32 字节）。Compose 镜像入口可在首次启动生成并写入 `config/runtime.env`，重装时必须保留该文件。 |
+| 持久化目录 | `config/`、`data/`、`managed/`、`mounts/` 需跨容器重建保留；实例标记不一致时入口会拒绝启动。 |
+| NAS 镜像 | `deploy/docker-compose.nas.yml` **必须**设置 `OMNORA_IMAGE` 为已验证的 GHCR tag 或 digest，否则 Compose 直接失败。 |
+
+推荐 NAS 公网形态：
+
+```text
+浏览器 → https://你的DDNS域名 → 路由器 443 → NAS 反代 → 127.0.0.1:8080（Omnora）
+```
+
+对应最小 env：
+
+```bash
+OMNORA_BIND=127.0.0.1
+OMNORA_PUBLIC_URL=https://files.example.com
+OMNORA_TRUSTED_PROXY_CIDRS=127.0.0.1/32
+OMNORA_ALLOW_INSECURE_PUBLIC_HTTP=false
+```
+
+修改 `OMNORA_PUBLIC_URL`（及 Host/Origin/代理 CIDR）后必须重启服务。阿里云一次性 HTTP 测试盒见 [阿里云测试服务器](docs/deployment/aliyun-test-server.md)；NAS 验收记录格式见 [NAS 验证证据](docs/deployment/nas-verification.md)。
+
 ### 后端
 
 ```bash
@@ -81,12 +113,14 @@ go test ./...
 
 # 本地启动，默认监听 127.0.0.1:8080
 export OMNORA_DB_PATH=./data/omnora.db
+export OMNORA_PUBLIC_URL=http://127.0.0.1:8080
 export OMNORA_INITIALIZATION_TOKEN=dev-init-token
 export OMNORA_TOTP_ENCRYPTION_KEY=dev-local-totp-key-at-least-32-chars
+export OMNORA_AUDIT_HMAC_KEY=dev-local-audit-hmac-key-at-least-32b
 go run ./cmd/omnora
 ```
 
-启动后打开 `http://127.0.0.1:8080`，使用初始化令牌完成首个系统管理员创建。
+启动后打开 `http://127.0.0.1:8080`，使用初始化令牌完成首个系统管理员创建。本地 loopback 的 `http://` PublicURL 无需 `OMNORA_ALLOW_INSECURE_PUBLIC_HTTP`。
 
 ### 前端
 
@@ -102,16 +136,21 @@ npm run dev
 
 ```bash
 cd deploy
-cp aliyun-test.env.example aliyun-test.env   # 按需修改密钥与令牌
-# 基础单容器示例
-docker compose -f docker-compose.yml config
 
-# 阿里云测试覆盖（当前测试机对外暴露 8080，见部署文档）
+# 通用 / 源码构建示例（先 config 校验，再按需 up）
+cp aliyun-test.env.example aliyun-test.env   # 填入 PUBLIC_URL、密钥等
+docker compose --env-file aliyun-test.env -f docker-compose.yml config
+
+# NAS：拉取已验证镜像（必须先设置 OMNORA_IMAGE）
+export OMNORA_IMAGE=ghcr.io/nedhuohuo/omnora:sha-<verified-commit>
+docker compose --env-file nas.env -f docker-compose.nas.yml up -d
+
+# 阿里云测试覆盖（见部署文档；公网 HTTP 仅限一次性 QA）
 docker compose --env-file aliyun-test.env \
   -f docker-compose.yml -f docker-compose.aliyun-test.yml up -d
 ```
 
-正式镜像标签尚未发布；Compose 文件中的 `ghcr.io/omnora/omnora:0.1.0-dev` 为占位。阿里云测试服务器的边界与访问方式见 [阿里云测试服务器](docs/deployment/aliyun-test-server.md)（外部访问：`http://120.26.88.7:8080`）。
+正式发布镜像标签以 GHCR 上已验证的 tag/digest 为准。部署边界与访问方式见 [阿里云测试服务器](docs/deployment/aliyun-test-server.md) 与上文「部署条件」。
 
 ### 脚手架自检
 
@@ -133,6 +172,8 @@ docker compose --env-file aliyun-test.env \
 | [项目框架设计](docs/superpowers/specs/2026-08-02-omnora-project-foundation-design.md) | 工程骨架、模块依赖与技术探针 |
 | [验收标准](docs/verification/acceptance-criteria.md) | 第一版发布门槛 |
 | [生产日志](docs/deployment/logging.md) | JSON 日志、请求 ID、代理日志关联和 NAS 证据 |
+| [阿里云测试服务器](docs/deployment/aliyun-test-server.md) | 测试机边界、公网 HTTP QA 与 Compose 文件 |
+| [NAS 验证证据](docs/deployment/nas-verification.md) | 发布候选在 NAS / Linux Compose 上的验收记录格式 |
 | [重装数据连续性](docs/deployment/reinstall-data-continuity.md) | 重装后保留原路径文件可读可用 |
 | [REST API 指南](docs/api/README.md) | REST 接入方式、认证、流程和边界 |
 | [MCP 指南](docs/mcp/README.md) | 标准 Streamable HTTP、24 个工具、15 个 scope、MRTR 和 Transfer Ticket |

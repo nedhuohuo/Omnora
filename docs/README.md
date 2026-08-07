@@ -23,6 +23,8 @@
 | [P1 Catalog、Jobs 与 API 契约计划](superpowers/plans/2026-08-06-p1-catalog-jobs-api-contracts.md) | Catalog、任务、API、前端 | DFS checkpoint、scan epoch、lease/fencing、RouteDefinition、OpenAPI 与生成类型 |
 | [P2 Review 问题清单](reviews/2026-08-06-code-review-p2-findings.md) | 产品、开发、测试 | 已确认 P2 的证据、影响、修复方向、依赖和关闭条件 |
 | [阿里云测试服务器](deployment/aliyun-test-server.md) | 开发、测试、运维 | 阿里云 ECS 测试服务器边界、外部 `8080` 访问方式和部署文件 |
+| [NAS 验证证据](deployment/nas-verification.md) | 开发、测试、运维 | NAS / Linux Compose 发布候选验收记录与 `OMNORA_IMAGE` 固定要求 |
+| [根 README 部署条件](../README.md#部署条件必读) | 运维、部署 | `OMNORA_PUBLIC_URL`、动态公网 IP、反代、重启与密钥等部署前置条件 |
 | [安全披露](../SECURITY.md) | 安全研究者 | 漏洞报告渠道和响应范围 |
 | [社区许可证](../LICENSE) | 使用者、分发者 | `AGPL-3.0-only` 许可证正文 |
 | [商业许可政策](../COMMERCIAL-LICENSE.md) | 商业使用者 | 商业许可的当前状态与边界 |

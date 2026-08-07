@@ -97,9 +97,24 @@ func canonicalOrigin(value *url.URL) string {
 	return strings.ToLower(value.Scheme) + "://" + canonicalHost(value.Host)
 }
 
+func isDiagnosticPath(path string) bool {
+	return path == "/healthz" || path == "/readyz"
+}
+
 func (s *Server) trustBoundary(next http.Handler) http.Handler {
 	if s.httpPolicy == nil {
-		return next
+		if !s.httpTrustRequired || !s.businessRoutesExposed() {
+			return next
+		}
+		// Deployments may start before the public origin is known. Keep
+		// diagnostics available; refuse every business path until configured.
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isDiagnosticPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "public_url_required", "OMNORA_PUBLIC_URL must be configured before serving business routes")
+		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.httpPolicy.allowedHosts[canonicalHost(r.Host)]; !ok {

@@ -30,23 +30,24 @@ import (
 )
 
 type Server struct {
-	cfg             config.Config
-	db              *store.DB
-	mux             *http.ServeMux
-	startupErr      error
-	httpPolicy      *HTTPPolicy
-	guard           *access.Guard
-	tokens          *aitoken.Service
-	confirmations   *confirmation.Service
-	transferTickets *transferticket.Service
-	auditRecorder   audit.Recorder
-	authLimiter     *ratelimit.Limiter
-	memberFiles     *memberfiles.Service
-	memberShares    *membershare.Service
-	routesMu        sync.RWMutex
-	listeners       *ListenerManager
-	shutdownOnce    sync.Once
-	shutdownCh      chan struct{}
+	cfg               config.Config
+	db                *store.DB
+	mux               *http.ServeMux
+	startupErr        error
+	httpPolicy        *HTTPPolicy
+	httpTrustRequired bool
+	guard             *access.Guard
+	tokens            *aitoken.Service
+	confirmations     *confirmation.Service
+	transferTickets   *transferticket.Service
+	auditRecorder     audit.Recorder
+	authLimiter       *ratelimit.Limiter
+	memberFiles       *memberfiles.Service
+	memberShares      *membershare.Service
+	routesMu          sync.RWMutex
+	listeners         *ListenerManager
+	shutdownOnce      sync.Once
+	shutdownCh        chan struct{}
 }
 
 const EntryHTTP = "http"
@@ -116,14 +117,27 @@ func (s *Server) StartupError() error {
 	return s.startupErr
 }
 
+// RequireHTTPTrustBoundary asks the server to fail closed on business routes
+// when OMNORA_PUBLIC_URL (or an explicit host/origin allowlist) is unset. Unit
+// tests leave this unset so handlers stay callable without a public-origin
+// fixture; cmd/omnora enables it for real deployments.
+func (s *Server) RequireHTTPTrustBoundary() {
+	if s == nil {
+		return
+	}
+	s.httpTrustRequired = true
+}
+
 // MarkReady persists the final normal-process readiness gate after all
 // migration, identity-rollout, and route-hydration checks have passed.
+// Missing PublicURL is not fatal here: /readyz reports public_url_required
+// until the operator sets the post-deploy origin.
 func (s *Server) MarkReady(ctx context.Context) error {
 	if s.startupErr != nil {
 		return s.startupErr
 	}
 	if s.businessRoutesExposed() {
-		if err := s.cfg.ValidateBusinessExposure(); err != nil {
+		if err := s.cfg.ValidateBusinessExposure(); err != nil && !errors.Is(err, config.ErrPublicURLRequired) {
 			return err
 		}
 		if err := s.cfg.ValidateAuditHMACKey(); err != nil {
@@ -327,6 +341,16 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	if s.httpTrustRequired && s.businessRoutesExposed() {
+		if err := s.cfg.ValidateBusinessExposure(); err != nil {
+			if errors.Is(err, config.ErrPublicURLRequired) {
+				httpx.WriteError(w, r, http.StatusServiceUnavailable, "public_url_required", "OMNORA_PUBLIC_URL must be configured before serving business routes")
+				return
+			}
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "invalid_http_trust", err.Error())
+			return
+		}
+	}
 	if s.db != nil {
 		if err := s.db.Ping(r.Context()); err != nil {
 			httpx.WriteError(w, r, http.StatusServiceUnavailable, "database_unavailable", "database is not ready")

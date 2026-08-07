@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -12,6 +13,12 @@ import (
 	"omnora/internal/access"
 	"omnora/internal/domain"
 )
+
+// ErrPublicURLRequired means business routes are enabled but OMNORA_PUBLIC_URL
+// has not been configured yet. The process may still start and serve
+// /healthz+/readyz; business handlers stay fail-closed until the operator sets
+// the public origin after the deployment address is known.
+var ErrPublicURLRequired = errors.New("OMNORA_PUBLIC_URL is required when a business route is enabled")
 
 type Config struct {
 	HTTP              HTTPConfig
@@ -40,11 +47,12 @@ type StorageConfig struct {
 }
 
 type HTTPConfig struct {
-	Addr              string
-	PublicURL         string
-	AllowedHosts      []string
-	AllowedOrigins    []string
-	TrustedProxyCIDRs []*net.IPNet
+	Addr                    string
+	PublicURL               string
+	AllowedHosts            []string
+	AllowedOrigins          []string
+	TrustedProxyCIDRs       []*net.IPNet
+	AllowInsecurePublicHTTP bool
 }
 
 type LogConfig struct {
@@ -103,6 +111,7 @@ func LoadEnv() (Config, error) {
 		return Config{}, fmt.Errorf("OMNORA_HTTP_ADDR must be host:port: %w", err)
 	}
 	cfg.HTTP.PublicURL = strings.TrimSpace(os.Getenv("OMNORA_PUBLIC_URL"))
+	cfg.HTTP.AllowInsecurePublicHTTP = envTruthy("OMNORA_ALLOW_INSECURE_PUBLIC_HTTP")
 	var err error
 	cfg.HTTP.AllowedHosts, err = parseCSVEnv("OMNORA_ALLOWED_HOSTS")
 	if err != nil {
@@ -221,8 +230,10 @@ func (cfg Config) ValidateAuditHMACKey() error {
 }
 
 // ValidateBusinessExposure enforces the external trust boundary only when a
-// business route is exposed. A disabled-route configuration may omit
-// PublicURL so health diagnostics can still run during bootstrap.
+// business route is exposed. Missing PublicURL returns ErrPublicURLRequired so
+// operators can bring the process up first and set the public origin after the
+// deployment address is known; malformed values remain hard configuration
+// errors. A disabled-route configuration may omit PublicURL entirely.
 func (cfg Config) ValidateBusinessExposure() error {
 	exposed := false
 	for _, group := range domain.AllRouteGroups {
@@ -234,7 +245,7 @@ func (cfg Config) ValidateBusinessExposure() error {
 		return nil
 	}
 	if strings.TrimSpace(cfg.HTTP.PublicURL) == "" {
-		return fmt.Errorf("OMNORA_PUBLIC_URL is required when a business route is enabled")
+		return ErrPublicURLRequired
 	}
 	parsed, err := url.Parse(cfg.HTTP.PublicURL)
 	if err != nil || parsed.User != nil || parsed.Host == "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -243,15 +254,38 @@ func (cfg Config) ValidateBusinessExposure() error {
 	if parsed.Scheme != "https" && parsed.Scheme != "http" {
 		return fmt.Errorf("OMNORA_PUBLIC_URL scheme must be http or https")
 	}
-	if parsed.Scheme == "http" && !isLoopbackAuthority(parsed.Hostname()) {
-		return fmt.Errorf("http OMNORA_PUBLIC_URL is only allowed for loopback development")
+	if parsed.Scheme == "http" && !isLoopbackAuthority(parsed.Hostname()) && !cfg.HTTP.AllowInsecurePublicHTTP {
+		return fmt.Errorf("http OMNORA_PUBLIC_URL is only allowed for loopback development; set OMNORA_ALLOW_INSECURE_PUBLIC_HTTP=true for disposable QA boxes")
 	}
-	if parsed.Scheme == "http" {
+	if parsed.Scheme == "http" && !cfg.HTTP.AllowInsecurePublicHTTP {
 		if listenerHost, _, splitErr := net.SplitHostPort(cfg.HTTP.Addr); splitErr == nil && !isLoopbackAuthority(listenerHost) {
 			return fmt.Errorf("http OMNORA_PUBLIC_URL requires a loopback HTTP listener")
 		}
 	}
 	return nil
+}
+
+// BusinessRoutesExposed reports whether any product route group is enabled.
+func (cfg Config) BusinessRoutesExposed() bool {
+	for _, group := range domain.AllRouteGroups {
+		switch group {
+		case domain.RouteGroupMemberWeb, domain.RouteGroupAdminWeb, domain.RouteGroupShare,
+			domain.RouteGroupREST, domain.RouteGroupMCP, domain.RouteGroupOpenAPI:
+			if cfg.Routes.Enabled(group) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func envTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseCSVEnv(name string) ([]string, error) {

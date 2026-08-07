@@ -43,7 +43,11 @@ Matching env values on the host (`deploy/aliyun-test.env`):
 
 ```text
 OMNORA_BIND=0.0.0.0
+OMNORA_PUBLIC_URL=http://120.26.88.7:8080
+OMNORA_ALLOW_INSECURE_PUBLIC_HTTP=true
 ```
+
+`OMNORA_PUBLIC_URL` can be set after the first boot once the public address is known. Until it is set, the container still starts and serves `/healthz` / `/readyz`, but business routes stay closed (`public_url_required`). Non-loopback `http://` origins also need `OMNORA_ALLOW_INSECURE_PUBLIC_HTTP=true` (disposable QA only). Prefer a TLS reverse proxy and HTTPS public URL when possible.
 
 This is a disposable test-box choice, not a production security model. The checked-in QA env example sets `OMNORA_ROUTE_SHARE_ENABLED=true` so public share-link flows can be exercised; keep `OMNORA_ROUTE_MCP_ENABLED=false` unless a specific MCP test requires it. `OMNORA_DEPLOY_ENV=aliyun-test` is an environment label, not a security boundary. The actual boundary remains the Docker bind address, route-group switches, Aliyun security group, host firewall, and any reverse-proxy policy.
 

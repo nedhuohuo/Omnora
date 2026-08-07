@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -231,17 +232,40 @@ func TestValidateBusinessExposureRequiresSecurePublicURL(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		publicURL string
-		wantError bool
+		addr      string
+		allowHTTP bool
+		wantError error
+		wantHard  bool
 	}{
-		{name: "missing", wantError: true},
-		{name: "external http", publicURL: "http://files.example.test", wantError: true},
-		{name: "loopback http", publicURL: "http://127.0.0.1:8080", wantError: false},
-		{name: "https", publicURL: "https://files.example.test", wantError: false},
+		{name: "missing", wantError: ErrPublicURLRequired},
+		{name: "external http", publicURL: "http://files.example.test", wantHard: true},
+		{name: "external http with allow", publicURL: "http://120.26.88.7:8080", addr: "0.0.0.0:8080", allowHTTP: true},
+		{name: "loopback http", publicURL: "http://127.0.0.1:8080"},
+		{name: "https", publicURL: "https://files.example.test"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Config{HTTP: HTTPConfig{PublicURL: tc.publicURL}, Routes: map[domain.RouteGroup]bool{domain.RouteGroupREST: true}}
-			if err := cfg.ValidateBusinessExposure(); (err != nil) != tc.wantError {
-				t.Fatalf("ValidateBusinessExposure() error = %v, wantError=%v", err, tc.wantError)
+			cfg := Config{
+				HTTP: HTTPConfig{
+					Addr:                    tc.addr,
+					PublicURL:               tc.publicURL,
+					AllowInsecurePublicHTTP: tc.allowHTTP,
+				},
+				Routes: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+			}
+			err := cfg.ValidateBusinessExposure()
+			switch {
+			case tc.wantError != nil:
+				if !errors.Is(err, tc.wantError) {
+					t.Fatalf("ValidateBusinessExposure() error = %v, want %v", err, tc.wantError)
+				}
+			case tc.wantHard:
+				if err == nil || errors.Is(err, ErrPublicURLRequired) {
+					t.Fatalf("ValidateBusinessExposure() error = %v, want hard configuration error", err)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("ValidateBusinessExposure() error = %v", err)
+				}
 			}
 		})
 	}

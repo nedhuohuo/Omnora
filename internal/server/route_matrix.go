@@ -113,9 +113,10 @@ func routePatternMatches(pattern, requestPath string) bool {
 
 func (s *Server) routeSecurity(rule RouteRule, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Tests and explicitly in-process callers have no external trust policy;
-		// the executable rejects that configuration before exposing business
-		// routes. Keeping this switch makes unit handlers usable without cookies.
+		// Tests and explicitly in-process callers have no external trust policy.
+		// The executable enables RequireHTTPTrustBoundary so trustBoundary
+		// already fails closed before business handlers run. Keeping this
+		// switch makes unit handlers usable without cookies.
 		if s.httpPolicy == nil {
 			next.ServeHTTP(w, r)
 			return
