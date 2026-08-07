@@ -1,11 +1,13 @@
 package files
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -55,13 +57,14 @@ type DirectoryListing struct {
 }
 
 type Entry struct {
-	Name         string      `json:"name"`
-	RelativePath string      `json:"relativePath"`
-	Kind         EntryKind   `json:"kind"`
-	Size         int64       `json:"size"`
-	ModifiedAt   time.Time   `json:"modifiedAt"`
-	ReadOnly     bool        `json:"readOnly"`
-	PreviewKind  PreviewKind `json:"previewKind"`
+	Name              string      `json:"name"`
+	RelativePath      string      `json:"relativePath"`
+	Kind              EntryKind   `json:"kind"`
+	Size              int64       `json:"size"`
+	ModifiedAt        time.Time   `json:"modifiedAt"`
+	ReadOnly          bool        `json:"readOnly"`
+	PreviewKind       PreviewKind `json:"previewKind"`
+	ObjectFingerprint string      `json:"objectFingerprint,omitempty"`
 }
 
 type Service struct{}
@@ -129,13 +132,14 @@ func (Service) ListDirectory(mount Mount, relativePath string) (DirectoryListing
 		}
 
 		entries = append(entries, Entry{
-			Name:         name,
-			RelativePath: entryRelativePath,
-			Kind:         kind,
-			Size:         size,
-			ModifiedAt:   entryInfo.ModTime().UTC(),
-			ReadOnly:     readOnly,
-			PreviewKind:  classifyPreviewKind(name, kind),
+			Name:              name,
+			RelativePath:      entryRelativePath,
+			Kind:              kind,
+			Size:              size,
+			ModifiedAt:        entryInfo.ModTime().UTC(),
+			ReadOnly:          readOnly,
+			PreviewKind:       classifyPreviewKind(name, kind),
+			ObjectFingerprint: fingerprintFileInfo(entryInfo),
 		})
 	}
 
@@ -151,6 +155,78 @@ func (Service) ListDirectory(mount Mount, relativePath string) (DirectoryListing
 		ReadOnly:     readOnly,
 		Entries:      entries,
 	}, nil
+}
+
+// Stat returns metadata for one mount-relative object. It intentionally uses
+// os.Root/Lstat so callers can never turn a member locator into a host path
+// lookup. Symbolic links and objects other than regular files/directories are
+// rejected in the same way as directory listings.
+func (Service) Stat(mount Mount, relativePath string) (Entry, error) {
+	cleaned, err := storage.CleanRelativePath(relativePath)
+	if err != nil || strings.Contains(cleaned, `\`) {
+		if err != nil {
+			return Entry{}, err
+		}
+		return Entry{}, fmt.Errorf("invalid relative path")
+	}
+	root, readOnly, err := openMountRoot(mount)
+	if err != nil {
+		return Entry{}, err
+	}
+	defer root.Close()
+	if err := rejectSymlinkPath(root, cleaned); err != nil {
+		return Entry{}, err
+	}
+	info, err := root.Lstat(cleaned)
+	if err != nil {
+		return Entry{}, err
+	}
+	kind, ok := entryKind(info)
+	if !ok {
+		return Entry{}, ErrNotFile
+	}
+	name := path.Base(cleaned)
+	if cleaned == "." {
+		name = "."
+	}
+	size := info.Size()
+	if kind == EntryKindDir {
+		size = 0
+	}
+	return Entry{
+		Name:              name,
+		RelativePath:      cleaned,
+		Kind:              kind,
+		Size:              size,
+		ModifiedAt:        info.ModTime().UTC(),
+		ReadOnly:          readOnly,
+		PreviewKind:       classifyPreviewKind(name, kind),
+		ObjectFingerprint: fingerprintFileInfo(info),
+	}, nil
+}
+
+// fingerprintFileInfo is an opaque object identity used by higher-level
+// mutation and confirmation services. It contains metadata only and never a
+// host path or file contents.
+func fingerprintFileInfo(info os.FileInfo) string {
+	if info == nil {
+		return ""
+	}
+	digest := sha256.New()
+	fmt.Fprintf(digest, "%s|%d|%d|%d", info.Mode().String(), info.Size(), info.ModTime().UTC().UnixNano(), info.Mode().Perm())
+	if raw := info.Sys(); raw != nil {
+		value := reflect.Indirect(reflect.ValueOf(raw))
+		if !value.IsValid() || value.Kind() != reflect.Struct {
+			return fmt.Sprintf("sha256:%x", digest.Sum(nil))
+		}
+		for _, name := range []string{"Dev", "Ino"} {
+			field := value.FieldByName(name)
+			if field.IsValid() && field.CanUint() {
+				fmt.Fprintf(digest, "|%s=%d", name, field.Uint())
+			}
+		}
+	}
+	return fmt.Sprintf("sha256:%x", digest.Sum(nil))
 }
 
 func (Service) CreateDirectory(mount Mount, parentPath, name string) (string, error) {
@@ -234,12 +310,15 @@ func moveWithinMount(mount Mount, from, to string) (string, error) {
 	if err := rejectSymlinkPath(root, path.Dir(cleanedTo)); err != nil {
 		return "", err
 	}
-	if _, err := root.Lstat(cleanedTo); err == nil {
-		return "", fmt.Errorf("%w: target already exists", ErrInvalidMount)
-	} else if !errors.Is(err, os.ErrNotExist) {
+	sourceInfo, err := root.Lstat(cleanedFrom)
+	if err != nil {
 		return "", err
 	}
-	if err := root.Rename(cleanedFrom, cleanedTo); err != nil {
+	kind, ok := entryKind(sourceInfo)
+	if !ok {
+		return "", ErrNotFile
+	}
+	if err := renameNoReplace(root, cleanedFrom, cleanedTo, kind); err != nil {
 		return "", err
 	}
 	return cleanedTo, nil
@@ -393,7 +472,7 @@ func rejectSymlinkPath(root *os.Root, relativePath string) error {
 
 func validateDirectoryName(name string) error {
 	name = strings.TrimSpace(name)
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
+	if name == "" || name == "." || name == ".." || name == storage.ReservedNamespace || strings.ContainsAny(name, "/\\") {
 		return errors.New("invalid directory name")
 	}
 	for _, r := range name {

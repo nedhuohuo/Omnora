@@ -182,6 +182,57 @@ func TestListDirectoryRejectsNonDirectoryAndInvalidMount(t *testing.T) {
 	}
 }
 
+func TestStatReturnsMetadataAndRejectsUnsafeObjects(t *testing.T) {
+	root := t.TempDir()
+	mkdir(t, filepath.Join(root, "docs"))
+	writeFile(t, filepath.Join(root, "docs", "readme.txt"), "hello")
+	writeFile(t, filepath.Join(root, "target.txt"), "secret")
+	if err := os.Symlink(filepath.Join(root, "target.txt"), filepath.Join(root, "linked.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	mount := Mount{Root: root, Mode: domain.MountModeReadOnly}
+
+	entry, err := NewService().Stat(mount, "docs/readme.txt")
+	if err != nil {
+		t.Fatalf("Stat(file) error = %v", err)
+	}
+	if entry.Name != "readme.txt" || entry.RelativePath != "docs/readme.txt" || entry.Kind != EntryKindFile || entry.Size != 5 || !entry.ReadOnly {
+		t.Fatalf("Stat(file) = %#v", entry)
+	}
+	directory, err := NewService().Stat(mount, ".")
+	if err != nil || directory.Kind != EntryKindDir || directory.RelativePath != "." {
+		t.Fatalf("Stat(root) = %#v, error = %v", directory, err)
+	}
+
+	for _, unsafe := range []string{"../secret", "/absolute", ".omnora", "linked.txt"} {
+		t.Run(unsafe, func(t *testing.T) {
+			_, err := NewService().Stat(mount, unsafe)
+			if err == nil {
+				t.Fatalf("Stat(%q) error = nil", unsafe)
+			}
+			if unsafe == "linked.txt" && !errors.Is(err, ErrSymlinkPath) {
+				t.Fatalf("Stat(%q) error = %v, want ErrSymlinkPath", unsafe, err)
+			}
+		})
+	}
+}
+
+func TestRenameNeverOverwritesExistingFile(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "source.txt"), "source")
+	writeFile(t, filepath.Join(root, "target.txt"), "target")
+	mount := Mount{Root: root, Mode: domain.MountModeReadWrite}
+	if _, err := NewService().Rename(mount, "source.txt", "target.txt"); err == nil {
+		t.Fatal("Rename() unexpectedly overwrote an existing target")
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "source.txt")); string(got) != "source" {
+		t.Fatalf("source changed to %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "target.txt")); string(got) != "target" {
+		t.Fatalf("target changed to %q", got)
+	}
+}
+
 func TestMountRootRejectsIntermediateSymbolicLinks(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
@@ -225,6 +276,9 @@ func TestCreateDirectoryUsesVerifiedMountRoot(t *testing.T) {
 	_, err = NewService().CreateDirectory(Mount{Root: root, Mode: domain.MountModeReadOnly}, ".", "blocked")
 	if !errors.Is(err, ErrInvalidMountMode) {
 		t.Fatalf("read-only CreateDirectory() error = %v, want ErrInvalidMountMode", err)
+	}
+	if _, err = NewService().CreateDirectory(mount, ".", storage.ReservedNamespace); err == nil {
+		t.Fatal("CreateDirectory() allowed reserved namespace")
 	}
 }
 
