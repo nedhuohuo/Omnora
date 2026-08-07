@@ -110,6 +110,10 @@ paths:
                 $ref: "#/components/schemas/Session"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "400":
           description: Transfer credentials must be supplied in Authorization, not query parameters.
           content:
@@ -1317,6 +1321,7 @@ paths:
                 additionalProperties: true
         "401":
           $ref: "#/components/responses/Unauthorized"
+
     post:
       tags: [Admin]
       summary: Implemented endpoint POST /admin/backups.
@@ -1339,6 +1344,32 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /admin/recovery:
+    get:
+      tags: [Admin]
+      summary: Return durable recovery coordinator state.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Current recovery control state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state, ready]
+                properties:
+                  state: {type: string}
+                  ready: {type: boolean}
+                  requestId: {$ref: "#/components/schemas/OpaqueId"}
+                  reasonCode: {type: string}
+                  cleanupPending: {type: boolean}
+                  sourceSchemaVersion: {type: integer, nullable: true}
+                  requestedAt: {type: string, format: date-time, nullable: true}
+                  completedAt: {type: string, format: date-time, nullable: true}
+                  updatedAt: {type: string, format: date-time, nullable: true}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /admin/backups/{backupId}/restore:
     post:
       tags: [Admin]
@@ -1358,6 +1389,19 @@ paths:
               type: object
               additionalProperties: true
       responses:
+        "202":
+          description: Restore accepted by the durable offline recovery coordinator.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, requestId, backupId, state]
+                properties:
+                  status: {type: string, enum: [restore_accepted]}
+                  requestId: {$ref: "#/components/schemas/OpaqueId"}
+                  backupId: {$ref: "#/components/schemas/OpaqueId"}
+                  state: {type: string, enum: [preparing]}
+                  notes: {type: string}
         "200":
           description: Success.
           content:
