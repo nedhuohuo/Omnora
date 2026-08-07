@@ -17,6 +17,7 @@ RUN go mod download
 COPY . ./
 COPY --from=web-build /src/web/dist/ /src/internal/server/static/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/omnora ./cmd/omnora
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/omnora-recovery ./cmd/omnora-recovery
 
 FROM alpine:3.22
 
@@ -26,8 +27,9 @@ RUN apk add --no-cache su-exec \
     && mkdir -p /etc/omnora /var/lib/omnora /srv/omnora/managed \
     && chown -R 1000:1000 /etc/omnora /var/lib/omnora /srv/omnora
 COPY --from=go-build /out/omnora /usr/local/bin/omnora
+COPY --from=go-build /out/omnora-recovery /usr/local/bin/omnora-recovery
 COPY deploy/docker-entrypoint.sh /usr/local/bin/omnora-docker-entrypoint
-RUN chmod 755 /usr/local/bin/omnora-docker-entrypoint
+RUN chmod 755 /usr/local/bin/omnora-docker-entrypoint /usr/local/bin/omnora-recovery
 
 ENV TZ=Asia/Shanghai \
     UMASK=0027 \
