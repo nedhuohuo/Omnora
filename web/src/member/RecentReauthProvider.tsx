@@ -1,5 +1,5 @@
 import { createContext, type FormEvent, type ReactNode, useCallback, useContext, useMemo, useState } from 'react';
-import { ApiError, isReauthenticationRequired, reauthenticate } from '../api';
+import { ApiError, isReauthenticationRequired, ReauthenticationCanceledError, reauthenticate } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
 
 type RunSensitive = <T>(operation: () => Promise<T>) => Promise<T>;
@@ -39,7 +39,7 @@ export function RecentReauthProvider({
   const closePending = useCallback((reason?: unknown) => {
     setPending((current) => {
       if (current) {
-        current.reject(reason ?? new Error('reauthentication canceled'));
+        current.reject(reason ?? new ReauthenticationCanceledError());
       }
       return null;
     });

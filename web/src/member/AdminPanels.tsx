@@ -10,6 +10,7 @@ import {
   type BackupPayload,
   type SharePayload,
   type SpaceMemberRole,
+  isReauthenticationCanceled,
   createAdminBackup,
   createAdminSpace,
   createAdminUser,
@@ -38,6 +39,7 @@ import { joinReadableLabels, readableLabel } from './displayLabels';
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
 function describeError(error: unknown) {
+  if (isReauthenticationCanceled(error)) return '';
   if (error instanceof ApiError) {
     const body = error.body as { error?: { message?: string; code?: string } } | undefined;
     const message = body?.error?.message?.trim();
@@ -192,7 +194,9 @@ export function AdminOverviewPanel({ locale }: { locale: MemberLocale }) {
             <div className="member-overview-group">
               <h2>{text.overviewRouteGroups}</h2>
               <ul className="member-overview-list">
-                {overview.routeGroups.map((group: AdminRouteGroupItem) => (
+                {overview.routeGroups
+                  .filter((group: AdminRouteGroupItem) => group.id !== 'member_web' && group.id !== 'admin_web')
+                  .map((group: AdminRouteGroupItem) => (
                   <li key={group.id}><span className={`member-status-dot ${group.exposed ? 'ok' : 'muted'}`} />{group.label}<strong>{group.exposed ? text.routeExposed : text.routeClosed}</strong></li>
                 ))}
               </ul>

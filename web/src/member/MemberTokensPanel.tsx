@@ -7,6 +7,7 @@ import {
   createAiToken,
   deleteAiToken,
   getBootstrap,
+  isReauthenticationCanceled,
   listAiTokens,
   listMounts,
   listSpaces,
@@ -31,6 +32,7 @@ import {
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
 function describeError(error: unknown) {
+  if (isReauthenticationCanceled(error)) return '';
   if (error instanceof ApiError) {
     const body = error.body as { error?: { message?: string; code?: string } } | undefined;
     const message = body?.error?.message?.trim();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ApiError, isReauthenticationRequired } from '../api';
+import { ApiError, isReauthenticationCanceled, isReauthenticationRequired, ReauthenticationCanceledError } from '../api';
 import { stateForSession } from './sessionFlow';
 
 describe('stateForSession', () => {
@@ -16,5 +16,12 @@ describe('isReauthenticationRequired', () => {
     expect(isReauthenticationRequired(new ApiError('x', 403, { error: { code: 'reauthentication_required' } }))).toBe(true);
     expect(isReauthenticationRequired(new ApiError('x', 403, { error: { code: 'csrf_required' } }))).toBe(false);
     expect(isReauthenticationRequired(new ApiError('x', 401, { error: { code: 'reauthentication_required' } }))).toBe(false);
+  });
+});
+
+describe('isReauthenticationCanceled', () => {
+  it('detects voluntary cancel without treating it as a failure payload', () => {
+    expect(isReauthenticationCanceled(new ReauthenticationCanceledError())).toBe(true);
+    expect(isReauthenticationCanceled(new Error('reauthentication canceled'))).toBe(false);
   });
 });

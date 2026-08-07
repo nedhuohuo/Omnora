@@ -1818,6 +1818,14 @@ func (s *Server) routeGroups() []routeGroupDTO {
 	return items
 }
 
+func (s *Server) adminToggleableRouteGroups() []routeGroupDTO {
+	items := make([]routeGroupDTO, 0, len(domain.AdminToggleableRouteGroups))
+	for _, group := range domain.AdminToggleableRouteGroups {
+		items = append(items, s.routeGroupDTO(group))
+	}
+	return items
+}
+
 func (s *Server) sqlDB() *sql.DB {
 	if s.db == nil {
 		return nil

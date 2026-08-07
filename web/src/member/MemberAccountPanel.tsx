@@ -8,6 +8,7 @@ import {
   disableTOTP,
   getAccount,
   getPreferences,
+  isReauthenticationCanceled,
   listSessions,
   setupTOTP,
   type ThemePreference,
@@ -18,6 +19,7 @@ import { type MemberLocale, localeMessages } from './i18n';
 import { useRecentReauth } from './RecentReauthProvider';
 
 function describeError(error: unknown) {
+  if (isReauthenticationCanceled(error)) return '';
   if (error instanceof ApiError) {
     const body = error.body as { error?: { message?: string; code?: string } } | undefined;
     const message = body?.error?.message?.trim();

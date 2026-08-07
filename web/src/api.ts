@@ -490,6 +490,17 @@ export function isReauthenticationRequired(error: unknown): boolean {
   return body?.error?.code === 'reauthentication_required';
 }
 
+export class ReauthenticationCanceledError extends Error {
+  constructor() {
+    super('reauthentication canceled');
+    this.name = 'ReauthenticationCanceledError';
+  }
+}
+
+export function isReauthenticationCanceled(error: unknown): boolean {
+  return error instanceof ReauthenticationCanceledError;
+}
+
 export async function requestJson<T>(path: string, init: APIRequestInit = {}): Promise<T> {
   const { authContext = 'account', ...requestInit } = init;
   const headers = new Headers(requestInit.headers);

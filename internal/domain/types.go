@@ -20,8 +20,27 @@ var AllRouteGroups = []RouteGroup{
 	RouteGroupOpenAPI,
 }
 
+// AdminToggleableRouteGroups are the groups operators may expose from the
+// admin console. Member Web and Admin Web stay deployment/env controlled and
+// must not appear as runtime switches in the route-groups UI.
+var AdminToggleableRouteGroups = []RouteGroup{
+	RouteGroupShare,
+	RouteGroupREST,
+	RouteGroupMCP,
+	RouteGroupOpenAPI,
+}
+
 func (g RouteGroup) Valid() bool {
 	for _, known := range AllRouteGroups {
+		if g == known {
+			return true
+		}
+	}
+	return false
+}
+
+func (g RouteGroup) AdminToggleable() bool {
+	for _, known := range AdminToggleableRouteGroups {
 		if g == known {
 			return true
 		}

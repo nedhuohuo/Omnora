@@ -62,7 +62,9 @@ var routeMatrix = []RouteRule{
 	{Method: "DELETE", Pattern: "/api/v1/admin/ai-tokens/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/backups", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/backups/*/restore", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
-	{Method: "PATCH", Pattern: "/api/v1/admin/route-groups/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	// Route-group exposure is an operator convenience toggle, not a credential
+	// or recovery mutation. CSRF + admin session already bound the request.
+	{Method: "PATCH", Pattern: "/api/v1/admin/route-groups/*", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "GET", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie},
 	{Method: "HEAD", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie},
 	{Method: "*", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},

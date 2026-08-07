@@ -16,6 +16,7 @@ func TestRouteMatrixDeclaresCredentialBoundaries(t *testing.T) {
 		{http.MethodPost, "/api/v1/auth/session", RouteAuthPublic, false, false},
 		{http.MethodPatch, "/api/v1/account/password", RouteAuthCookie, true, true},
 		{http.MethodGet, "/api/v1/admin/overview", RouteAuthCookie, false, false},
+		{http.MethodPatch, "/api/v1/admin/route-groups/mcp", RouteAuthCookie, true, false},
 		{http.MethodDelete, "/api/v1/admin/ai-tokens/tok_1", RouteAuthCookie, true, true},
 		{http.MethodGet, "/api/v1/share/current", RouteAuthShareCookie, false, false},
 		{http.MethodPost, "/api/v1/shares", RouteAuthCookie, true, false},

@@ -23,7 +23,7 @@ func (s *Server) listAdminRouteGroups(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "only system administrators can list route groups")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": s.routeGroups()})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": s.adminToggleableRouteGroups()})
 }
 
 func (s *Server) updateAdminRouteGroup(w http.ResponseWriter, r *http.Request) {
@@ -40,6 +40,10 @@ func (s *Server) updateAdminRouteGroup(w http.ResponseWriter, r *http.Request) {
 	group := domain.RouteGroup(strings.TrimSpace(r.PathValue("groupId")))
 	if !group.Valid() {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "route group was not found")
+		return
+	}
+	if !group.AdminToggleable() {
+		httpx.WriteError(w, r, http.StatusConflict, "route_group_not_toggleable", "member web and admin web are controlled by deployment environment variables, not the admin console")
 		return
 	}
 

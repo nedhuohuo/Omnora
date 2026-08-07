@@ -11,6 +11,7 @@ import {
   ApiError,
   deleteAdminMount,
   enqueueIndexJob,
+  isReauthenticationCanceled,
   listAdminHostDirectories,
   listAdminMounts,
   listAdminRouteGroups,
@@ -59,6 +60,7 @@ type MountForm = {
 };
 
 function describeError(error: unknown) {
+  if (isReauthenticationCanceled(error)) return '';
   if (error instanceof ApiError) {
     const body = error.body as { error?: { message?: string; code?: string } } | undefined;
     const message = body?.error?.message?.trim();
@@ -67,6 +69,10 @@ function describeError(error: unknown) {
     return `HTTP ${error.status}`;
   }
   return error instanceof Error ? error.message : 'Unknown error';
+}
+
+function isAdminToggleableRouteGroup(id: string) {
+  return id === 'share' || id === 'rest' || id === 'mcp' || id === 'openapi';
 }
 
 function formatDate(value: string, locale: MemberLocale) {
@@ -266,9 +272,10 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     try {
       const response = await listAdminRouteGroups();
-      setRouteGroups(response.items ?? []);
+      setRouteGroups((response.items ?? []).filter((group) => isAdminToggleableRouteGroup(group.id)));
     } catch (caught) {
-      setError(describeError(caught));
+      const detail = describeError(caught);
+      if (detail) setError(detail);
     } finally {
       setLoading(false);
     }
@@ -415,8 +422,9 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
   }
 
   async function onToggleRouteGroup(group: AdminRouteGroupItem) {
+    if (!isAdminToggleableRouteGroup(group.id)) return;
     const nextExposed = !group.exposed;
-    if (!nextExposed && (group.id === 'admin_web' || group.id === 'rest')) {
+    if (!nextExposed && group.id === 'rest') {
       if (!window.confirm(text.routeLockoutWarn)) return;
     }
     setPendingGroupId(group.id);
@@ -424,11 +432,12 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
     setError('');
     setOperationComplete(false);
     try {
-      const updated = await runSensitive(() => updateAdminRouteGroup(group.id, nextExposed));
+      const updated = await updateAdminRouteGroup(group.id, nextExposed);
       setRouteGroups((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       setOperationComplete(true);
     } catch (caught) {
-      setError(describeError(caught));
+      const detail = describeError(caught);
+      if (detail) setError(detail);
     } finally {
       setPendingGroupId('');
       setLoading(false);
@@ -600,16 +609,14 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
                   </td>
                   <td>{group.risk}</td>
                   <td>
-                    {(!group.exposed || (group.id !== 'member_web' && group.id !== 'admin_web')) && (
-                      <button
-                        className={`member-table-action ${group.exposed ? 'member-table-danger' : ''}`}
-                        type="button"
-                        disabled={loading || pendingGroupId === group.id}
-                        onClick={() => void onToggleRouteGroup(group)}
-                      >
-                        {group.exposed ? text.routeDisable : text.routeEnable}
-                      </button>
-                    )}
+                    <button
+                      className={`member-table-action ${group.exposed ? 'member-table-danger' : ''}`}
+                      type="button"
+                      disabled={loading || pendingGroupId === group.id}
+                      onClick={() => void onToggleRouteGroup(group)}
+                    >
+                      {group.exposed ? text.routeDisable : text.routeEnable}
+                    </button>
                     {group.exposed && <small className="member-route-next-request">{text.routeDisableNextRequest}</small>}
                   </td>
                 </tr>
