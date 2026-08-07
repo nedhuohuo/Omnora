@@ -573,7 +573,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
                 <h2>{text.spaceRenameTitle}</h2>
                 <label>{text.spaceName}<input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} required /></label>
                 {error && <div className="member-error">{text.error}: {error}</div>}
-                <div>
+                <div className="member-modal-actions">
                   <button type="button" onClick={() => setRenameTarget(null)}>{text.cancel}</button>
                   <button className="member-primary" type="submit" disabled={loading || !renameValue.trim()}>{text.spaceRenameSave}</button>
                 </div>
@@ -589,7 +589,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
                 <p className="member-modal-hint"><strong>{deleteTarget.name}</strong></p>
                 <label>{text.spaceDeleteConfirmLabel}<input autoFocus value={deleteConfirmValue} onChange={(event) => setDeleteConfirmValue(event.target.value)} required /></label>
                 {error && <div className="member-error">{text.error}: {error}</div>}
-                <div>
+                <div className="member-modal-actions">
                   <button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button>
                   <button className="member-modal-danger" type="submit" disabled={loading || deleteConfirmValue !== deleteTarget.name}>{text.spaceDeleteSubmit}</button>
                 </div>

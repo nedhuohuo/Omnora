@@ -849,7 +849,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
         <section className="member-login-panel">
           <div className="member-brand"><span>O</span>Omnora</div>
           <h1>{setupMode ? text.setupTitle : text.signIn}</h1>
-          <p>{setupMode ? text.setupDetail : text.myFiles}</p>
+          {setupMode && <p>{text.setupDetail}</p>}
           {setupMode ? (
             <form onSubmit={onInitialize}>
               <label>{text.setupToken}<input value={setupForm.token} onChange={(event) => setSetupForm({ ...setupForm, token: event.target.value })} autoComplete="one-time-code" required /></label>
@@ -984,7 +984,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
               ))}
             </div>
           )}
-          {activeTab === 'files' ? <>
+          {activeTab === 'files' ? <div className="member-page-flow">
           <div className="member-crumbs"><button type="button" onClick={() => openDirectory('.')}>{activeSpace?.name ?? text.myFiles}</button>{crumbItems.map((part, index) => <span key={`${part}-${index}`}><b>/</b><button type="button" onClick={() => openDirectory(crumbItems.slice(0, index + 1).join('/'))}>{part}</button></span>)}</div>
           <div className="member-heading"><div><h1>{searchResults === null ? text.myFiles : `${text.search}: ${searchQuery}`}</h1><p>{activeMount ? `${activeMount.name} · ${mountUnavailable ? text.statusUnavailable : readOnly ? text.readOnly : text.readWrite}` : text.noMount}</p></div><div className="member-view-toggle"><button type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}>{text.list}</button><button type="button" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}>{text.grid}</button></div></div>
           <div className="member-toolbar"><button className="member-primary" type="button" disabled={writeBlocked || !activeMountId} onClick={() => fileInputRef.current?.click()}>{text.upload}</button><button type="button" disabled={writeBlocked || !activeMountId} onClick={() => setNewFolderOpen(true)}>{text.newFolder}</button>{canManageShares && searchResults === null && <button type="button" disabled={!activeMountId} onClick={openShareForCurrentPath}>{text.shareAction}</button>}{searchResults !== null && <button type="button" onClick={() => { setSearchResults(null); setSearchNextCursor(''); setSearchQuery(''); }}>{text.clearSearch}</button>}<span className="member-toolbar-spacer" /><button type="button" onClick={() => void refreshDirectory(activeSpaceId, activeMountId, relativePath)} disabled={loading || !activeMountId || mountUnavailable}>{text.refresh}</button><input ref={fileInputRef} type="file" multiple hidden onChange={onFileInput} /></div>
@@ -1016,7 +1016,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             ))}</div>
           )}
           {searchResults !== null && searchNextCursor && <button className="member-load-more" type="button" onClick={() => void loadMoreSearchResults()} disabled={loading}>{text.loadMore}</button>}
-          </> : activeTab === 'trash' ? <>
+          </div> : activeTab === 'trash' ? <div className="member-page-flow">
             <div className="member-heading"><div><h1>{text.trashTitle}</h1><p>{activeMount ? `${activeMount.name} · ${text.trashDetail}` : text.noMount}</p></div><button className="member-secondary-action" type="button" onClick={() => void refreshTrash()} disabled={loading || !activeMountId}>{text.refresh}</button></div>
             <div className="member-toolbar"><button type="button" className="member-modal-danger" disabled={loading || trashItems.length === 0 || readOnly || mountUnavailable} onClick={() => void onEmptyTrash()}>{text.trashEmptyAction}</button></div>
             {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
@@ -1034,7 +1034,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
                 ))}</tbody>
               </table>
             )}
-          </> : activeTab === 'shares' ? <MemberSharesPanel locale={locale} />
+          </div> : activeTab === 'shares' ? <MemberSharesPanel locale={locale} />
             : activeTab === 'tokens' ? <MemberTokensPanel locale={locale} />
             : activeTab === 'docs' ? <MemberDocsPanel locale={locale} />
             : activeTab === 'account' ? <MemberAccountPanel locale={locale} />
@@ -1044,7 +1044,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
 
       {transfers.length > 0 && <aside className="member-transfers"><div><strong>{text.activeTransfers}</strong><button type="button" onClick={() => setTransfers((items) => items.filter((item) => item.state === 'uploading' || item.state === 'queued'))}>{text.clearCompleted}</button></div>{transfers.map((transfer) => <div className="member-transfer" key={transfer.id}><span>{transfer.name}</span><progress value={transfer.progress} max="100" /><small>{transfer.state === 'failed' ? `${text.uploadFailed}: ${transfer.detail ?? ''}` : transfer.state === 'completed' ? text.uploadComplete : `${text.uploadProgress} ${transfer.progress}%`}</small>{(transfer.state === 'failed' || transfer.state === 'cancelled') && <small>{text.resumeUploadHint}</small>}{(transfer.state === 'failed' || transfer.state === 'cancelled') && <button type="button" onClick={() => { setResumeSelectMode(true); fileInputRef.current?.click(); }}>{resumeSelectMode ? text.selectFile : text.resumeUpload}</button>}{(transfer.state === 'uploading' || transfer.state === 'queued') && <button type="button" onClick={() => void cancelTransfer(transfer)}>{text.cancel}</button>}</div>)}</aside>}
 
-      {newFolderOpen && <div className="member-modal-backdrop"><form className="member-modal" onSubmit={onCreateFolder}><h2>{text.newFolder}</h2><label>{text.folderName}<input autoFocus value={folderName} onChange={(event) => setFolderName(event.target.value)} required /></label><div><button type="button" onClick={() => setNewFolderOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={loading}>{text.create}</button></div></form></div>}
+      {newFolderOpen && <div className="member-modal-backdrop"><form className="member-modal" onSubmit={onCreateFolder}><h2>{text.newFolder}</h2><label>{text.folderName}<input autoFocus value={folderName} onChange={(event) => setFolderName(event.target.value)} required /></label><div className="member-modal-actions"><button type="button" onClick={() => setNewFolderOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={loading}>{text.create}</button></div></form></div>}
 
       {preview && <div className="member-preview-backdrop" onClick={() => setPreview(null)} role="presentation"><div className="member-preview-dialog" role="dialog" aria-modal="true" aria-label={preview.name} onClick={(event) => event.stopPropagation()}><div className="member-preview-toolbar"><strong>{preview.name}</strong><div className="member-preview-actions"><a className="member-preview-download" href={previewDownload}>{text.download}</a><button type="button" onClick={() => setPreview(null)}>{text.closePreview}</button></div></div><div className="member-preview-stage">{previewFailed ? <p className="member-preview-error">{text.previewFailed}</p> : preview.previewKind === 'image' ? <img src={previewSrc} alt={preview.name} onError={() => setPreviewFailed(true)} /> : preview.previewKind === 'media' ? (isAudioName(preview.name) ? <audio src={previewSrc} controls onError={() => setPreviewFailed(true)} /> : <video src={previewSrc} controls onError={() => setPreviewFailed(true)} />) : preview.previewKind === 'text' || preview.previewKind === 'markdown' ? (previewText === null ? <p className="member-preview-loading">{text.loading}</p> : preview.previewKind === 'markdown' ? <MarkdownPreview text={previewText} resolveAsset={(src) => markdownAssetURL(activeSpaceId, preview.mountId, preview.relativePath, src)} /> : <pre className="member-preview-text">{previewText}</pre>) : previewBlobUrl ? <iframe title={preview.name} src={previewBlobUrl} /> : <p className="member-preview-loading">{text.loading}</p>}</div></div></div>}
 
@@ -1054,7 +1054,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             <h2>{text.renameTitle}</h2>
             <label>{text.renameNewName}<input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} required /></label>
             {error && <p className="member-error">{text.error}: {error}</p>}
-            <div><button type="button" onClick={() => setRenameTarget(null)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={renameBusy || !renameValue.trim()}>{text.create}</button></div>
+            <div className="member-modal-actions"><button type="button" onClick={() => setRenameTarget(null)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={renameBusy || !renameValue.trim()}>{text.create}</button></div>
           </form>
         </div>
       )}
@@ -1066,7 +1066,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             <p className="member-modal-hint">{deleteTargetPolicy === 'permanent' ? text.deletePermanentConfirmDetail : deleteTargetPolicy === 'unavailable' ? text.deleteUnavailableDetail : text.deleteConfirmDetail}</p>
             {error && <p className="member-error">{text.error}: {error}</p>}
             <p className="member-modal-hint"><strong>{deleteTarget.name}</strong></p>
-            <div><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDeleteConfirmed()} disabled={deleteBusy || deleteTargetPolicy === 'unavailable'}>{text.deleteFile}</button></div>
+            <div className="member-modal-actions"><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDeleteConfirmed()} disabled={deleteBusy || deleteTargetPolicy === 'unavailable'}>{text.deleteFile}</button></div>
           </div>
         </div>
       )}
@@ -1088,7 +1088,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             </label>
             <label>{text.moveTargetPath}<input value={destinationPath} onChange={(event) => setDestinationPath(event.target.value)} placeholder="." /><small className="member-path-hint">{text.moveTargetPathHint}</small></label>
             {error && <p className="member-error">{text.error}: {error}</p>}
-            <div>
+            <div className="member-modal-actions">
               <button type="button" onClick={() => setOperationTarget(null)}>{text.cancel}</button>
               <button className="member-primary" type="submit" disabled={operationBusy || !destinationMountId}>{operationTarget.operation === 'copy' ? text.copySubmit : text.moveSubmit}</button>
             </div>

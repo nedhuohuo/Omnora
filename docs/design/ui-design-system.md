@@ -8,7 +8,7 @@
 
 ## 1. 设计原则
 
-- **安静、密集、清晰**：NAS 工作台风格，紧凑列表、低干扰操作条，不做花哨装饰。
+- **安静、中等密度、清晰**：NAS 工作台风格，保留充足留白与低干扰操作条，不做花哨装饰。
 - **令牌驱动**：颜色、字号、间距、圆角、阴影一律通过 CSS 变量（设计令牌）引用，禁止在组件 CSS 中出现未经令牌定义的硬编码值。
 - **主题双轨**：所有颜色必须同时提供浅色（默认）与深色（`[data-theme="dark"]`）两个取值，由 `:root` 与 `[data-theme="dark"]` 中的同名变量切换。
 - **颜色不唯一**：状态表达不能只靠颜色，必须配合文字、图标或符号。
@@ -142,15 +142,46 @@
 | `--space-7` | 32px | 内容区水平内边距 |
 | `--space-8` | 40px | 大面积留白 |
 
-布局上的 `gap` / `margin` / `padding` 必须从本阶梯取值，禁止 9、11、13、14、18、21、23、25、26、28、30 等中间值。
+基础阶梯用于构成令牌；布局上的 `gap` / `margin` / `padding` 必须从本阶梯取值，禁止 9、11、13、14、18、21、23、25、26、28、30 等中间值。
 
-### 4.2 控件内边距
+### 4.2 语义布局令牌
 
-控件（按钮、输入框、下拉）内边距允许以下固定值，不属于布局阶梯：
+页面和组件布局必须优先使用下列语义令牌。基础 `--space-*` 不能替代其布局语义；仅在图标、边框等明确局部场景使用基础阶梯。
 
-- 按钮/输入框：水平 `10–12px`，高度 `34px`（默认）/ `37px`（表单）/ `39px`（登录主按钮）。
-- 小按钮（徽标操作）：水平 `8–9px`，高度 `24–28px`。
-- 紧凑提示条：`9px 10–11px`。
+| 令牌 | 对应基础令牌 | 用途 |
+| --- | --- | --- |
+| `--layout-page-inline` | `--space-7`（32px） | 桌面内容区横向留白 |
+| `--layout-page-block-start` | `--space-6`（24px） | 内容区起始留白 |
+| `--layout-section` | `--space-6`（24px） | 主区块、卡片、表单内边距 |
+| `--layout-section-compact` | `--space-5`（20px） | 小屏卡片或紧凑区块 |
+| `--layout-component` | `--space-4`（16px） | 组件之间、工具条到内容 |
+| `--layout-group` | `--space-3`（12px） | 相关控件或表单组 |
+| `--layout-inline` | `--space-2`（8px） | 同行控件间隙 |
+| `--layout-micro` | `--space-1`（4px） | 图标与极小局部间隙 |
+
+### 4.3 控件几何与布局保留
+
+| 令牌 | 值 | 用途 |
+| --- | --- | --- |
+| `--control-xs` | 28px | 非主要的紧凑控件 |
+| `--control-sm` | 32px | 次级控件 |
+| `--control-md` | 36px | 桌面常规按钮、输入框 |
+| `--control-lg` | 40px | 手机主要交互控件 |
+| `--control-padding-inline` | `--space-3`（12px） | 常规控件水平内边距 |
+| `--control-padding-inline-compact` | `--space-2`（8px） | 紧凑控件水平内边距 |
+| `--table-header-height` | 40px | 表头高度 |
+| `--table-row-min-height` | 52px | 表格行最小高度 |
+| `--shell-topbar-height` | 64px | 桌面 shell / 公开分享页顶栏高度 |
+| `--layout-content-bottom-reserve` | 112px | 内容区底部操作保留 |
+
+手机上的主要交互控件最小高度为 `--control-lg`（40px）。紧凑控件可使用更小的几何值，但不得作为主要触摸目标。
+
+### 4.4 页面节奏
+
+- 页面 `h1` 到副标题：`--layout-inline`（8px）。
+- 标题区到下一组内容：`--layout-section-compact`（20px）。
+- 工具条内控件间隙：`--layout-inline`（8px）；工具条到表格或空态：`--layout-component`（16px）。
+- 卡片与表单内边距：`--layout-section`（24px）；卡片内相关内容组：`--layout-component`（16px）。
 
 ## 5. 圆角
 
@@ -212,56 +243,59 @@
 | 危险按钮 `.member-modal-danger` | `--danger` 底、白字 |
 | 文字按钮（列表内操作） | 无边框、`--accent-text`、悬停下划线 |
 
-- 按钮字号统一 `--text-md`（13px），`line-height: 1`，`min-height` 见 4.2。
+- 按钮字号统一 `--text-md`（13px），`line-height: 1`，高度与水平内边距见 4.3。
 - 聚焦可见性：`outline: 3px solid rgb(22 119 255 / 0.36)`、`outline-offset: 2px`（全局定义于 `styles.css`，禁止覆盖）。
 
 ### 9.2 输入框与表单
 
-- 输入框：`height: 37px`、`padding: 0 10px`、`--border-strong` 边框、`--radius-sm`、底色 `--input-bg`。
-- 表单 label：`--text-md`、`--text-muted`，与控件间距 `--space-2`（gap 7px 归一到 8px）。
+- 输入框：默认输入框最小高度 `--control-md`；登录、成员表单和弹窗表单用 `--control-lg`。水平内边距 `--control-padding-inline`、`--border-strong` 边框、`--radius-sm`、底色 `--input-bg`。
+- 表单 label：`--text-md`、`--text-muted`，与控件间距 `--layout-inline`。
 - 复选框：`16 × 16px`、`accent-color: var(--accent)`。
 
 ### 9.3 表格
 
-- 表头：`height: 38px`、`--text-sm` 字号 `600` 字重、`--text-faint` 色、底线 `--border-soft`。
-- 行：`height: 50–52px`、`--text-md`、行间线 `--border-soft`、悬停 `--surface-hover`。
+- 表头：高度 `--table-header-height`、`--text-sm` 字号 `600` 字重、`--text-faint` 色、底线 `--border-soft`。
+- 行：最小高度 `--table-row-min-height`、`--text-md`、行间线 `--border-soft`、悬停 `--surface-hover`。
 - 管理端操作列按钮同 9.1 文字按钮。
 
 ### 9.4 卡片与面板
 
-- 卡片：`--surface` 底、`--border-card` 边框、`--radius-md`、内边距 `--space-4`。
-- 表单容器：`--surface-2` 底、`--border-card` 边框、`--radius-md`、内边距 18px（归一到 `--space-4`）。
-- 提示条（语义框）：`--radius-sm`、内边距 `9px 11px`、配色取 2.3 语义三件套，字号 `--text-md`。
+- 卡片：`--surface` 底、`--border-card` 边框、`--radius-md`、内边距 `--layout-section`。
+- 表单容器：`--surface-2` 底、`--border-card` 边框、`--radius-md`、内边距 `--layout-section`；内部相关内容组用 `--layout-component` 分隔。
+- 提示条（语义框）：`--radius-sm`、内边距取语义布局令牌、配色取 2.3 语义三件套，字号 `--text-md`。
 
 ### 9.5 模态框
 
-- 宽度 `min(380px, 100%)`（管理表单 `min(640px, 100%)`）、内边距 `--space-5`、`--radius-md`、`--shadow-xl`、遮罩 `--backdrop`。
-- 标题 `--text-3xl`（18px），标题与内容间距 `--space-4`（gap 18 归一到 16px）。
-- 底部操作区右对齐、间距 `--space-2`。
+- 宽度 `min(380px, 100%)`（管理表单 `min(640px, 100%)`）、内边距 `--layout-section-compact`、`--radius-md`、`--shadow-xl`、遮罩 `--backdrop`。
+- 标题 `--text-3xl`（18px），标题与内容间距 `--layout-component`。
+- 底部操作区右对齐、间距 `--layout-inline`。
 
 ## 10. 焦点与可访问性
 
 - 键盘焦点：全局 `:focus-visible` 蓝环（见 9.1），禁止用 `outline: none` 静默移除。
 - 图标按钮必须有 `aria-label`；颜色不单独表达状态。
 - 对比度门槛：正文 `4.5:1`，控件边界与状态图形 `3:1`（以 WCAG 2.2 AA 为工程门槛）。
-- 触控目标不小于 `44 × 44px`，相邻目标间距至少 `--space-2`。
+- 手机主要触控目标最小高度为 `--control-lg`（40px），相邻目标间距至少 `--layout-inline`；紧凑控件不承担主要触摸操作。
 
 ## 11. 响应式断点
 
 | 断点 | 规则 |
 | --- | --- |
-| `900px` | 顶栏换行、侧栏横向滚动、内容内边距 `20px 15px` |
+| `900px` | 顶栏可换行、侧栏横向滚动、内容区横向 × 纵向留白 `24px × 20px` |
 | `700px` | MCP 状态/预设网格 `2` 列 |
 | `640px` | Token 边界行单列 |
 | `560px` | 隐藏表格次要列、工具栏收窄 |
 | `480px` | 状态网格单列 |
 
-内容区桌面内边距 `25px 30px`（归一为 `--space-6 --space-7`），底部留白 `110px`。
+内容区横向 × 纵向留白：桌面 `32px × 24px`，平板 `24px × 20px`，手机 `16px × 20px`。移动端顶栏可自然增高，以容纳换行后的搜索等内容；不要强行固定高度。内容区底部保留 `--layout-content-bottom-reserve`（112px）。
+
+公开分享页独立于成员页 CSS：共享的品牌、语言、按钮、状态与文件列表基础样式定义在 `styles.css`，分享页不导入 `member-files.css`。其桌面顶栏使用 `--shell-topbar-height`（64px）。
 
 ## 12. 规范执行规则
 
 - **新增颜色必须走令牌**：任何新色值先判断是否可复用现有令牌；新增语义色须同时补充浅/深两档并更新本文。
 - **禁用值清单**：字号 10/19/23px、圆角 7px、间距 9/11/13/14/18/21/23/25/26/28/30px、硬编码语义色（`#fff9ea`、`#f0d5a6`、`#925d00`、`#f4c8c2`、`#fff5f3`、`#f1fbf5`、`#b9e4cc`、`#1f7a45`、`#cfe0f7`、`#f2f7ff`、`#3d6c9e` 等）。
 - **主题必须双轨**：新增颜色不在深色模式提供对应值时，视为规范违约。
-- **样式放对文件**：全局令牌只存在于 `styles.css`；组件样式按面分文件（成员/管理 `member-files.css`、分享 `share-portal.css`）。
+- **样式放对文件**：全局令牌和跨成员页/分享页复用的基础组件样式存在于 `styles.css`；页面专属样式按面分文件（成员/管理 `member-files.css`、分享 `share-portal.css`）。公开分享页不得通过导入成员页 CSS 获取样式。
+- **允许的局部值**：固定深色预览、文字行高、图标尺寸可以按局部视觉需求设置；其余布局间距与控件几何仍必须使用本节令牌。
 - **文档同步**：本文与代码冲突时，以代码实际行为为准修正本文，或按本文修正代码——不允许两边长期不一致。

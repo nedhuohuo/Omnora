@@ -577,7 +577,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
             <form className="member-modal" onSubmit={onRenameMount}>
               <h2>{text.renameMount}</h2>
               <label>{text.mountName}<input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} required /></label>
-              <div>
+              <div className="member-modal-actions">
                 <button type="button" onClick={() => setRenameTarget(null)}>{text.cancel}</button>
                 <button className="member-primary" type="submit" disabled={loading || !renameValue.trim()}>{text.saveMountName}</button>
               </div>
@@ -590,7 +590,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
               <h2>{text.deleteMount}</h2>
               <p className="member-modal-hint">{text.deleteMountDetail}</p>
               <p className="member-modal-hint"><strong>{deleteTarget.name}</strong> · {deleteTarget.space}</p>
-              <div>
+              <div className="member-modal-actions">
                 <button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button>
                 <button className="member-modal-danger" type="submit" disabled={loading}>{text.confirmDeleteMount}</button>
               </div>

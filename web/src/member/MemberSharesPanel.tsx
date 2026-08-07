@@ -239,7 +239,7 @@ export function ShareCreatedResult({ text, result, onClose }: { text: LocaleText
           {result.secret && <button type="button" onClick={() => void copyText(result.secret ?? '').then((ok) => setCopied(ok ? 'secret' : 'failed'))}>{text.shareCopySecret}</button>}
         </div>
         {copied === 'url' || copied === 'secret' ? <p className="member-admin-notice">{text.shareUrlCopied}</p> : copied === 'failed' ? <p className="member-error">{text.shareCopyFailed}</p> : null}
-        <div><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
+        <div className="member-modal-actions"><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
       </div>
     </div>
   );
@@ -266,7 +266,7 @@ function ShareLinkViewer({ text, share, onClose }: { text: LocaleText; share: Sh
         ) : (
           <p className="member-error">{text.shareLinkUnavailable}</p>
         )}
-        <div><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
+        <div className="member-modal-actions"><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
       </div>
     </div>
   );
@@ -458,7 +458,7 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
             <h2>{text.shareRevokeConfirmTitle}</h2>
             <p className="member-modal-hint">{text.shareRevokeConfirmDetail}</p>
             <p className="member-modal-hint"><strong>{revokeTarget.relativePath}</strong></p>
-            <div><button type="button" onClick={() => setRevokeTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onRevoke()} disabled={loading}>{text.shareRevoke}</button></div>
+            <div className="member-modal-actions"><button type="button" onClick={() => setRevokeTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onRevoke()} disabled={loading}>{text.shareRevoke}</button></div>
           </div>
         </div>
       )}

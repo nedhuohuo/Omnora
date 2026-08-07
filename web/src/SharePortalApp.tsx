@@ -14,7 +14,6 @@ import {
 import { getStoredLocale, localeMessages, saveLocale, type MemberLocale } from './member/i18n';
 import FileTypeIcon from './member/FileTypeIcon';
 import MarkdownPreview from './member/MarkdownPreview';
-import './member/member-files.css';
 import './share-portal.css';
 
 type PortalStatus = 'checking' | 'password-required' | 'secret-missing' | 'unavailable' | 'ready';

@@ -320,7 +320,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
               <button type="button" onClick={() => void copyText(createdToken.connection.text).then((ok) => { setConnectionCopied(ok); setCopyFailed(!ok); })}>{text.tokenMcpCopyConnection}</button>
               {connectionCopied && <p className="member-admin-notice">{text.tokenCopied}</p>}
             </div>
-            <div><button className="member-primary" type="button" onClick={closeCreatedToken}>{text.tokenClose}</button></div>
+            <div className="member-modal-actions"><button className="member-primary" type="button" onClick={closeCreatedToken}>{text.tokenClose}</button></div>
           </div>
         </div>
       )}
@@ -331,7 +331,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
             <h2>{text.tokenRevokeConfirmTitle}</h2>
             <p className="member-modal-hint">{text.tokenRevokeConfirmDetail}</p>
             <p className="member-modal-hint"><strong>{deleteTarget.name}</strong></p>
-            <div><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDelete()} disabled={loading}>{text.tokenRevoke}</button></div>
+            <div className="member-modal-actions"><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDelete()} disabled={loading}>{text.tokenRevoke}</button></div>
           </div>
         </div>
       )}
