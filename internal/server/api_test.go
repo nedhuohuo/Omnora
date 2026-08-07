@@ -76,7 +76,7 @@ func TestSessionResponsesIncludeCurrentAdminStatus(t *testing.T) {
 	}
 }
 
-func TestAdminLoginWithoutTOTPCreatesEnrollmentSession(t *testing.T) {
+func TestAdminLoginWithoutTOTPCreatesFullSession(t *testing.T) {
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	body, err := json.Marshal(map[string]string{"login": admin.Email, "password": apiTestPassword})
@@ -94,8 +94,8 @@ func TestAdminLoginWithoutTOTPCreatesEnrollmentSession(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode login: %v", err)
 	}
-	if response.Purpose != identity.SessionPurposeTOTPEnrollment || !response.RequiresTOTPEnrollment {
-		t.Fatalf("login response = %#v, want enrollment session", response)
+	if response.Purpose != identity.SessionPurposeFull || response.RequiresTOTPEnrollment || !response.IsAdmin {
+		t.Fatalf("login response = %#v, want full admin session without enrollment", response)
 	}
 	cookies := rec.Result().Cookies()
 	if len(cookies) != 1 {
@@ -103,10 +103,10 @@ func TestAdminLoginWithoutTOTPCreatesEnrollmentSession(t *testing.T) {
 	}
 	session, err := identity.New(db.SQL(), identity.Options{}).VerifySession(context.Background(), cookies[0].Value)
 	if err != nil {
-		t.Fatalf("verify enrollment session: %v", err)
+		t.Fatalf("verify session: %v", err)
 	}
-	if session.Purpose != identity.SessionPurposeTOTPEnrollment {
-		t.Fatalf("session purpose = %q, want enrollment", session.Purpose)
+	if session.Purpose != identity.SessionPurposeFull {
+		t.Fatalf("session purpose = %q, want full", session.Purpose)
 	}
 }
 
@@ -514,15 +514,6 @@ func createAPITestAccounts(t *testing.T, db *store.DB) (identity.Account, identi
 
 func issueAPITestSession(t *testing.T, db *store.DB, accountID string) *http.Cookie {
 	t.Helper()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.SQL().ExecContext(context.Background(), `
-UPDATE accounts
-SET totp_required = CASE WHEN role = 'admin' THEN 1 ELSE totp_required END,
-    totp_confirmed_at = CASE WHEN role = 'admin' THEN COALESCE(totp_confirmed_at, ?) ELSE totp_confirmed_at END
-WHERE id = ?
-`, now, accountID); err != nil {
-		t.Fatalf("prepare test admin TOTP state: %v", err)
-	}
 	issued, err := identity.New(db.SQL(), identity.Options{}).CreateSession(context.Background(), identity.SessionRequest{
 		AccountID: accountID,
 		TTL:       time.Hour,

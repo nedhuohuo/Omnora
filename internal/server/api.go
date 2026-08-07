@@ -377,26 +377,21 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 			s.writeIdentityError(w, r, err)
 			return
 		}
-		purpose := identity.SessionPurposeFull
-		adminEnrollment := account.Role == domain.AccountRoleAdmin &&
-			(account.TOTPResetRequired || !account.TOTPRequired || account.TOTPConfirmedAt.IsZero())
-		if adminEnrollment {
-			purpose = identity.SessionPurposeTOTPEnrollment
-		} else {
-			if ok, err := s.verifyLoginTOTP(r, account.ID, req.TOTPCode); err != nil {
-				writeDBError(w, r, err)
-				return
-			} else if !ok {
-				decision := s.recordCredentialFailure(r, ratelimit.ScopeLogin, req.Login)
-				if !decision.Allowed {
-					writeRateLimited(w, r, decision)
-					return
-				}
-				httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
+		// TOTP is optional for every role, including administrators. Only
+		// accounts that have already enabled TOTP must supply a code.
+		if ok, err := s.verifyLoginTOTP(r, account.ID, req.TOTPCode); err != nil {
+			writeDBError(w, r, err)
+			return
+		} else if !ok {
+			decision := s.recordCredentialFailure(r, ratelimit.ScopeLogin, req.Login)
+			if !decision.Allowed {
+				writeRateLimited(w, r, decision)
 				return
 			}
+			httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
+			return
 		}
-		issued, err := svc.CompletePasswordResetAndCreateSession(r.Context(), account.ID, account.PasswordHash, newHash, purpose, 8*time.Hour, func(ctx context.Context, tx *sql.Tx) error {
+		issued, err := svc.CompletePasswordResetAndCreateSession(r.Context(), account.ID, account.PasswordHash, newHash, identity.SessionPurposeFull, 8*time.Hour, func(ctx context.Context, tx *sql.Tx) error {
 			if err := s.recordAuditTx(ctx, tx, r, account.ID, "login", "account", account.ID, `{"recoveryReset":true}`); err != nil {
 				return err
 			}
@@ -425,37 +420,24 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	purpose := identity.SessionPurposeFull
-	adminEnrollment := account.Role == domain.AccountRoleAdmin &&
-		(account.TOTPResetRequired || !account.TOTPRequired || account.TOTPConfirmedAt.IsZero())
-	if adminEnrollment {
-		// A TOTP reset must not leave an older full session usable for member
-		// file operations while the administrator is completing enrollment.
-		if account.TOTPResetRequired {
-			if err := svc.RevokeAllSessions(r.Context(), account.ID, ""); err != nil {
-				s.writeIdentityError(w, r, err)
-				return
-			}
-		}
-		purpose = identity.SessionPurposeTOTPEnrollment
-	} else {
-		if ok, err := s.verifyLoginTOTP(r, account.ID, req.TOTPCode); err != nil {
-			writeDBError(w, r, err)
-			return
-		} else if !ok {
-			decision := s.recordCredentialFailure(r, ratelimit.ScopeLogin, req.Login)
-			if !decision.Allowed {
-				writeRateLimited(w, r, decision)
-				return
-			}
-			httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
+	// TOTP is optional for every role, including administrators. Only
+	// accounts that have already enabled TOTP must supply a code at login.
+	if ok, err := s.verifyLoginTOTP(r, account.ID, req.TOTPCode); err != nil {
+		writeDBError(w, r, err)
+		return
+	} else if !ok {
+		decision := s.recordCredentialFailure(r, ratelimit.ScopeLogin, req.Login)
+		if !decision.Allowed {
+			writeRateLimited(w, r, decision)
 			return
 		}
+		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
+		return
 	}
 	issued, err := svc.CreateSession(r.Context(), identity.SessionRequest{
 		AccountID: account.ID,
 		TTL:       8 * time.Hour,
-		Purpose:   purpose,
+		Purpose:   identity.SessionPurposeFull,
 	})
 	if err != nil {
 		s.writeIdentityError(w, r, err)

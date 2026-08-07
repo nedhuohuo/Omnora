@@ -411,7 +411,7 @@ Promotion, current-session revocation, new full-session insertion, and success a
 
 - [ ] **Step 7: Enforce administrator TOTP invariants**
 
-`requireAdmin` must require active administrator role, `password_reset_required=0`, `totp_reset_required=0`, confirmed TOTP, and `SessionPurposeFull`. `disableAccountTOTP` returns `403 admin_totp_required` for administrators even after recent reauthentication. Members may disable after the Task 4 recent-reauth guard succeeds.
+> **Superseded 2026-08-07:** Administrator TOTP is optional (same as members). `requireAdmin` requires active administrator role, `password_reset_required=0`, and `SessionPurposeFull` only. `disableAccountTOTP` is allowed for administrators. Do not reintroduce forced admin MFA / enrollment.
 
 - [ ] **Step 8: Verify the complete enrollment state machine**
 

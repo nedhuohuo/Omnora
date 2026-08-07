@@ -204,17 +204,6 @@ func (s *Server) disableAccountTOTP(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	var role string
-	if err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT role FROM accounts WHERE id = ? AND status = 'active'
-`, session.AccountID).Scan(&role); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if role == string(domain.AccountRoleAdmin) {
-		httpx.WriteError(w, r, http.StatusForbidden, "admin_totp_required", "administrator TOTP cannot be disabled")
-		return
-	}
 	var req struct {
 		Password string `json:"password"`
 		Code     string `json:"code"`

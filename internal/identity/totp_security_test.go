@@ -150,7 +150,7 @@ UPDATE accounts SET totp_pending_secret_ciphertext = ?, totp_pending_expires_at 
 	}
 }
 
-func TestAdminCannotDisableTOTP(t *testing.T) {
+func TestAdminCanDisableTOTP(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 	svc := newTestService(db)
@@ -166,15 +166,16 @@ func TestAdminCannotDisableTOTP(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE accounts SET totp_required = 1, totp_secret_ciphertext = 'v1:active' WHERE id = ?`, admin.Account.ID); err != nil {
 		t.Fatalf("enable TOTP: %v", err)
 	}
-	if err := svc.DisableTOTP(ctx, admin.Account.ID); !errors.Is(err, ErrAdminTOTPRequired) {
-		t.Fatalf("DisableTOTP() error = %v, want ErrAdminTOTPRequired", err)
+	if err := svc.DisableTOTP(ctx, admin.Account.ID); err != nil {
+		t.Fatalf("DisableTOTP() error = %v", err)
 	}
 	var required int
-	if err := db.QueryRowContext(ctx, `SELECT totp_required FROM accounts WHERE id = ?`, admin.Account.ID).Scan(&required); err != nil {
+	var secret string
+	if err := db.QueryRowContext(ctx, `SELECT totp_required, COALESCE(totp_secret_ciphertext, '') FROM accounts WHERE id = ?`, admin.Account.ID).Scan(&required, &secret); err != nil {
 		t.Fatalf("query admin TOTP: %v", err)
 	}
-	if required != 1 {
-		t.Fatalf("admin TOTP required = %d, want 1", required)
+	if required != 0 || secret != "" {
+		t.Fatalf("admin TOTP state = required %d secret %q, want cleared", required, secret)
 	}
 }
 

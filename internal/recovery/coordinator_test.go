@@ -191,8 +191,8 @@ VALUES ('member', 'member@example.com', 'Member', 'member', 'active', 'hash')
 	if err := db.SQL().QueryRowContext(ctx, `SELECT totp_required, totp_reset_required, password_reset_required FROM accounts WHERE id = 'admin'`).Scan(&adminTOTPRequired, &adminTOTPReset, &passwordReset); err != nil {
 		t.Fatalf("read admin reset flags: %v", err)
 	}
-	if adminTOTPRequired != 0 || adminTOTPReset != 1 || passwordReset != 1 {
-		t.Fatalf("admin reset flags = %d/%d/%d", adminTOTPRequired, adminTOTPReset, passwordReset)
+	if adminTOTPRequired != 0 || adminTOTPReset != 0 || passwordReset != 1 {
+		t.Fatalf("admin reset flags = %d/%d/%d, want totp cleared without forced re-enrollment", adminTOTPRequired, adminTOTPReset, passwordReset)
 	}
 	if err := db.SQL().QueryRowContext(ctx, `SELECT totp_required FROM accounts WHERE id = 'member'`).Scan(&memberTOTPRequired); err != nil {
 		t.Fatalf("read member totp flag: %v", err)

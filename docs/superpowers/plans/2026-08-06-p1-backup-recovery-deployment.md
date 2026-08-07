@@ -30,7 +30,7 @@
 - [ ] 先写迁移升级失败测试：低版本数据库能增加 recovery mode、restore request、backup cleanup 状态；重复应用幂等；高于当前版本的 schema 直接拒绝。
 - [ ] 定义状态 `normal → preparing → recovery_required → restoring → finalize_required → normal_pending_bootstrap → normal`，并规定每个状态允许的进程入口；`ready` 是聚合健康结果，不是持久状态。数据库/manifest 不一致只能进入 `recovery_required`，不能删除记录伪造完成。
 - [ ] 迁移只做 expand：增加 recovery 状态、请求 ID、staging path、source schema version、safe snapshot path、requested/completed timestamps、reason code 和 cleanup_pending；旧二进制仍可打开数据库但不得在 recovery mode 提供普通业务路由。
-- [ ] `RecoveryCoordinator` 以数据库状态为权威，启动时在注册普通路由前读取并校验状态；`preparing`、`recovery_required`、`restoring`、`finalize_required` 进程只注册 health/ready，不注册公共业务或 finalize HTTP 路由。`normal_pending_bootstrap` 只允许登录、携带 `newPassword` 的密码重置登录、管理员 TOTP enrollment/confirm 和 logout，且 `/readyz` 固定 503。`/readyz` 必须聚合 recovery normal、数据库迁移/invariant、session-purpose rollout、route hydration、HTTP security configuration 和 audit health，任一未通过都返回 503。
+- [ ] `RecoveryCoordinator` 以数据库状态为权威，启动时在注册普通路由前读取并校验状态；`preparing`、`recovery_required`、`restoring`、`finalize_required` 进程只注册 health/ready，不注册公共业务或 finalize HTTP 路由。`normal_pending_bootstrap` 只允许登录、携带 `newPassword` 的密码重置登录和 logout（TOTP 可选，不强制管理员 enrollment），且 `/readyz` 固定 503。`/readyz` 必须聚合 recovery normal、数据库迁移/invariant、session-purpose rollout、route hydration、HTTP security configuration 和 audit health，任一未通过都返回 503。
 - [ ] 为每次状态迁移写同事务 audit；audit 失败回滚状态变更，不能把恢复标记写成成功后再补日志。
 
 **验证命令：**
@@ -78,8 +78,8 @@ go test ./internal/store ./internal/recovery ./internal/server -run 'Test(Recove
 - [ ] recovery coordinator 在监听前复制目标快照到唯一 staging 目录，检查文件权限、SQLite integrity、foreign keys 和 schema version；schema 高于当前版本或损坏快照拒绝并保留原 DB。
 - [ ] staging 上执行向前迁移和 manifest/importer 校验，成功后创建恢复前安全快照；正式替换使用同一文件系统上的原子 rename，并保留可回滚的 safe snapshot。
 - [ ] 替换后在单一事务中提升 `system_state.credential_generation`；身份计划在签发/验证 identity session、browser session 和 AI Token 时比较该 epoch，文件计划在 share/session、download ticket、upload session 上执行同样校验。恢复事务仍显式撤销每个 credential class，generation 只是防漏撤销的第二道校验。
-- [ ] 同一事务清除恢复出的 active/pending TOTP、设置 `password_reset_required=1`，管理员设置 `totp_reset_required=1`，所有外部挂载设为 disabled。身份计划的登录流程要求 valid old password + newPassword 才清除 password flag；管理员随后只能进入 enrollment，旧 TOTP 永远不能认证。
-- [ ] `omnora-recovery finalize --request <id>` 只能从本地 CLI/Unix 或 loopback 受保护通道执行：完成 staging/safe-snapshot 清理和 metadata 校验后将状态置为 `normal_pending_bootstrap`，然后退出。新的 bootstrap 进程只在聚合恢复、迁移/invariant、session-purpose、route hydration、HTTP security 和 audit 门禁通过后完成管理员密码/TOTP enrollment，并在同一事务中切到 `normal` 后退出；后续普通进程才开始监听。finalize 本身不能直接置 `normal` 或 `ready`。
+- [ ] 同一事务清除恢复出的 active/pending TOTP、设置 `password_reset_required=1`，`totp_reset_required=0`（TOTP 可选，不强制重新登记），所有外部挂载设为 disabled。身份计划的登录流程要求 valid old password + newPassword 才清除 password flag；随后签发 full session，旧 TOTP 永远不能认证。
+- [ ] `omnora-recovery finalize --request <id>` 只能从本地 CLI/Unix 或 loopback 受保护通道执行：完成 staging/safe-snapshot 清理和 metadata 校验后将状态置为 `normal_pending_bootstrap`，然后退出。新的 bootstrap 进程在聚合恢复、迁移/invariant、session-purpose、route hydration、HTTP security 和 audit 门禁通过、且管理员完成密码重置后，在同一事务中切到 `normal` 后退出；后续普通进程才开始监听。finalize 本身不能直接置 `normal` 或 `ready`。不强制管理员 TOTP enrollment。
 - [ ] recovery CLI 不接受公网请求，不输出凭证/数据库内容；request、staging、safe snapshot 和日志使用 0600/0700 与唯一 ID。
 - [ ] 加入故障注入：复制中断、迁移失败、校验失败、替换前进程退出、替换后审计/撤销失败、清理失败。每种情况都必须保留原 DB 或进入 `recovery_required`，禁止半替换继续服务。
 

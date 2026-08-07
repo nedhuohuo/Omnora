@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"omnora/internal/identity"
 )
@@ -64,20 +65,15 @@ func TestReauthenticateRotatesMemberSessionWithoutExtendingExpiry(t *testing.T) 
 func TestReauthenticateRejectsEnrollmentSession(t *testing.T) {
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
-	loginBody, err := json.Marshal(map[string]string{"login": admin.Email, "password": apiTestPassword})
+	// Legacy enrollment sessions remain rejected even though new logins no
+	// longer issue them for administrators.
+	issued, err := identity.New(db.SQL(), identity.Options{}).CreateSession(context.Background(), identity.SessionRequest{
+		AccountID: admin.ID,
+		TTL:       time.Hour,
+		Purpose:   identity.SessionPurposeTOTPEnrollment,
+	})
 	if err != nil {
-		t.Fatalf("marshal login: %v", err)
-	}
-	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/session", bytes.NewReader(loginBody))
-	login.Header.Set("Content-Type", "application/json")
-	loginRec := httptest.NewRecorder()
-	handler.ServeHTTP(loginRec, login)
-	if loginRec.Code != http.StatusCreated {
-		t.Fatalf("enrollment login status = %d, body = %s", loginRec.Code, loginRec.Body.String())
-	}
-	cookies := loginRec.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("enrollment login cookies = %#v", cookies)
+		t.Fatalf("create enrollment session: %v", err)
 	}
 	reauthBody, err := json.Marshal(map[string]string{"password": apiTestPassword})
 	if err != nil {
@@ -85,7 +81,7 @@ func TestReauthenticateRejectsEnrollmentSession(t *testing.T) {
 	}
 	reauth := httptest.NewRequest(http.MethodPost, "/api/v1/account/reauthenticate", bytes.NewReader(reauthBody))
 	reauth.Header.Set("Content-Type", "application/json")
-	reauth.AddCookie(cookies[0])
+	reauth.AddCookie(&http.Cookie{Name: sessionCookieName, Value: issued.Token})
 	reauthRec := httptest.NewRecorder()
 	handler.ServeHTTP(reauthRec, reauth)
 	if reauthRec.Code != http.StatusForbidden || !bytes.Contains(reauthRec.Body.Bytes(), []byte(`"code":"enrollment_session"`)) {

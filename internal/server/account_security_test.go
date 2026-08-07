@@ -59,7 +59,7 @@ func TestChangeAccountPassword(t *testing.T) {
 	}
 }
 
-func TestAdminCannotDisableOwnTOTP(t *testing.T) {
+func TestAdminCanDisableOwnTOTP(t *testing.T) {
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	reqBody, err := json.Marshal(map[string]string{"password": apiTestPassword})
@@ -71,18 +71,7 @@ func TestAdminCannotDisableOwnTOTP(t *testing.T) {
 	req.AddCookie(issueAPITestSession(t, db, admin.ID))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("admin disable TOTP status = %d, want %d, body = %s", rec.Code, http.StatusForbidden, rec.Body.String())
-	}
-	var body struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode disable TOTP response: %v", err)
-	}
-	if body.Error.Code != "admin_totp_required" {
-		t.Fatalf("disable TOTP error code = %q, want admin_totp_required", body.Error.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin disable TOTP status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }

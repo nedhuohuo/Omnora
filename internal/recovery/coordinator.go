@@ -313,7 +313,7 @@ SET totp_required = 0,
     totp_pending_expires_at = NULL,
     totp_confirmed_at = NULL,
     password_reset_required = 1,
-    totp_reset_required = CASE WHEN role = 'admin' THEN 1 ELSE 0 END,
+    totp_reset_required = 0,
     updated_at = ?
 `, formatTime(now)); err != nil {
 		return RestoreRequest{}, err

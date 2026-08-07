@@ -15,7 +15,6 @@ var (
 	ErrInvalidCredential         = errors.New("identity: invalid credential")
 	ErrSessionInvalid            = errors.New("identity: invalid session")
 	ErrSessionPurposeInvariant   = errors.New("identity: session purpose invariant failed")
-	ErrAdminTOTPRequired         = errors.New("identity: administrator TOTP cannot be disabled")
 	ErrEnrollmentSession         = errors.New("identity: enrollment session cannot perform this operation")
 )
 

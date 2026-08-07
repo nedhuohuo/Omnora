@@ -83,22 +83,24 @@ flowchart TD
 
 ### 5.1 管理员 MFA、pending TOTP 与近期重新认证
 
-覆盖 P1：管理员 MFA 未强制、管理员可关闭 TOTP、setup 立即覆盖有效密钥。
+> **已由产品决策取代（2026-08-07）：** 管理员与成员的 TOTP **均为可选**。本节原先“强制管理员 MFA / enrollment / 禁止停用”的目标作废；权威规则见 `docs/security/security-model.md` §4.2。下列仍有效的部分仅保留 pending TOTP 与近期重新认证机制。
+
+覆盖仍有效的 P1：setup 立即覆盖有效密钥；敏感 mutation 缺近期重新认证。
 
 目标设计：
 
-- identity_sessions 先增加 nullable purpose 和 reauthenticated_at；新代码只接受显式 full 或 totp_enrollment，NULL 一律 fail closed，不能兼容解释为 full。accounts 同时增加 password_reset_required 和 totp_reset_required，恢复后的登录必须先完成密码重置；管理员在 TOTP reset 清除后只能进入 enrollment session。
+- identity_sessions 先增加 nullable purpose 和 reauthenticated_at；新代码只接受显式 full 或 totp_enrollment，NULL 一律 fail closed，不能兼容解释为 full。accounts 同时增加 password_reset_required 和 totp_reset_required；恢复后的登录必须先完成密码重置。`totp_reset_required` 不再把管理员锁进 enrollment。
 - accounts 增加 totp_pending_secret_ciphertext 和 totp_pending_expires_at。
-- 未登记 TOTP 的管理员在密码正确后只能获得 enrollment session，只能访问 current、TOTP setup/confirm 和 logout。
+- 未启用 TOTP 的管理员在密码正确后获得 full session，与成员相同；不得强制 enrollment 页。
 - setup 只写 pending；confirm 在事务中验证 pending、提升为 active、清空 pending、轮换 session。确认前旧 TOTP 始终有效。
-- requireAdmin 同时检查 active admin、已确认 TOTP、full session。管理员普通入口不能停用 TOTP。
+- requireAdmin 检查 active admin、full session，以及 `password_reset_required=0`。管理员可停用 TOTP。
 - 密码、TOTP 替换和下表列出的敏感 mutation 要求最近五分钟内重新认证；轮换 session 不延长原绝对过期时间。普通 GET/list、成员文件操作、上传、偏好、创建或撤销普通分享不要求近期重新认证，只要求对应的 full session 和业务授权。
 
 近期重新认证协议固定为 POST /api/v1/account/reauthenticate：
 
-- 请求为 password 和可选 totpCode；普通成员验证密码，已启用 TOTP 的成员同时验证当前 TOTP，管理员始终验证密码和当前 TOTP。
-- enrollment session 不能调用 reauthenticate；它只允许完成首次 TOTP 登记。
-- 若 password_reset_required，登录请求在旧密码验证成功后必须同时提交符合策略的新密码；密码哈希在事务外计算，服务端在同一事务清除 reset flag 并创建后续 session。普通成员随后获得 full session，管理员若仍有 totp_reset_required 只能获得 enrollment session。没有新密码时不得签发 full session。
+- 请求为 password 和可选 totpCode；任意角色验证密码，**仅在该账号已启用 TOTP 时**再验证当前 TOTP。
+- 遗留 `totp_enrollment` session 不能调用 reauthenticate；新登录不再签发该 purpose。
+- 若 password_reset_required，登录请求在旧密码验证成功后必须同时提交符合策略的新密码；密码哈希在事务外计算，服务端在同一事务清除 reset flag 并创建 full session。没有新密码时不得签发 full session。
 - 成功后轮换 session token 和 CSRF token，在新 session 写 reauthenticated_at，并返回 status=reauthenticated 与 reauthenticatedUntil。
 - 过期返回 403 reauthentication_required；前端只能在该错误后进入 reauthenticate 流程，不能用固定延时猜测有效期。
 - 凭证错误统一返回 401 invalid_credentials，限流返回 429 和 Retry-After，前端保留原操作并引导完成重新认证后重试。

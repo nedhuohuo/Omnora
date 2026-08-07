@@ -2530,9 +2530,11 @@ components:
           format: date-time
         requiresTotpEnrollment:
           type: boolean
+          description: Legacy compatibility flag. New logins always issue full sessions; TOTP is optional for administrators and members.
         purpose:
           type: string
           enum: [full, totp_enrollment]
+          description: Session purpose. New authentications use full; totp_enrollment is retained only for legacy sessions.
     CreateSessionRequest:
       type: object
       required: [login, password]

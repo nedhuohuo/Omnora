@@ -24,6 +24,8 @@ import (
 
 // requireAdmin resolves the current session and confirms the account is a
 // system administrator, writing an appropriate error response otherwise.
+// TOTP is optional for administrators; only an active admin full session and
+// cleared password-reset flag are required.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (identity.Session, bool) {
 	session, err := s.requireSession(r)
 	if err != nil {
@@ -35,18 +37,17 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (identity.
 		return identity.Session{}, false
 	}
 	var role string
-	var totpRequired, passwordResetRequired, totpResetRequired int
-	var confirmedAt sql.NullString
+	var passwordResetRequired int
 	err = s.sqlDB().QueryRowContext(r.Context(), `
-SELECT role, totp_required, totp_confirmed_at, password_reset_required, totp_reset_required
+SELECT role, password_reset_required
 FROM accounts
 WHERE id = ? AND status = 'active'
-`, session.AccountID).Scan(&role, &totpRequired, &confirmedAt, &passwordResetRequired, &totpResetRequired)
+`, session.AccountID).Scan(&role, &passwordResetRequired)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return identity.Session{}, false
 	}
-	if session.Purpose != identity.SessionPurposeFull || role != string(domain.AccountRoleAdmin) || totpRequired != 1 || !confirmedAt.Valid || passwordResetRequired != 0 || totpResetRequired != 0 {
+	if role != string(domain.AccountRoleAdmin) || passwordResetRequired != 0 {
 		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "only system administrators can perform this action")
 		return identity.Session{}, false
 	}
@@ -91,10 +92,6 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 	var unavailableMounts int
 	if err := db.QueryRowContext(r.Context(), "SELECT COUNT(1) FROM mounts WHERE status = 'unavailable'").Scan(&unavailableMounts); err == nil && unavailableMounts > 0 {
 		risks = append(risks, fmt.Sprintf("%d mount(s) require re-verification", unavailableMounts))
-	}
-	var adminsWithoutTOTP int
-	if err := db.QueryRowContext(r.Context(), "SELECT COUNT(1) FROM accounts WHERE role = 'admin' AND status = 'active' AND totp_required = 0").Scan(&adminsWithoutTOTP); err == nil && adminsWithoutTOTP > 0 {
-		risks = append(risks, fmt.Sprintf("%d administrator account(s) do not have TOTP enabled", adminsWithoutTOTP))
 	}
 	if latestBackup == nil {
 		risks = append(risks, "no backups have been recorded yet")

@@ -8,8 +8,8 @@ import (
 
 // PrepareSessionPurposeRollout backfills legacy sessions before the HTTP
 // listener starts. Unknown purposes block startup rather than being silently
-// reinterpreted. Active, unexpired administrator sessions without TOTP are
-// revoked; all remaining active, unexpired legacy sessions become full.
+// reinterpreted. Active, unexpired legacy sessions become full. TOTP is
+// optional for administrators, so sessions are not revoked for missing TOTP.
 func PrepareSessionPurposeRollout(ctx context.Context, db *sql.DB, now time.Time) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -30,19 +30,6 @@ WHERE revoked_at IS NULL
 	}
 	if invalid != 0 {
 		return ErrSessionPurposeInvariant
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-UPDATE identity_sessions
-SET revoked_at = ?
-WHERE revoked_at IS NULL
-  AND expires_at > ?
-  AND account_id IN (
-		SELECT id FROM accounts
-		WHERE status = 'active' AND role = 'admin' AND totp_required = 0
-	)
-`, formatTime(now), formatTime(now)); err != nil {
-		return err
 	}
 
 	if _, err := tx.ExecContext(ctx, `

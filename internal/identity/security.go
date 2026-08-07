@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-
-	"omnora/internal/domain"
 )
 
 // ErrSessionNotFound is returned when a session id does not belong to the
@@ -171,8 +169,9 @@ func (s *Service) DisableTOTP(ctx context.Context, accountID string) error {
 }
 
 // DisableTOTPSecure clears TOTP and writes an optional success audit event in
-// the same transaction. The role/policy decision remains at the HTTP boundary
-// so password and code verification stay outside the write transaction.
+// the same transaction. Password and current-code verification stay outside
+// the write transaction at the HTTP boundary. Administrators and members may
+// both disable TOTP; it is never a role requirement.
 func (s *Service) DisableTOTPSecure(ctx context.Context, accountID string, auditWriter TxAuditWriter) error {
 	if accountID == "" {
 		return fieldError("account_id", "is required")
@@ -182,17 +181,17 @@ func (s *Service) DisableTOTPSecure(ctx context.Context, accountID string, audit
 		return err
 	}
 	defer tx.Rollback()
-	var role string
+	var status string
 	if err := tx.QueryRowContext(ctx, `
-SELECT role
+SELECT status
 FROM accounts
-WHERE id = ? AND status = 'active'
-`, accountID).Scan(&role); errors.Is(err, sql.ErrNoRows) {
+WHERE id = ?
+`, accountID).Scan(&status); errors.Is(err, sql.ErrNoRows) {
 		return ErrInvalidCredential
 	} else if err != nil {
 		return err
-	} else if role == string(domain.AccountRoleAdmin) {
-		return ErrAdminTOTPRequired
+	} else if status != "active" {
+		return ErrInvalidCredential
 	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE accounts

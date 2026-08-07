@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestPrepareSessionPurposeRolloutRevokesAdminWithoutTOTPAndBackfillsOtherSessions(t *testing.T) {
+func TestPrepareSessionPurposeRolloutBackfillsLegacySessionsWithoutRevokingAdmin(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 	svc := newTestService(db)
@@ -64,13 +64,13 @@ VALUES (?, ?, ?, 'http', 7, '2026-01-01T00:00:00Z', ?)
 		}
 	}
 	assertPurpose("legacy-member-session", SessionPurposeFull)
-	assertPurpose("legacy-admin-session", "")
+	assertPurpose("legacy-admin-session", SessionPurposeFull)
 	var revokedAt string
-	if err := db.QueryRowContext(ctx, "SELECT revoked_at FROM identity_sessions WHERE id = 'legacy-admin-session'").Scan(&revokedAt); err != nil {
-		t.Fatalf("query revoked admin session: %v", err)
+	if err := db.QueryRowContext(ctx, "SELECT COALESCE(revoked_at, '') FROM identity_sessions WHERE id = 'legacy-admin-session'").Scan(&revokedAt); err != nil {
+		t.Fatalf("query admin session: %v", err)
 	}
-	if revokedAt == "" {
-		t.Fatal("legacy admin session was not revoked")
+	if revokedAt != "" {
+		t.Fatalf("legacy admin session was revoked = %q, want empty", revokedAt)
 	}
 }
 
