@@ -36,6 +36,7 @@ run_entrypoint() {
 	OMNORA_MANAGED_STORAGE_DIR="$managed_dir" \
 	OMNORA_INITIALIZATION_TOKEN= \
 	OMNORA_TOTP_ENCRYPTION_KEY= \
+	OMNORA_AUDIT_HMAC_KEY= \
 	sh "$ENTRYPOINT" /bin/sh -c 'printf ready'
 }
 
@@ -44,12 +45,12 @@ run_entrypoint_without_secret_env() {
 	data_dir="$2"
 	managed_dir="$3"
 	db_path="$data_dir/omnora.db"
-	env -u OMNORA_INITIALIZATION_TOKEN -u OMNORA_TOTP_ENCRYPTION_KEY \
+	env -u OMNORA_INITIALIZATION_TOKEN -u OMNORA_TOTP_ENCRYPTION_KEY -u OMNORA_AUDIT_HMAC_KEY \
 		OMNORA_CONFIG_DIR="$config_dir" \
 		OMNORA_DATA_DIR="$data_dir" \
 		OMNORA_DB_PATH="$db_path" \
 		OMNORA_MANAGED_STORAGE_DIR="$managed_dir" \
-		sh "$ENTRYPOINT" /bin/sh -c 'test -n "$OMNORA_INITIALIZATION_TOKEN" && test -n "$OMNORA_TOTP_ENCRYPTION_KEY" && printf ready'
+		sh "$ENTRYPOINT" /bin/sh -c 'test -n "$OMNORA_INITIALIZATION_TOKEN" && test -n "$OMNORA_TOTP_ENCRYPTION_KEY" && test -n "$OMNORA_AUDIT_HMAC_KEY" && printf ready'
 }
 
 run_entrypoint_with_failure() {
@@ -63,6 +64,7 @@ run_entrypoint_with_failure() {
 	OMNORA_MANAGED_STORAGE_DIR="$managed_dir" \
 	OMNORA_INITIALIZATION_TOKEN= \
 	OMNORA_TOTP_ENCRYPTION_KEY= \
+	OMNORA_AUDIT_HMAC_KEY= \
 	sh "$ENTRYPOINT" /bin/sh -c 'exit 1'
 }
 
@@ -85,6 +87,7 @@ run_entrypoint_as_root() {
 	OMNORA_MANAGED_STORAGE_DIR="$managed_dir" \
 	OMNORA_INITIALIZATION_TOKEN= \
 	OMNORA_TOTP_ENCRYPTION_KEY= \
+	OMNORA_AUDIT_HMAC_KEY= \
 	sh "$ENTRYPOINT" /bin/sh -c 'printf root-ready'
 }
 
@@ -173,12 +176,16 @@ mkdir -p "$config_dir" "$data_dir" "$managed_dir"
 
 runtime_stderr="$TMP_ROOT/runtime-stderr"
 [ "$(run_entrypoint "$config_dir" "$data_dir" "$managed_dir" 2>"$runtime_stderr")" = ready ] || exit 1
+cp "$config_dir/runtime.env" "$TMP_ROOT/runtime.env.before"
 token_before=$(sed -n 's/^OMNORA_INITIALIZATION_TOKEN=//p' "$config_dir/runtime.env")
+audit_before=$(sed -n 's/^OMNORA_AUDIT_HMAC_KEY=//p' "$config_dir/runtime.env")
 config_instance=$(sed -n '1p' "$config_dir/.omnora-instance-id")
 data_instance=$(sed -n '1p' "$data_dir/.omnora-instance-id")
 [ -n "$token_before" ] || exit 1
+[ -n "$audit_before" ] || exit 1
+[ "$(grep -c '^OMNORA_AUDIT_HMAC_KEY=' "$config_dir/runtime.env")" = 1 ] || exit 1
 [ "$config_instance" = "$data_instance" ] || exit 1
-if grep -Fq 'Initial setup token:' "$runtime_stderr" || grep -Fq "$token_before" "$runtime_stderr"; then
+if grep -Fq 'Initial setup token:' "$runtime_stderr" || grep -Fq "$token_before" "$runtime_stderr" || grep -Fq "$audit_before" "$runtime_stderr"; then
 	printf 'FAIL: generated initialization token was written to entrypoint stderr\n' >&2
 	exit 1
 fi
@@ -191,6 +198,11 @@ grep -Fq "Omnora generated runtime secrets in $config_dir/runtime.env" "$runtime
 [ "$(run_entrypoint "$config_dir" "$data_dir" "$managed_dir")" = ready ] || exit 1
 token_after=$(sed -n 's/^OMNORA_INITIALIZATION_TOKEN=//p' "$config_dir/runtime.env")
 [ "$token_before" = "$token_after" ] || exit 1
+[ "$(sed -n 's/^OMNORA_AUDIT_HMAC_KEY=//p' "$config_dir/runtime.env")" = "$audit_before" ] || exit 1
+cmp -s "$TMP_ROOT/runtime.env.before" "$config_dir/runtime.env" || {
+	printf 'FAIL: second startup rewrote the complete runtime secrets file\n' >&2
+	exit 1
+}
 [ "$(run_entrypoint_without_secret_env "$config_dir" "$data_dir" "$managed_dir")" = ready ] || exit 1
 
 mv "$db_path" "$db_path.saved"
@@ -206,6 +218,78 @@ if run_entrypoint "$config_dir" "$data_dir" "$managed_dir" >/dev/null 2>&1; then
 	exit 1
 fi
 mv "$config_dir/runtime.env.saved" "$config_dir/runtime.env"
+
+# Upgrade an instance whose old entrypoint persisted only initialization and
+# TOTP keys. The upgraded entrypoint must append exactly one audit key while
+# preserving the existing bytes and then reuse it on the next start.
+old_config_dir="$TMP_ROOT/old-config"
+old_data_dir="$TMP_ROOT/old-data"
+old_managed_dir="$TMP_ROOT/old-managed"
+old_db_path="$old_data_dir/omnora.db"
+mkdir -p "$old_config_dir" "$old_data_dir" "$old_managed_dir"
+printf 'old-instance\n' > "$old_config_dir/.omnora-instance-id"
+printf 'old-instance\n' > "$old_data_dir/.omnora-instance-id"
+printf 'OMNORA_INITIALIZATION_TOKEN=existing-init-token\nOMNORA_TOTP_ENCRYPTION_KEY=existing-totp-key\n' > "$old_config_dir/runtime.env"
+: > "$old_db_path"
+cp "$old_config_dir/runtime.env" "$TMP_ROOT/old-runtime.before"
+env -u OMNORA_INITIALIZATION_TOKEN -u OMNORA_TOTP_ENCRYPTION_KEY -u OMNORA_AUDIT_HMAC_KEY \
+	OMNORA_CONFIG_DIR="$old_config_dir" OMNORA_DATA_DIR="$old_data_dir" \
+	OMNORA_DB_PATH="$old_db_path" OMNORA_MANAGED_STORAGE_DIR="$old_managed_dir" \
+	sh "$ENTRYPOINT" /bin/sh -c 'test -n "$OMNORA_AUDIT_HMAC_KEY"' || exit 1
+head -n 2 "$old_config_dir/runtime.env" | cmp -s - "$TMP_ROOT/old-runtime.before" || {
+	printf 'FAIL: upgrade changed the original runtime secret lines\n' >&2
+	exit 1
+}
+[ "$(grep -c '^OMNORA_AUDIT_HMAC_KEY=' "$old_config_dir/runtime.env")" = 1 ] || exit 1
+old_audit=$(sed -n 's/^OMNORA_AUDIT_HMAC_KEY=//p' "$old_config_dir/runtime.env")
+[ -n "$old_audit" ] || exit 1
+cp "$old_config_dir/runtime.env" "$TMP_ROOT/old-runtime.after"
+AUDIT_EXPECTED="$old_audit" env -u OMNORA_INITIALIZATION_TOKEN -u OMNORA_TOTP_ENCRYPTION_KEY -u OMNORA_AUDIT_HMAC_KEY \
+	OMNORA_CONFIG_DIR="$old_config_dir" OMNORA_DATA_DIR="$old_data_dir" \
+	OMNORA_DB_PATH="$old_db_path" OMNORA_MANAGED_STORAGE_DIR="$old_managed_dir" \
+	sh "$ENTRYPOINT" /bin/sh -c '[ "$OMNORA_AUDIT_HMAC_KEY" = "$AUDIT_EXPECTED" ]' || exit 1
+cmp -s "$TMP_ROOT/old-runtime.after" "$old_config_dir/runtime.env" || {
+	printf 'FAIL: upgraded startup changed the runtime secrets file\n' >&2
+	exit 1
+}
+
+# A failed atomic install must not truncate or partially replace the original
+# file. The fake mv only rejects the validated runtime temporary path.
+mv_fail_bin="$TMP_ROOT/mv-fail-bin"
+mkdir -p "$mv_fail_bin"
+cat > "$mv_fail_bin/mv" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+	*/runtime.env.tmp.*) exit 1 ;;
+	*) exec /bin/mv "$@" ;;
+esac
+EOF
+chmod 755 "$mv_fail_bin/mv"
+mvfail_config_dir="$TMP_ROOT/mvfail-config"
+mvfail_data_dir="$TMP_ROOT/mvfail-data"
+mvfail_managed_dir="$TMP_ROOT/mvfail-managed"
+mvfail_db_path="$mvfail_data_dir/omnora.db"
+mkdir -p "$mvfail_config_dir" "$mvfail_data_dir" "$mvfail_managed_dir"
+printf 'mvfail-instance\n' > "$mvfail_config_dir/.omnora-instance-id"
+printf 'mvfail-instance\n' > "$mvfail_data_dir/.omnora-instance-id"
+printf 'OMNORA_INITIALIZATION_TOKEN=existing-init-token\nOMNORA_TOTP_ENCRYPTION_KEY=existing-totp-key\n' > "$mvfail_config_dir/runtime.env"
+: > "$mvfail_db_path"
+cp "$mvfail_config_dir/runtime.env" "$TMP_ROOT/mvfail-runtime.before"
+if env -u OMNORA_INITIALIZATION_TOKEN -u OMNORA_TOTP_ENCRYPTION_KEY -u OMNORA_AUDIT_HMAC_KEY \
+	PATH="$mv_fail_bin:$PATH" OMNORA_CONFIG_DIR="$mvfail_config_dir" OMNORA_DATA_DIR="$mvfail_data_dir" \
+	OMNORA_DB_PATH="$mvfail_db_path" OMNORA_MANAGED_STORAGE_DIR="$mvfail_managed_dir" \
+	sh "$ENTRYPOINT" /bin/sh -c ':' >/dev/null 2>&1; then
+	printf 'FAIL: injected runtime secrets install failure unexpectedly succeeded\n' >&2
+	exit 1
+fi
+cmp -s "$TMP_ROOT/mvfail-runtime.before" "$mvfail_config_dir/runtime.env" || {
+	printf 'FAIL: failed runtime secrets install changed the original file\n' >&2
+	exit 1
+}
+if find "$mvfail_config_dir" -maxdepth 1 -name 'runtime.env.tmp.*' -print -quit | grep -q .; then
+	printf 'FAIL: failed runtime secrets install left a temporary file\n' >&2
+	exit 1
+fi
 
 retry_config_dir="$TMP_ROOT/retry-config"
 retry_data_dir="$TMP_ROOT/retry-data"

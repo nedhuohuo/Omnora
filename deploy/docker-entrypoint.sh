@@ -111,15 +111,63 @@ if [ -z "${OMNORA_TOTP_ENCRYPTION_KEY:-}" ]; then
 	save_runtime_secrets=true
 fi
 
+if [ -z "${OMNORA_AUDIT_HMAC_KEY:-}" ]; then
+	OMNORA_AUDIT_HMAC_KEY="$(random_hex)"
+	export OMNORA_AUDIT_HMAC_KEY
+	save_runtime_secrets=true
+fi
+if [ ! -f "$SECRETS_FILE" ]; then
+	# A new instance persists explicitly supplied values too, so a restart does
+	# not silently switch to a different audit namespace.
+	save_runtime_secrets=true
+fi
+
+runtime_tmp_file=''
+cleanup_runtime_tmp() {
+	if [ -n "${runtime_tmp_file:-}" ]; then
+		case "$runtime_tmp_file" in
+			"$SECRETS_FILE".tmp.*) rm -f "$runtime_tmp_file" || true ;;
+		esac
+		runtime_tmp_file=''
+	fi
+}
+
+append_secret_line() {
+	name="$1"
+	value="$2"
+	file="$3"
+	if grep -q "^${name}=" "$file"; then
+		existing_value="$(sed -n "s/^${name}=//p" "$file" | head -n 1)"
+		[ -n "$existing_value" ] || fail_persistence_check "$name is empty in $SECRETS_FILE"
+		return 0
+	fi
+	if [ -s "$file" ]; then
+		last_byte="$(tail -c 1 "$file" | od -An -t x1 | tr -d ' \n\r\t')"
+		[ "$last_byte" = 0a ] || printf '\n' >> "$file"
+	fi
+	printf '%s=%s\n' "$name" "$value" >> "$file"
+}
+
+# Remove only the validated same-directory temporary path if any persistence
+# step exits before the atomic rename completes.
+trap 'cleanup_runtime_tmp' EXIT
+
 if [ "$save_runtime_secrets" = true ]; then
-	tmp_file="$SECRETS_FILE.tmp"
 	umask 077
-	{
-		printf 'OMNORA_INITIALIZATION_TOKEN=%s\n' "$OMNORA_INITIALIZATION_TOKEN"
-		printf 'OMNORA_TOTP_ENCRYPTION_KEY=%s\n' "$OMNORA_TOTP_ENCRYPTION_KEY"
-	} > "$tmp_file"
-	mv "$tmp_file" "$SECRETS_FILE"
-	chmod 600 "$SECRETS_FILE"
+	runtime_tmp_file="$(mktemp "$SECRETS_FILE.tmp.XXXXXX")" || fail_persistence_check "cannot create a temporary runtime secrets file"
+	if [ -f "$SECRETS_FILE" ]; then
+		cp "$SECRETS_FILE" "$runtime_tmp_file" || fail_persistence_check "cannot copy $SECRETS_FILE to a temporary file"
+	else
+		: > "$runtime_tmp_file" || fail_persistence_check "cannot initialize a temporary runtime secrets file"
+	fi
+	# Append only lines that are absent. This preserves every existing secret
+	# byte and keeps old initialization/TOTP keys stable across upgrades.
+	append_secret_line OMNORA_INITIALIZATION_TOKEN "$OMNORA_INITIALIZATION_TOKEN" "$runtime_tmp_file"
+	append_secret_line OMNORA_TOTP_ENCRYPTION_KEY "$OMNORA_TOTP_ENCRYPTION_KEY" "$runtime_tmp_file"
+	append_secret_line OMNORA_AUDIT_HMAC_KEY "$OMNORA_AUDIT_HMAC_KEY" "$runtime_tmp_file"
+	chmod 600 "$runtime_tmp_file" || fail_persistence_check "cannot protect temporary runtime secrets file"
+	mv "$runtime_tmp_file" "$SECRETS_FILE" || fail_persistence_check "cannot install $SECRETS_FILE"
+	runtime_tmp_file=''
 	runtime_secrets_created=true
 	printf 'Omnora generated runtime secrets in %s\n' "$SECRETS_FILE" >&2
 fi
@@ -130,7 +178,7 @@ forward_child_signal() {
 	fi
 }
 
-trap 'forward_child_signal' HUP INT TERM
+trap 'cleanup_runtime_tmp; forward_child_signal' HUP INT TERM
 set +e
 "$@" &
 child_pid=$!
