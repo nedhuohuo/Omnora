@@ -138,7 +138,7 @@ export default function MemberDocsPanel({ locale }: { locale: MemberLocale }) {
 
       {tab === 'mcp' && <>
         <p className="member-admin-hint">{text.docsMcpHint}</p>
-        <McpDocsBlock endpoint={routeState.endpoint} exposed={routeState.exposed} locale={locale} collapsible={false} />
+        <McpDocsBlock endpoint={routeState.endpoint} exposed={routeState.exposed} locale={locale} />
       </>}
 
       {tab === 'openapi' && <>

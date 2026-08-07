@@ -229,7 +229,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
         </div>
       </div>
 
-      <McpDocsBlock endpoint={routeState.endpoint} exposed={routeState.exposed} locale={locale} />
+      <McpDocsBlock endpoint={routeState.endpoint} exposed={routeState.exposed} locale={locale} showDocs={false} />
 
       {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
 

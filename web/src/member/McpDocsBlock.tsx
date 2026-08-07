@@ -11,15 +11,16 @@ import {
 } from './mcpIntegration';
 
 /**
- * Shared MCP documentation block used by the AI Token panel (collapsible) and
- * the Docs panel (expanded). Keeps endpoint, protocol, scope and tool catalog
- * documentation in one place so both views stay in sync with mcpIntegration.
+ * Shared MCP status card + documentation block. The Docs panel shows the full
+ * documentation (showDocs), the AI Token panel shows only the status card.
+ * Keeps endpoint, protocol, scope and tool catalog documentation in one place
+ * so both views stay in sync with mcpIntegration.
  */
-export default function McpDocsBlock({ endpoint, exposed, locale, collapsible = true }: {
+export default function McpDocsBlock({ endpoint, exposed, locale, showDocs = true }: {
   endpoint: string;
   exposed: boolean;
   locale: MemberLocale;
-  collapsible?: boolean;
+  showDocs?: boolean;
 }) {
   const text = localeMessages[locale];
   const [copied, setCopied] = useState(false);
@@ -125,7 +126,7 @@ OAuth: ${MCP_OAUTH_STATUS}`}</pre>
         <div><span>{text.tokenMcpAuth}</span><code>Authorization: Bearer &lt;AI_TOKEN&gt;</code></div>
         <div><span>{text.tokenMcpOAuth}</span><strong>{MCP_OAUTH_STATUS}</strong></div>
       </div>
-      {collapsible ? <details className="member-mcp-docs"><summary>{text.tokenMcpDocsToggle}</summary>{docs}</details> : <div className="member-mcp-docs">{docs}</div>}
+      {showDocs && <div className="member-mcp-docs">{docs}</div>}
     </section>
   );
 }
