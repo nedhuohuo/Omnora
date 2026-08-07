@@ -201,7 +201,9 @@ grep -Fq 'fragmentSecret' "$OPENAPI" || fail "OpenAPI document must model share 
 pass "OpenAPI document includes key stable security/error semantics"
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-  docker compose -f "$COMPOSE" config --quiet
+  # Compose validation only; these placeholders never start a container.
+  OMNORA_PUBLIC_URL="${OMNORA_PUBLIC_URL:-https://files.example.test}" \
+    docker compose -f "$COMPOSE" config --quiet
   pass "docker compose config validates locally"
   docker compose --env-file "$ALIYUN_TEST_ENV_EXAMPLE" -f "$COMPOSE" -f "$ALIYUN_TEST_COMPOSE" config --quiet
   pass "Aliyun test compose override validates locally"
