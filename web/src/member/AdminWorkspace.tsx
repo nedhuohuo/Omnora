@@ -204,6 +204,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
   const [operationComplete, setOperationComplete] = useState(false);
   const [allowedRoots, setAllowedRoots] = useState<HostDirectoryRoot[]>([]);
   const [pathSuggestions, setPathSuggestions] = useState<HostDirectoryEntry[]>([]);
+  const [boundSlots, setBoundSlots] = useState<HostDirectoryEntry[]>([]);
   const [showPathSuggestions, setShowPathSuggestions] = useState(false);
   const [renameTarget, setRenameTarget] = useState<AdminMountListItem | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -223,6 +224,17 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
       setMounts(mountResponse.items);
       const roots = hostDirectoryRoots(hostDirs);
       setAllowedRoots(roots);
+      const externalRoot = roots.find((root) => root.kind === 'external')?.path;
+      if (externalRoot) {
+        try {
+          const slotDirs = await listAdminHostDirectories(externalRoot);
+          setBoundSlots(slotDirs.entries ?? []);
+        } catch {
+          setBoundSlots([]);
+        }
+      } else {
+        setBoundSlots([]);
+      }
       setMountForm((current) => ({
         ...current,
         spaceId: spaceResponse.items.some((space) => space.id === current.spaceId) ? current.spaceId : (spaceResponse.items[0]?.id ?? ''),
@@ -509,29 +521,47 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
             </div>
             <small className="member-path-hint">{text.mountRootHint}</small>
             {isSharedSlot && <p className="member-path-hint">{text.slotShareHint}</p>}
-            {allowedRoots.length > 0 && (
+            {mountForm.kind === 'external' ? (
+              boundSlots.length > 0 ? (
+                <div className="member-path-roots">
+                  <span className="member-path-roots-title">{text.allowedRoots}</span>
+                  <div className="member-path-root-list">
+                    {boundSlots.map((entry) => (
+                      <button
+                        key={entry.path}
+                        type="button"
+                        className="member-path-root"
+                        onClick={() => setMountForm((current) => ({ ...current, rootPath: entry.path, kind: 'external' }))}
+                      >
+                        <span className="member-path-root-kind external">{text.externalMount}</span>
+                        <code>{entry.path}</code>
+                        <small>{text.slotBoundDetail}</small>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className="member-path-hint">{text.noBoundSlots}</p>
+              )
+            ) : allowedRoots.some((root) => root.kind === 'managed') ? (
               <div className="member-path-roots">
                 <span className="member-path-roots-title">{text.allowedRoots}</span>
                 <div className="member-path-root-list">
-                  {allowedRoots.map((root) => {
-                    const kind = root.kind;
-                    const kindLabel = kind === 'managed' ? text.managedMount : kind === 'external' ? text.externalMount : text.mountRoot;
-                    return (
-                      <button
-                        key={`${root.path}:${root.kind ?? 'unknown'}`}
-                        type="button"
-                        className="member-path-root"
-                        onClick={() => setMountForm((current) => ({ ...current, rootPath: root.path, kind: kind ?? current.kind }))}
-                      >
-                        <span className={`member-path-root-kind ${kind ?? ''}`}>{kindLabel}</span>
-                        <code>{root.path}</code>
-                        <small>{mountRootDetail(root, text)}</small>
-                      </button>
-                    );
-                  })}
+                  {allowedRoots.filter((root) => root.kind === 'managed').map((root) => (
+                    <button
+                      key={`${root.path}:${root.kind ?? 'unknown'}`}
+                      type="button"
+                      className="member-path-root"
+                      onClick={() => setMountForm((current) => ({ ...current, rootPath: root.path, kind: 'managed' }))}
+                    >
+                      <span className="member-path-root-kind managed">{text.managedMount}</span>
+                      <code>{root.path}</code>
+                      <small>{mountRootDetail(root, text)}</small>
+                    </button>
+                  ))}
                 </div>
               </div>
-            )}
+            ) : null}
           </label>
           <label>{text.mountKind}<select value={mountForm.kind} onChange={(event) => {
             const kind = event.target.value as MountForm['kind'];

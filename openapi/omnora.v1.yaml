@@ -2796,7 +2796,7 @@ components:
           type: string
         containerPath:
           type: string
-          description: Absolute path under the predeclared mount root inside the container.
+          description: Absolute path under the predeclared mount root inside the container. A direct child of the predeclared root (a slot) is not registered directly; Omnora creates a per-space subdirectory (named by the space ID) under it and registers that subdirectory, so multiple spaces can share one slot. Slots appear in host-directory suggestions only when they are independent bind mounts.
         mode:
           type: string
           enum: [read_only, read_write]

@@ -130,6 +130,33 @@ docker-compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compos
 
 Register external mounts under `/mnt/omnora/...`, or managed mounts under `/srv/omnora/managed/...`. Do not point mounts at `/srv/omnora/data` or other paths that are not bind-mounted into the container.
 
+### Slot mounts (recommended NAS layout)
+
+The recommended external-mount layout binds each NAS folder to its own slot
+(independent mount point) under `/mnt/omnora` instead of mounting the whole
+predeclared root:
+
+```yaml
+volumes:
+  - /volume1/photo:/mnt/omnora/slot1:rw
+  - /volume1/music:/mnt/omnora/slot2:rw
+  # Leave unbound slots out of the volumes list entirely; do not add an empty
+  # default source for them.
+```
+
+Omnora exposes a slot in the host-directory suggestions only when it has its
+own mount-table entry (an independent bind mount): unbound slots stay hidden
+even when an empty directory exists at the path, and bound empty folders are
+shown. Remove the whole-root bind (`./mounts:/mnt/omnora:rw`) when adopting
+this layout — with the whole root bound, slots are not independent mount
+points and are never treated as bound.
+
+Registering a mount against a slot creates a per-space subdirectory
+automatically (named by the space ID) and registers that subdirectory, so
+multiple spaces can share one slot. The slot itself must not be registered as
+a mount; registering it blocks every child path via the parent-child conflict
+check.
+
 Effective write access is still `Docker volume mode ∩ Omnora mount mode`. If you later switch the Compose bind back to `:ro`, existing `read_write` mounts will fail create/upload until the volume is remounted read-write.
 
 For reinstall or container recreation tests, keep `deploy/aliyun-test/config`,

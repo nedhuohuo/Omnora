@@ -58,6 +58,10 @@ AI Token scope 的完整枚举为：
 写入、删除、回收站、跨挂载复制/移动和分享都按实时 ACL、挂载身份、只读模式、目录边界
 和对象状态检查。高风险 MCP 工具还需要每次 MRTR 确认；REST 管理空间删除也有服务端确认。
 
+外部挂载注册到预声明根的直接子路径（插槽）时，系统自动在该插槽下创建以空间 ID 命名的
+子目录并注册为挂载，多个空间可共享同一插槽；插槽本身不注册。插槽只在其为独立 bind
+mount（部署者已映射 NAS 文件夹）时出现在宿主目录建议中，未绑定的插槽不展示。
+
 ## 错误、分页和传输
 
 JSON 错误使用：
@@ -68,8 +72,8 @@ JSON 错误使用：
 
 按 `error.code` 和 HTTP 状态判断，保留 `request_id`；不要依赖 message。常见 code 包括
 `unauthorized`、`forbidden`、`route_group_disabled`、`not_found`、`invalid_input`、
-`readonly_mount`、`mount_identity_unverifiable`、`mount_not_writable`、`upload_conflict`、
-`confirmation_required` 和 `mcp_audit_degraded`。列表使用 `limit`/`cursor`，当前 limit 范围
+`readonly_mount`、`mount_conflict`、`mount_identity_unverifiable`、`mount_not_writable`、
+`upload_conflict`、`confirmation_required` 和 `mcp_audit_degraded`。列表使用 `limit`/`cursor`，当前 limit 范围
 为 1–200。
 
 MCP 大文件不通过 MCP JSON 内联返回，而是由 `files.prepare_download` 或
