@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDownloadFileHTTPRangeSemantics(t *testing.T) {
@@ -143,10 +144,14 @@ func createHTTPUpload(t *testing.T, handler http.Handler, cookie *http.Cookie, s
 		t.Fatalf("create upload status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var created struct {
-		ID string `json:"id"`
+		ID        string    `json:"id"`
+		ExpiresAt time.Time `json:"expiresAt"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil || created.ID == "" {
 		t.Fatalf("decode created upload: %v body=%s", err, rec.Body.String())
+	}
+	if remaining := time.Until(created.ExpiresAt); remaining < 23*time.Hour {
+		t.Fatalf("upload session expires in %s, want existing 24h REST lifetime", remaining)
 	}
 	return created.ID
 }

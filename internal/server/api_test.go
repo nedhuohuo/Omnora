@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +73,75 @@ func TestSessionResponsesIncludeCurrentAdminStatus(t *testing.T) {
 				t.Fatalf("current session response = %#v", currentResponse)
 			}
 		})
+	}
+}
+
+func TestAdminLoginWithoutTOTPCreatesEnrollmentSession(t *testing.T) {
+	db, handler := newAPITestServer(t)
+	admin, _ := createAPITestAccounts(t, db)
+	body, err := json.Marshal(map[string]string{"login": admin.Email, "password": apiTestPassword})
+	if err != nil {
+		t.Fatalf("marshal login: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/session", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("login status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response sessionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode login: %v", err)
+	}
+	if response.Purpose != identity.SessionPurposeTOTPEnrollment || !response.RequiresTOTPEnrollment {
+		t.Fatalf("login response = %#v, want enrollment session", response)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("login cookies = %#v", cookies)
+	}
+	session, err := identity.New(db.SQL(), identity.Options{}).VerifySession(context.Background(), cookies[0].Value)
+	if err != nil {
+		t.Fatalf("verify enrollment session: %v", err)
+	}
+	if session.Purpose != identity.SessionPurposeTOTPEnrollment {
+		t.Fatalf("session purpose = %q, want enrollment", session.Purpose)
+	}
+}
+
+func TestPasswordResetRequiredIsCompletedDuringLogin(t *testing.T) {
+	db, handler := newAPITestServer(t)
+	_, member := createAPITestAccounts(t, db)
+	if _, err := db.SQL().Exec(`UPDATE accounts SET password_reset_required = 1 WHERE id = ?`, member.ID); err != nil {
+		t.Fatalf("mark password reset: %v", err)
+	}
+	login := func(newPassword string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"login": member.Email, "password": apiTestPassword, "newPassword": newPassword})
+		if err != nil {
+			t.Fatalf("marshal login: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/session", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	missing := login("")
+	if missing.Code != http.StatusUnauthorized || !strings.Contains(missing.Body.String(), `"code":"password_reset_required"`) {
+		t.Fatalf("missing new password response = %d %s", missing.Code, missing.Body.String())
+	}
+	success := login("NewCorrectHorse2!")
+	if success.Code != http.StatusCreated {
+		t.Fatalf("reset login status = %d, body = %s", success.Code, success.Body.String())
+	}
+	var resetRequired int
+	if err := db.SQL().QueryRow(`SELECT password_reset_required FROM accounts WHERE id = ?`, member.ID).Scan(&resetRequired); err != nil {
+		t.Fatalf("query reset flag: %v", err)
+	}
+	if resetRequired != 0 {
+		t.Fatalf("password_reset_required = %d, want 0", resetRequired)
 	}
 }
 
@@ -387,9 +457,11 @@ VALUES ('indexable', 'shared-active', 'Indexable', ?, 'external', 'read_only', 1
 const apiTestPassword = "CorrectHorse1!"
 
 type sessionResponse struct {
-	UserID    string    `json:"userId"`
-	ExpiresAt time.Time `json:"expiresAt"`
-	IsAdmin   bool      `json:"isAdmin"`
+	UserID                 string                  `json:"userId"`
+	ExpiresAt              time.Time               `json:"expiresAt"`
+	IsAdmin                bool                    `json:"isAdmin"`
+	Purpose                identity.SessionPurpose `json:"purpose"`
+	RequiresTOTPEnrollment bool                    `json:"requiresTotpEnrollment"`
 }
 
 func newAPITestServer(t *testing.T) (*store.DB, http.Handler) {
@@ -402,6 +474,9 @@ func newAPITestServer(t *testing.T) (*store.DB, http.Handler) {
 		t.Fatalf("open test database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.SQL().Exec(`UPDATE recovery_control SET ready = 1 WHERE id = 1`); err != nil {
+		t.Fatalf("mark recovery control ready: %v", err)
+	}
 	return db, New(config.Config{
 		Routes:            map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
 		RouteEnvOverrides: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
@@ -439,9 +514,19 @@ func createAPITestAccounts(t *testing.T, db *store.DB) (identity.Account, identi
 
 func issueAPITestSession(t *testing.T, db *store.DB, accountID string) *http.Cookie {
 	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.SQL().ExecContext(context.Background(), `
+UPDATE accounts
+SET totp_required = CASE WHEN role = 'admin' THEN 1 ELSE totp_required END,
+    totp_confirmed_at = CASE WHEN role = 'admin' THEN COALESCE(totp_confirmed_at, ?) ELSE totp_confirmed_at END
+WHERE id = ?
+`, now, accountID); err != nil {
+		t.Fatalf("prepare test admin TOTP state: %v", err)
+	}
 	issued, err := identity.New(db.SQL(), identity.Options{}).CreateSession(context.Background(), identity.SessionRequest{
 		AccountID: accountID,
 		TTL:       time.Hour,
+		Purpose:   identity.SessionPurposeFull,
 	})
 	if err != nil {
 		t.Fatalf("create session: %v", err)

@@ -57,6 +57,13 @@ func TestTrashPurgeAndEmptyEndpoints(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "a.txt")); !os.IsNotExist(err) {
 		t.Fatalf("purged file must stay gone, stat err = %v", err)
 	}
+	unknownPurgeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/spaces/space-trash2/mounts/mount-trash2/trash/missing-trash", nil)
+	unknownPurgeReq.AddCookie(adminCookie)
+	unknownPurgeRec := httptest.NewRecorder()
+	handler.ServeHTTP(unknownPurgeRec, unknownPurgeReq)
+	if unknownPurgeRec.Code != http.StatusNotFound {
+		t.Fatalf("unknown trash purge status = %d, want 404; body = %s", unknownPurgeRec.Code, unknownPurgeRec.Body.String())
+	}
 
 	emptyReq := httptest.NewRequest(http.MethodDelete, "/api/v1/spaces/space-trash2/mounts/mount-trash2/trash", nil)
 	emptyReq.AddCookie(adminCookie)

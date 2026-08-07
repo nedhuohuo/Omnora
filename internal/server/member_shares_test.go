@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -65,14 +66,24 @@ func TestListAndRevokeShares(t *testing.T) {
 	if listed.Items[0].Status != "active" {
 		t.Fatalf("listed share status = %q, want active", listed.Items[0].Status)
 	}
-	if listed.Items[0].Fragment != created.Fragment {
-		t.Fatalf("listed share fragment = %q, want %q", listed.Items[0].Fragment, created.Fragment)
+	if listed.Items[0].Fragment != "" {
+		t.Fatalf("listed share fragment = %q, existing share secrets must not be returned", listed.Items[0].Fragment)
 	}
 	if listed.Items[0].SpaceName != "Test Space" || listed.Items[0].MountName != "Docs" {
 		t.Fatalf("listed share location = %q / %q, want Test Space / Docs", listed.Items[0].SpaceName, listed.Items[0].MountName)
 	}
 	if listed.Items[0].CreatorDisplayName != "Admin" || listed.Items[0].CreatorEmail != "admin@example.test" {
 		t.Fatalf("listed share creator = %q / %q, want Admin / admin@example.test", listed.Items[0].CreatorDisplayName, listed.Items[0].CreatorEmail)
+	}
+	if _, err := db.SQL().ExecContext(context.Background(), `UPDATE shares SET used_downloads = max_downloads WHERE id = ?`, created.ID); err != nil {
+		t.Fatalf("mark share exhausted: %v", err)
+	}
+	exhaustedRec := authorizedAPITestRequest(t, handler, "/api/v1/shares", adminCookie)
+	var exhausted struct {
+		Items []shareRecordDTO `json:"items"`
+	}
+	if err := json.Unmarshal(exhaustedRec.Body.Bytes(), &exhausted); err != nil || len(exhausted.Items) != 1 || exhausted.Items[0].Status != "active" {
+		t.Fatalf("REST exhausted share = %#v, want legacy active status", exhausted.Items)
 	}
 
 	memberListRec := authorizedAPITestRequest(t, handler, "/api/v1/shares", memberCookie)
