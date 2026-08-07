@@ -171,7 +171,7 @@ func (Service) RestoreTrash(mount Mount, trashID string) (string, error) {
 	}
 	target := item.OriginalPath
 	if _, err := root.Lstat(target); err == nil {
-		target = conflictSafePath(item.OriginalPath)
+		target = conflictSafePath(item.OriginalPath, trashID)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
@@ -181,7 +181,7 @@ func (Service) RestoreTrash(mount Mount, trashID string) (string, error) {
 			return "", err
 		}
 	}
-	if err := root.Rename(item.TrashRelativePath, target); err != nil {
+	if err := renameNoReplace(root, item.TrashRelativePath, target, item.Kind); err != nil {
 		return "", err
 	}
 	_ = root.RemoveAll(trashRoot)
@@ -266,7 +266,10 @@ func (Service) CopyAcrossMounts(source, dest Mount, from, toDir string) (string,
 	if err != nil || cleanedFrom == "." {
 		return "", ErrNotFile
 	}
-	destDir := mustCleanDir(toDir)
+	destDir, err := cleanDirectory(toDir)
+	if err != nil {
+		return "", err
+	}
 	destPath := joinRelativePath(destDir, path.Base(cleanedFrom))
 	srcRoot, _, err := openMountRoot(source)
 	if err != nil {
@@ -296,16 +299,30 @@ func (Service) CopyAcrossMounts(source, dest Mount, from, toDir string) (string,
 	if err != nil {
 		return "", err
 	}
-	if info.IsDir() {
-		if err := copyDirTree(srcRoot, dstRoot, cleanedFrom, destPath); err != nil {
-			_ = dstRoot.RemoveAll(destPath)
+	kind, ok := entryKind(info)
+	if !ok {
+		return "", ErrNotFile
+	}
+	// Build under a unique sibling staging name. The final publication uses a
+	// no-replace operation, so a target created after the initial Lstat is
+	// preserved and only our staging object is cleaned up on failure.
+	stagePath := path.Join(destDir, ".omnora-copy-"+httpx.NewRequestID())
+	if kind == EntryKindDir {
+		if err := copyDirTree(srcRoot, dstRoot, cleanedFrom, stagePath); err != nil {
+			if !errors.Is(err, os.ErrExist) {
+				_ = dstRoot.RemoveAll(stagePath)
+			}
 			return "", err
 		}
-	} else {
-		if err := copyFileVerified(srcRoot, dstRoot, cleanedFrom, destPath, info.Size()); err != nil {
-			_ = dstRoot.Remove(destPath)
-			return "", err
+	} else if err := copyFileVerified(srcRoot, dstRoot, cleanedFrom, stagePath, info.Size()); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			_ = dstRoot.Remove(stagePath)
 		}
+		return "", err
+	}
+	if err := renameNoReplace(dstRoot, stagePath, destPath, kind); err != nil {
+		_ = dstRoot.RemoveAll(stagePath)
+		return "", err
 	}
 	return destPath, nil
 }
@@ -392,10 +409,44 @@ func readTrashItem(root *os.Root, trashRoot string) (TrashItem, error) {
 	}, nil
 }
 
-func conflictSafePath(original string) string {
+func conflictSafePath(original, trashID string) string {
 	ext := path.Ext(original)
 	base := strings.TrimSuffix(original, ext)
-	return fmt.Sprintf("%s.restored-%d%s", base, time.Now().Unix(), ext)
+	return fmt.Sprintf("%s.restored-%s%s", base, trashID, ext)
+}
+
+func cleanDirectory(value string) (string, error) {
+	cleaned, err := storage.CleanRelativePath(value)
+	if err != nil {
+		return "", err
+	}
+	return cleaned, nil
+}
+
+// renameNoReplace uses link-then-unlink for regular files, which is atomic
+// and cannot overwrite a racing destination. Directories cannot be hard
+// linked; they are renamed only after the destination absence check and are
+// assigned a collision-safe path by RestoreTrash.
+func renameNoReplace(root *os.Root, source, destination string, kind EntryKind) error {
+	if kind == EntryKindFile {
+		if err := root.Link(source, destination); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("%w: target already exists", ErrInvalidMount)
+			}
+			return err
+		}
+		if err := root.Remove(source); err != nil {
+			_ = root.Remove(destination)
+			return err
+		}
+		return nil
+	}
+	if _, err := root.Lstat(destination); err == nil {
+		return fmt.Errorf("%w: target already exists", ErrInvalidMount)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return root.Rename(source, destination)
 }
 
 func mkdirAllRoot(root *os.Root, relative string) error {

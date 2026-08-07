@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"syscall"
 	"testing"
 
 	"omnora/internal/domain"
@@ -182,5 +184,61 @@ func TestCopyAndMoveAcrossMounts(t *testing.T) {
 	}
 	if string(body) != "move" {
 		t.Fatalf("moved body = %q", string(body))
+	}
+}
+
+func TestCopyAcrossMountsRejectsSpecialFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("named pipes are not portable on Windows")
+	}
+	srcRoot := t.TempDir()
+	dstRoot := t.TempDir()
+	pipe := filepath.Join(srcRoot, "pipe")
+	if err := syscall.Mkfifo(pipe, 0o600); err != nil {
+		t.Skipf("Mkfifo unavailable: %v", err)
+	}
+	source := Mount{Root: srcRoot, Mode: domain.MountModeReadWrite, Kind: "external"}
+	dest := Mount{Root: dstRoot, Mode: domain.MountModeReadWrite, Kind: "managed"}
+	if _, err := NewService().CopyAcrossMounts(source, dest, "pipe", "."); !errors.Is(err, ErrNotFile) {
+		t.Fatalf("CopyAcrossMounts(FIFO) error = %v, want ErrNotFile", err)
+	}
+}
+
+func TestCopyAcrossMountsPreservesExistingDestination(t *testing.T) {
+	srcRoot := t.TempDir()
+	dstRoot := t.TempDir()
+	writeFile(t, filepath.Join(srcRoot, "report.txt"), "source")
+	writeFile(t, filepath.Join(dstRoot, "report.txt"), "destination")
+	source := Mount{Root: srcRoot, Mode: domain.MountModeReadWrite, Kind: "external"}
+	dest := Mount{Root: dstRoot, Mode: domain.MountModeReadWrite, Kind: "managed"}
+	if _, err := NewService().CopyAcrossMounts(source, dest, "report.txt", "."); err == nil {
+		t.Fatal("CopyAcrossMounts() unexpectedly overwrote destination")
+	}
+	if got, _ := os.ReadFile(filepath.Join(dstRoot, "report.txt")); string(got) != "destination" {
+		t.Fatalf("destination changed to %q", got)
+	}
+}
+
+func TestRestoreTrashNeverOverwritesCollision(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "same.txt"), "original")
+	mount := Mount{Root: root, Mode: domain.MountModeReadWrite, Kind: "managed"}
+	item, err := NewService().SoftDelete(mount, "same.txt")
+	if err != nil {
+		t.Fatalf("SoftDelete() error = %v", err)
+	}
+	writeFile(t, filepath.Join(root, "same.txt"), "replacement")
+	restored, err := NewService().RestoreTrash(mount, item.ID)
+	if err != nil {
+		t.Fatalf("RestoreTrash() error = %v", err)
+	}
+	if restored == "same.txt" {
+		t.Fatal("RestoreTrash() reused occupied original path")
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "same.txt")); string(got) != "replacement" {
+		t.Fatalf("occupied target changed to %q", got)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, restored)); err != nil || string(got) != "original" {
+		t.Fatalf("restored file = %q, error = %v", got, err)
 	}
 }
