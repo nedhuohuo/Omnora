@@ -157,10 +157,15 @@ type shareRecord struct {
 func loadShareForExchange(ctx context.Context, tx *sql.Tx, publicID string) (shareRecord, error) {
 	var record shareRecord
 	var expiresAt string
+	// The credential_generation filter fails closed: a share minted before
+	// the account's credential epoch was bumped (password reset, security
+	// event, ...) simply stops matching and is treated like "not found",
+	// the same way a revoked or expired share is, so it never enumerates.
 	err := tx.QueryRowContext(ctx, `
 SELECT id, secret_hash, password_hash, expires_at, generation, revoked_at
 FROM shares
 WHERE public_id = ?
+  AND credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
 `, publicID).Scan(
 		&record.id,
 		&record.secretHash,
@@ -225,8 +230,8 @@ WHERE id = ?
 	}
 
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO share_sessions(id, share_id, session_hash, generation, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO share_sessions(id, share_id, session_hash, generation, credential_generation, created_at, expires_at)
+VALUES (?, ?, ?, ?, CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER), ?, ?)
 `, sessionID, record.id, HashSecret(sessionToken), record.generation, formatSQLiteTime(now), formatSQLiteTime(expiresAt))
 	if err != nil {
 		return ExchangeResult{}, exchangeDBError(err)

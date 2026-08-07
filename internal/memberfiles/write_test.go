@@ -151,6 +151,37 @@ func TestUploadLifecycleChecksumRaceAndCancel(t *testing.T) {
 	}
 }
 
+func TestUploadStatusRejectsSessionAfterCredentialGenerationBump(t *testing.T) {
+	f := newReadFixture(t)
+	s := NewService(f.db, access.NewGuard(f.db), catalog.NewService(f.db))
+	ctx := context.Background()
+	upload, err := s.PrepareUpload(ctx, f.session(), UploadRequest{
+		Locator:      f.locator("incoming.txt"),
+		ExpectedSize: 5,
+		Checksum:     sha256Hex("hello"),
+	})
+	if err != nil {
+		t.Fatalf("PrepareUpload() error = %v", err)
+	}
+	if _, err := s.UploadStatus(ctx, f.session(), upload.ID); err != nil {
+		t.Fatalf("UploadStatus() before generation bump error = %v", err)
+	}
+
+	// Simulate an account-wide security event bumping the credential epoch:
+	// the in-flight upload session must stop resolving even though its row
+	// was never touched, the same way an expired lease already does.
+	if _, err := f.db.Exec(`UPDATE system_state SET value = '2' WHERE key = 'credential_generation'`); err != nil {
+		t.Fatalf("bump credential_generation: %v", err)
+	}
+
+	if _, err := s.UploadStatus(ctx, f.session(), upload.ID); !errors.Is(err, ErrUploadNotFound) {
+		t.Fatalf("UploadStatus() after generation bump error = %v, want ErrUploadNotFound", err)
+	}
+	if err := s.WriteUploadPart(ctx, f.session(), upload.ID, 1, strings.NewReader("hello")); !errors.Is(err, ErrUploadNotFound) {
+		t.Fatalf("WriteUploadPart() after generation bump error = %v, want ErrUploadNotFound", err)
+	}
+}
+
 func TestCopyMoveTrashAndPermanentDelete(t *testing.T) {
 	f := newReadFixture(t)
 	s := NewService(f.db, access.NewGuard(f.db), catalog.NewService(f.db))

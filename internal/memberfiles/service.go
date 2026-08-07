@@ -12,6 +12,7 @@ import (
 	"omnora/internal/catalog"
 	"omnora/internal/domain"
 	"omnora/internal/files"
+	"omnora/internal/fileops"
 	"omnora/internal/storage"
 )
 
@@ -30,6 +31,7 @@ type Service struct {
 	files   files.Service
 	now     func() time.Time
 	shares  ShareInvalidator
+	fileOps *fileops.Coordinator
 }
 
 // NewService constructs a shared member file service. The catalog service is
@@ -48,6 +50,15 @@ func NewService(db *sql.DB, guard *access.Guard, catalog catalog.Service, opts .
 		}
 	}
 	return s
+}
+
+// WithFileOpsCoordinator wires the durable operation journal used by the
+// *Secure mutation methods (RenameSecure, MoveSecure, TrashSecure,
+// DeletePermanentlySecure, RestoreTrashSecure). Without it, those methods
+// fall back to the legacy best-effort behavior of their non-Secure
+// counterparts.
+func WithFileOpsCoordinator(coordinator *fileops.Coordinator) Option {
+	return func(s *Service) { s.fileOps = coordinator }
 }
 
 // WithAITokenService injects the process-wide token validator used for live

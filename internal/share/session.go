@@ -40,6 +40,10 @@ func (s *Service) VerifySession(ctx context.Context, token string) (SessionPrinc
 	var sessionRevokedAt, shareRevokedAt sql.NullString
 	var sessionGeneration, shareGeneration int
 	var allowPreview, allowDownload int
+	// Requiring the session's credential_generation to still match the
+	// current system epoch means bumping it (password reset, security
+	// event, ...) immediately invalidates every previously issued share
+	// session, the same way it already invalidates identity sessions.
 	err := s.db.QueryRowContext(ctx, `
 SELECT ss.share_id, ss.id, ss.generation, ss.expires_at, ss.revoked_at,
        sh.space_id, sh.mount_id, sh.relative_path, sh.allow_preview, sh.allow_download,
@@ -47,6 +51,7 @@ SELECT ss.share_id, ss.id, ss.generation, ss.expires_at, ss.revoked_at,
 FROM share_sessions ss
 JOIN shares sh ON sh.id = ss.share_id
 WHERE ss.session_hash = ?
+  AND ss.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
 `, hash).Scan(
 		&principal.ShareID,
 		&principal.SessionID,
@@ -113,6 +118,7 @@ WHERE id = ?
   AND revoked_at IS NULL
   AND expires_at > ?
   AND generation = ?
+  AND credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
   AND (max_downloads IS NULL OR used_downloads < max_downloads)
 `, formatSQLiteTime(now), shareID, formatSQLiteTime(now), generation)
 	if err != nil {

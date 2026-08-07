@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -37,14 +38,15 @@ func (s *Server) renameObject(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
-	result, err := s.memberFiles.Rename(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
+	result, err := s.memberFiles.RenameSecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
 		SpaceID: spaceID, MountID: mountID, Path: req.From,
-	}, target)
+	}, target, func(ctx context.Context, tx *sql.Tx) error {
+		return s.recordAuditTx(ctx, tx, r, session.AccountID, "object_rename", "file_object", target, `{}`)
+	})
 	if err != nil {
 		writeMemberFilesError(w, r, err, "renaming requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "object_rename", "file_object", result.RelativePath, `{}`)
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": result.RelativePath})
 }
 
@@ -67,14 +69,15 @@ func (s *Server) moveObject(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "from is required")
 		return
 	}
-	result, err := s.memberFiles.Move(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
+	result, err := s.memberFiles.MoveSecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
 		SpaceID: spaceID, MountID: mountID, Path: req.From,
-	}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: req.ToDir})
+	}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: req.ToDir}, func(ctx context.Context, tx *sql.Tx) error {
+		return s.recordAuditTx(ctx, tx, r, session.AccountID, "object_move", "file_object", req.From, `{}`)
+	})
 	if err != nil {
 		writeMemberFilesError(w, r, err, "moving requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "object_move", "file_object", result.RelativePath, `{}`)
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": result.RelativePath})
 }
 
@@ -93,7 +96,9 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 	}
 	permanent := r.URL.Query().Get("permanent") == "1" || strings.EqualFold(r.URL.Query().Get("permanent"), "true")
 	if !permanent {
-		item, err := s.memberFiles.Trash(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: relativePath})
+		item, err := s.memberFiles.TrashSecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: relativePath}, func(ctx context.Context, tx *sql.Tx) error {
+			return s.recordAuditTx(ctx, tx, r, session.AccountID, "object_trash", "file_object", relativePath, `{}`)
+		})
 		if err != nil {
 			if errors.Is(err, files.ErrNotManagedMount) {
 				httpx.WriteError(w, r, http.StatusBadRequest, "confirm_permanent_delete", "external mounts require permanent=true after explicit confirmation")
@@ -102,7 +107,6 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 			writeMemberFilesError(w, r, err, "deleting requires editor permission")
 			return
 		}
-		_ = s.recordAudit(r, "object_trash", "file_object", relativePath, fmt.Sprintf(`{"trashId":%q}`, item.TrashID))
 		// Keep the legacy trash-item response shape while the shared service
 		// owns authorization, mutation, and share invalidation.
 		legacy := map[string]any{
@@ -113,12 +117,13 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, legacy)
 		return
 	}
-	result, err := s.memberFiles.DeletePermanently(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: relativePath})
+	result, err := s.memberFiles.DeletePermanentlySecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: relativePath}, func(ctx context.Context, tx *sql.Tx) error {
+		return s.recordAuditTx(ctx, tx, r, session.AccountID, "object_delete", "file_object", relativePath, `{}`)
+	})
 	if err != nil {
 		writeMemberFilesError(w, r, err, "deleting requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "object_delete", "file_object", relativePath, `{}`)
 	_ = result
 	w.WriteHeader(http.StatusNoContent)
 	return
@@ -149,12 +154,13 @@ func (s *Server) restoreTrash(w http.ResponseWriter, r *http.Request) {
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	trashID := r.PathValue("trashId")
-	result, err := s.memberFiles.RestoreTrash(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: "."}, trashID)
+	result, err := s.memberFiles.RestoreTrashSecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: "."}, trashID, func(ctx context.Context, tx *sql.Tx) error {
+		return s.recordAuditTx(ctx, tx, r, session.AccountID, "object_trash_restore", "file_object", trashID, fmt.Sprintf(`{"trashId":%q}`, trashID))
+	})
 	if err != nil {
 		writeMemberFilesError(w, r, err, "restoring trash requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "object_trash_restore", "file_object", result.RelativePath, fmt.Sprintf(`{"trashId":%q}`, trashID))
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": result.RelativePath})
 }
 
@@ -171,7 +177,9 @@ func (s *Server) purgeTrash(w http.ResponseWriter, r *http.Request) {
 		writeMemberFilesError(w, r, err, "purging trash requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "object_trash_purge", "file_object", trashID, `{}`)
+	if !s.recordAuditMutation(w, r, "object_trash_purge", "file_object", trashID, `{}`) {
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -188,7 +196,9 @@ func (s *Server) emptyTrash(w http.ResponseWriter, r *http.Request) {
 		writeMemberFilesError(w, r, err, "emptying trash requires editor permission")
 		return
 	}
-	_ = s.recordAudit(r, "object_trash_empty", "file_object", mountID, fmt.Sprintf(`{"removed":%d}`, result.AffectedCount))
+	if !s.recordAuditMutation(w, r, "object_trash_empty", "file_object", mountID, fmt.Sprintf(`{"removed":%d}`, result.AffectedCount)) {
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]int{"removed": result.AffectedCount})
 }
 
@@ -238,7 +248,9 @@ func (s *Server) handleCrossMount(w http.ResponseWriter, r *http.Request, move b
 			return
 		}
 		if errors.Is(err, files.ErrCrossMountIncomplete) {
-			_ = s.recordAudit(r, "object_cross_mount_incomplete", "file_object", mutation.RelativePath, fmt.Sprintf(`{"error":%q}`, err.Error()))
+			if !s.recordAuditMutation(w, r, "object_cross_mount_incomplete", "file_object", mutation.RelativePath, fmt.Sprintf(`{"error":%q}`, err.Error())) {
+				return
+			}
 			httpx.WriteError(w, r, http.StatusConflict, "cross_mount_incomplete", err.Error())
 			return
 		}
@@ -249,7 +261,9 @@ func (s *Server) handleCrossMount(w http.ResponseWriter, r *http.Request, move b
 	if move {
 		action = "object_cross_mount_move"
 	}
-	_ = s.recordAudit(r, action, "file_object", mutation.RelativePath, fmt.Sprintf(`{"fromMount":%q,"toMount":%q}`, sourceMountID, req.ToMountID))
+	if !s.recordAuditMutation(w, r, action, "file_object", mutation.RelativePath, fmt.Sprintf(`{"fromMount":%q,"toMount":%q}`, sourceMountID, req.ToMountID)) {
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{
 		"relativePath": mutation.RelativePath,
 		"spaceId":      req.ToSpaceID,

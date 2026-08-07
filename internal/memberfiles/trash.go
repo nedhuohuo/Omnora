@@ -10,15 +10,13 @@ import (
 	"omnora/internal/aitoken"
 	"omnora/internal/domain"
 	"omnora/internal/files"
+	"omnora/internal/fileops"
 )
 
 func (s *Service) Trash(ctx context.Context, subject access.Subject, locator access.Locator) (TrashResult, error) {
-	mount, err := s.authorizeMutationSource(ctx, subject, locator, aitoken.ScopeFilesTrash)
+	mount, err := s.authorizeTrashSource(ctx, subject, locator)
 	if err != nil {
 		return TrashResult{}, err
-	}
-	if mount.Kind != "managed" {
-		return TrashResult{}, files.ErrNotManagedMount
 	}
 	entry, _ := s.files.Stat(toFilesMount(mount), mount.RelativePath)
 	item, err := s.files.SoftDelete(toFilesMount(mount), mount.RelativePath)
@@ -28,11 +26,46 @@ func (s *Service) Trash(ctx context.Context, subject access.Subject, locator acc
 	if err := s.invalidatePath(ctx, locator, mount.RelativePath); err != nil {
 		return TrashResult{}, err
 	}
+	return trashResultFrom(item, entry), nil
+}
+
+// TrashSecure behaves like Trash but, when a fileops.Coordinator is
+// configured, durably journals the soft delete, invalidates affected shares,
+// and records auditWriter's event all in one transaction before any
+// filesystem I/O begins.
+func (s *Service) TrashSecure(ctx context.Context, subject access.Subject, locator access.Locator, auditWriter fileops.AuditWriter) (TrashResult, error) {
+	if s.fileOps == nil {
+		return s.Trash(ctx, subject, locator)
+	}
+	mount, err := s.authorizeTrashSource(ctx, subject, locator)
+	if err != nil {
+		return TrashResult{}, err
+	}
+	entry, _ := s.files.Stat(toFilesMount(mount), mount.RelativePath)
+	item, err := s.fileOps.Trash(ctx, toFilesMount(mount), locator.SpaceID, locator.MountID, mount.RelativePath, auditWriter)
+	if err != nil {
+		return TrashResult{}, err
+	}
+	return trashResultFrom(item, entry), nil
+}
+
+func (s *Service) authorizeTrashSource(ctx context.Context, subject access.Subject, locator access.Locator) (access.AuthorizedMount, error) {
+	mount, err := s.authorizeMutationSource(ctx, subject, locator, aitoken.ScopeFilesTrash)
+	if err != nil {
+		return access.AuthorizedMount{}, err
+	}
+	if mount.Kind != "managed" {
+		return access.AuthorizedMount{}, files.ErrNotManagedMount
+	}
+	return mount, nil
+}
+
+func trashResultFrom(item files.TrashItem, entry files.Entry) TrashResult {
 	return TrashResult{
 		TrashID: item.ID, OriginalPath: item.OriginalPath, Name: item.Name, Kind: item.Kind,
 		DeletedAt: item.DeletedAt, TrashRelativePath: item.TrashRelativePath,
 		ObjectFingerprint: entry.ObjectFingerprint, Size: item.Size,
-	}, nil
+	}
 }
 
 func (s *Service) ListTrash(ctx context.Context, subject access.Subject, locator access.Locator) (TrashListResult, error) {
@@ -83,23 +116,54 @@ func (s *Service) listTrashWithPermission(ctx context.Context, subject access.Su
 }
 
 func (s *Service) RestoreTrash(ctx context.Context, subject access.Subject, locator access.Locator, trashID string) (MutationResult, error) {
-	mount, err := s.authorizeTrashMount(ctx, subject, locator, aitoken.ScopeFilesRestore, domain.SpacePermissionEditor, true)
+	mount, err := s.authorizeRestoreSource(ctx, subject, locator, trashID)
 	if err != nil {
 		return MutationResult{}, err
-	}
-	if !s.trashIDVisible(ctx, subject, mount.SpaceID, mount.ID, toFilesMount(mount), trashID) {
-		return MutationResult{}, access.ErrForbidden
 	}
 	restored, err := s.files.RestoreTrash(toFilesMount(mount), trashID)
 	if err != nil {
 		return MutationResult{}, err
 	}
+	return s.restoreResult(mount, restored), nil
+}
+
+// RestoreTrashSecure behaves like RestoreTrash but, when a
+// fileops.Coordinator is configured, durably journals the restore and
+// records auditWriter's event in the same transaction before any filesystem
+// I/O begins.
+func (s *Service) RestoreTrashSecure(ctx context.Context, subject access.Subject, locator access.Locator, trashID string, auditWriter fileops.AuditWriter) (MutationResult, error) {
+	if s.fileOps == nil {
+		return s.RestoreTrash(ctx, subject, locator, trashID)
+	}
+	mount, err := s.authorizeRestoreSource(ctx, subject, locator, trashID)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	restored, err := s.fileOps.RestoreTrash(ctx, toFilesMount(mount), locator.SpaceID, locator.MountID, trashID, auditWriter)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	return s.restoreResult(mount, restored), nil
+}
+
+func (s *Service) authorizeRestoreSource(ctx context.Context, subject access.Subject, locator access.Locator, trashID string) (access.AuthorizedMount, error) {
+	mount, err := s.authorizeTrashMount(ctx, subject, locator, aitoken.ScopeFilesRestore, domain.SpacePermissionEditor, true)
+	if err != nil {
+		return access.AuthorizedMount{}, err
+	}
+	if !s.trashIDVisible(ctx, subject, mount.SpaceID, mount.ID, toFilesMount(mount), trashID) {
+		return access.AuthorizedMount{}, access.ErrForbidden
+	}
+	return mount, nil
+}
+
+func (s *Service) restoreResult(mount access.AuthorizedMount, restored string) MutationResult {
 	result := MutationResult{RelativePath: path.Clean(restored)}
 	if entry, statErr := s.files.Stat(toFilesMount(mount), result.RelativePath); statErr == nil {
 		result.ObjectFingerprint = entry.ObjectFingerprint
 		result.TotalBytes = entry.Size
 	}
-	return result, nil
+	return result
 }
 
 func (s *Service) PurgeTrash(ctx context.Context, subject access.Subject, locator access.Locator, trashID string) (MutationResult, error) {
@@ -157,6 +221,25 @@ func (s *Service) DeletePermanently(ctx context.Context, subject access.Subject,
 		return MutationResult{}, err
 	}
 	if err := s.invalidatePath(ctx, locator, mount.RelativePath); err != nil {
+		return MutationResult{}, err
+	}
+	return MutationResult{RelativePath: mount.RelativePath, ObjectFingerprint: entry.ObjectFingerprint, AffectedCount: 1, TotalBytes: entry.Size}, nil
+}
+
+// DeletePermanentlySecure behaves like DeletePermanently but, when a
+// fileops.Coordinator is configured, durably journals the delete,
+// invalidates affected shares, and records auditWriter's event all in one
+// transaction before any filesystem I/O begins.
+func (s *Service) DeletePermanentlySecure(ctx context.Context, subject access.Subject, locator access.Locator, auditWriter fileops.AuditWriter) (MutationResult, error) {
+	if s.fileOps == nil {
+		return s.DeletePermanently(ctx, subject, locator)
+	}
+	mount, err := s.authorizeMutationSource(ctx, subject, locator, aitoken.ScopeFilesPurge)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	entry, _ := s.files.Stat(toFilesMount(mount), mount.RelativePath)
+	if err := s.fileOps.Delete(ctx, toFilesMount(mount), locator.SpaceID, locator.MountID, mount.RelativePath, auditWriter); err != nil {
 		return MutationResult{}, err
 	}
 	return MutationResult{RelativePath: mount.RelativePath, ObjectFingerprint: entry.ObjectFingerprint, AffectedCount: 1, TotalBytes: entry.Size}, nil

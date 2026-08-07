@@ -46,6 +46,9 @@ type Service struct {
 
 type Option func(*Service)
 
+type CreateAuditWriter func(context.Context, *sql.Tx, IssuedShare) error
+type RevokeAuditWriter func(context.Context, *sql.Tx, string) error
+
 func WithClock(clock func() time.Time) Option {
 	return func(s *Service) {
 		if clock != nil {
@@ -185,6 +188,10 @@ LIMIT ?
 // Create validates a manager-authorized target, stores only a hash of the
 // fragment secret, and returns the complete capability exactly once.
 func (s *Service) Create(ctx context.Context, subject access.Subject, req CreateRequest) (IssuedShare, error) {
+	return s.CreateSecure(ctx, subject, req, nil)
+}
+
+func (s *Service) CreateSecure(ctx context.Context, subject access.Subject, req CreateRequest, auditWriter CreateAuditWriter) (IssuedShare, error) {
 	if err := s.validateSubject(ctx, subject, aitoken.ScopeSharesCreate); err != nil {
 		return IssuedShare{}, err
 	}
@@ -256,12 +263,18 @@ func (s *Service) Create(ctx context.Context, subject access.Subject, req Create
 			return IssuedShare{}, err
 		}
 	}
-	_, err = s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return IssuedShare{}, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
 INSERT INTO shares(
     id, public_id, secret_hash, password_hash, creator_account_id,
     space_id, mount_id, relative_path, allow_preview, allow_download,
-    max_visits, max_downloads, expires_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    max_visits, max_downloads, expires_at, credential_generation
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER))
 `, shareID, publicID, share.HashSecret(secret), passwordHash, subject.AccountID,
 		req.Locator.SpaceID, req.Locator.MountID, relativePath, boolInt(allowPreview), boolInt(allowDownload),
 		req.MaxVisits, req.MaxDownloads, formatSQLiteTime(expiresAt))
@@ -276,13 +289,26 @@ INSERT INTO shares(
 		MaxVisits: cloneInt64(req.MaxVisits), MaxDownloads: cloneInt64(req.MaxDownloads),
 		ExpiresAt: expiresAt, Status: "active",
 	}
-	return IssuedShare{Share: item, Secret: secret, Fragment: fragment, URL: s.shareURLBase + "#" + fragment}, nil
+	issued := IssuedShare{Share: item, Secret: secret, Fragment: fragment, URL: s.shareURLBase + "#" + fragment}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx, issued); err != nil {
+			return IssuedShare{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return IssuedShare{}, err
+	}
+	return issued, nil
 }
 
 // Revoke revokes a share for its creator or a current manager of its space.
 // It validates the current mount identity and token boundary before changing
 // public reachability.
 func (s *Service) Revoke(ctx context.Context, subject access.Subject, shareID string) error {
+	return s.RevokeSecure(ctx, subject, shareID, nil)
+}
+
+func (s *Service) RevokeSecure(ctx context.Context, subject access.Subject, shareID string, auditWriter RevokeAuditWriter) error {
 	if err := s.validateSubject(ctx, subject, aitoken.ScopeSharesRevoke); err != nil {
 		return err
 	}
@@ -323,7 +349,12 @@ FROM shares WHERE id = ?
 		return mapAccessError(err)
 	}
 	now := formatSQLiteTime(s.now().UTC())
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
 UPDATE shares SET revoked_at = ?, updated_at = ?
 WHERE id = ? AND revoked_at IS NULL
 `, now, now, shareID)
@@ -337,7 +368,12 @@ WHERE id = ? AND revoked_at IS NULL
 	if affected != 1 {
 		return ErrNotFound
 	}
-	return nil
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx, shareID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // PreviewRevoke performs the same live scope, creator/manager, boundary and
@@ -394,6 +430,28 @@ func (s *Service) RevokePath(ctx context.Context, spaceID, mountID, relativePath
 	if s == nil || s.db == nil {
 		return ErrUnavailable
 	}
+	return s.revokePath(ctx, s.db, spaceID, mountID, relativePath)
+}
+
+// RevokePathTx behaves like RevokePath but participates in the caller's
+// transaction. The file-operation journal uses this so that path
+// invalidation is atomic with the durable operation row that authorized it,
+// instead of a separate best-effort call after the transaction commits.
+func (s *Service) RevokePathTx(ctx context.Context, tx *sql.Tx, spaceID, mountID, relativePath string) error {
+	if s == nil {
+		return ErrUnavailable
+	}
+	if tx == nil {
+		return errors.New("member share: transaction is nil")
+	}
+	return s.revokePath(ctx, tx, spaceID, mountID, relativePath)
+}
+
+type shareExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func (s *Service) revokePath(ctx context.Context, exec shareExecer, spaceID, mountID, relativePath string) error {
 	spaceID = strings.TrimSpace(spaceID)
 	mountID = strings.TrimSpace(mountID)
 	if spaceID == "" || mountID == "" {
@@ -413,7 +471,7 @@ func (s *Service) RevokePath(ctx context.Context, spaceID, mountID, relativePath
 		args = append(args, escapeLike(cleaned)+"/%")
 	}
 	args = append([]any{now, now, spaceID, mountID}, args...)
-	_, err = s.db.ExecContext(ctx, `
+	_, err = exec.ExecContext(ctx, `
 UPDATE shares SET revoked_at = ?, updated_at = ?
 WHERE space_id = ? AND mount_id = ? AND revoked_at IS NULL AND `+condition+`
 `, args...)

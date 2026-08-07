@@ -45,8 +45,19 @@ type trashMeta struct {
 
 // SoftDelete moves a managed-mount object into `.omnora/trash/<id>/`.
 func (Service) SoftDelete(mount Mount, relativePath string) (TrashItem, error) {
+	return (Service{}).SoftDeleteWithID(mount, relativePath, "trash_"+httpx.NewRequestID())
+}
+
+// SoftDeleteWithID behaves like SoftDelete but accepts a caller-supplied
+// trash ID. Callers that durably journal the operation before performing
+// filesystem I/O (see internal/fileops) generate the ID up front so it can
+// be recorded in the operation row before the move happens.
+func (Service) SoftDeleteWithID(mount Mount, relativePath, id string) (TrashItem, error) {
 	if err := requireManagedWritable(mount); err != nil {
 		return TrashItem{}, err
+	}
+	if !validTrashID(id) {
+		return TrashItem{}, ErrTrashItemNotFound
 	}
 	cleaned, err := storage.CleanRelativePath(relativePath)
 	if err != nil || cleaned == "." {
@@ -68,7 +79,6 @@ func (Service) SoftDelete(mount Mount, relativePath string) (TrashItem, error) {
 	if !ok {
 		return TrashItem{}, ErrNotFile
 	}
-	id := "trash_" + httpx.NewRequestID()
 	trashRoot := path.Join(storage.ReservedNamespace, trashDirName, id)
 	if err := ensureReservedDirs(root); err != nil {
 		return TrashItem{}, err

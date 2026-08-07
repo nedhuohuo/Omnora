@@ -14,6 +14,7 @@ import (
 	"omnora/internal/aitoken"
 	"omnora/internal/domain"
 	"omnora/internal/files"
+	"omnora/internal/fileops"
 	"omnora/internal/storage"
 	"omnora/internal/transfer"
 )
@@ -162,8 +163,9 @@ func (s *Service) PrepareUpload(ctx context.Context, subject access.Subject, req
 	expires := s.now().UTC().Add(24 * time.Hour)
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO upload_sessions(id, account_id, space_id, mount_id, target_relative_path,
-    declared_size, part_size, temp_dir, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    declared_size, part_size, temp_dir, expires_at, credential_generation)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+    CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER))
 `, upload.ID, subject.AccountID, req.Locator.SpaceID, req.Locator.MountID,
 		upload.TargetPath, upload.ExpectedSize, 32*1024,
 		filepathJoin(mount.Root, storage.ReservedNamespace, "tmp", "uploads"), formatMemberTime(expires))
@@ -333,20 +335,9 @@ func (s *Service) restoreUploadClaim(ctx context.Context, uploadID string) error
 }
 
 func (s *Service) Rename(ctx context.Context, subject access.Subject, source access.Locator, destination string) (MutationResult, error) {
-	src, err := s.authorizeMutationSource(ctx, subject, source, aitoken.ScopeFilesWrite)
+	src, cleaned, err := s.prepareRename(ctx, subject, source, destination)
 	if err != nil {
 		return MutationResult{}, err
-	}
-	dest, err := s.authorizeDestinationParent(ctx, subject, source, destination, aitoken.ScopeFilesWrite)
-	if err != nil {
-		return MutationResult{}, err
-	}
-	if src.ID != dest.ID {
-		return MutationResult{}, ErrInvalidInput
-	}
-	cleaned, err := cleanMutationPath(destination)
-	if err != nil || cleaned == "." {
-		return MutationResult{}, ErrInvalidInput
 	}
 	result := MutationResult{RelativePath: cleaned}
 	if _, err := s.files.Rename(toFilesMount(src), src.RelativePath, cleaned); err != nil {
@@ -359,6 +350,48 @@ func (s *Service) Rename(ctx context.Context, subject access.Subject, source acc
 		return result, err
 	}
 	return result, nil
+}
+
+// RenameSecure behaves like Rename but, when a fileops.Coordinator is
+// configured, durably journals the rename, invalidates affected shares, and
+// records auditWriter's event all in one transaction before any filesystem
+// I/O begins. A filesystem failure afterward leaves a recovery_required
+// operation row instead of an audit trail that no longer matches disk state.
+func (s *Service) RenameSecure(ctx context.Context, subject access.Subject, source access.Locator, destination string, auditWriter fileops.AuditWriter) (MutationResult, error) {
+	if s.fileOps == nil {
+		return s.Rename(ctx, subject, source, destination)
+	}
+	src, cleaned, err := s.prepareRename(ctx, subject, source, destination)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	result := MutationResult{RelativePath: cleaned}
+	if _, err := s.fileOps.Rename(ctx, toFilesMount(src), source.SpaceID, source.MountID, src.RelativePath, cleaned, auditWriter); err != nil {
+		return MutationResult{}, mapMutationError(err)
+	}
+	if entry, statErr := s.files.Stat(toFilesMount(src), cleaned); statErr == nil {
+		result.ObjectFingerprint = entry.ObjectFingerprint
+	}
+	return result, nil
+}
+
+func (s *Service) prepareRename(ctx context.Context, subject access.Subject, source access.Locator, destination string) (access.AuthorizedMount, string, error) {
+	src, err := s.authorizeMutationSource(ctx, subject, source, aitoken.ScopeFilesWrite)
+	if err != nil {
+		return access.AuthorizedMount{}, "", err
+	}
+	dest, err := s.authorizeDestinationParent(ctx, subject, source, destination, aitoken.ScopeFilesWrite)
+	if err != nil {
+		return access.AuthorizedMount{}, "", err
+	}
+	if src.ID != dest.ID {
+		return access.AuthorizedMount{}, "", ErrInvalidInput
+	}
+	cleaned, err := cleanMutationPath(destination)
+	if err != nil || cleaned == "." {
+		return access.AuthorizedMount{}, "", ErrInvalidInput
+	}
+	return src, cleaned, nil
 }
 
 func (s *Service) Copy(ctx context.Context, subject access.Subject, source, destination access.Locator) (MutationResult, error) {
@@ -412,16 +445,9 @@ func (s *Service) CrossMountCopy(ctx context.Context, subject access.Subject, so
 }
 
 func (s *Service) Move(ctx context.Context, subject access.Subject, source, destination access.Locator) (MutationResult, error) {
-	src, err := s.authorizeMutationSource(ctx, subject, source, aitoken.ScopeFilesWrite)
+	src, dest, err := s.prepareMove(ctx, subject, source, destination)
 	if err != nil {
 		return MutationResult{}, err
-	}
-	dest, err := s.authorizeDestinationDir(ctx, subject, destination, aitoken.ScopeFilesWrite)
-	if err != nil {
-		return MutationResult{}, err
-	}
-	if src.ID == dest.ID && (dest.RelativePath == src.RelativePath || strings.HasPrefix(dest.RelativePath, src.RelativePath+"/")) {
-		return MutationResult{}, ErrMutationInvalidPath
 	}
 	var created string
 	if src.ID == dest.ID {
@@ -440,6 +466,47 @@ func (s *Service) Move(ctx context.Context, subject access.Subject, source, dest
 		return result, err
 	}
 	return result, nil
+}
+
+// MoveSecure behaves like Move but, for the same-mount case, durably
+// journals the move via fileops when a Coordinator is configured. Cross-mount
+// moves fall back to the legacy path: same-mount journaling does not cover
+// them, and the dedicated cross-mount coordinator is out of scope here.
+func (s *Service) MoveSecure(ctx context.Context, subject access.Subject, source, destination access.Locator, auditWriter fileops.AuditWriter) (MutationResult, error) {
+	if s.fileOps == nil {
+		return s.Move(ctx, subject, source, destination)
+	}
+	src, dest, err := s.prepareMove(ctx, subject, source, destination)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	if src.ID != dest.ID {
+		return s.Move(ctx, subject, source, destination)
+	}
+	created, err := s.fileOps.Move(ctx, toFilesMount(src), source.SpaceID, source.MountID, src.RelativePath, dest.RelativePath, auditWriter)
+	if err != nil {
+		return MutationResult{}, mapMutationError(err)
+	}
+	result := MutationResult{RelativePath: created}
+	if entry, statErr := s.files.Stat(toFilesMount(dest), created); statErr == nil {
+		result.ObjectFingerprint = entry.ObjectFingerprint
+	}
+	return result, nil
+}
+
+func (s *Service) prepareMove(ctx context.Context, subject access.Subject, source, destination access.Locator) (access.AuthorizedMount, access.AuthorizedMount, error) {
+	src, err := s.authorizeMutationSource(ctx, subject, source, aitoken.ScopeFilesWrite)
+	if err != nil {
+		return access.AuthorizedMount{}, access.AuthorizedMount{}, err
+	}
+	dest, err := s.authorizeDestinationDir(ctx, subject, destination, aitoken.ScopeFilesWrite)
+	if err != nil {
+		return access.AuthorizedMount{}, access.AuthorizedMount{}, err
+	}
+	if src.ID == dest.ID && (dest.RelativePath == src.RelativePath || strings.HasPrefix(dest.RelativePath, src.RelativePath+"/")) {
+		return access.AuthorizedMount{}, access.AuthorizedMount{}, ErrMutationInvalidPath
+	}
+	return src, dest, nil
 }
 
 // CrossMountMove is the REST-compatible move variant. It requires editor
@@ -523,6 +590,11 @@ func (s *Service) loadUpload(ctx context.Context, subject access.Subject, upload
 	var record uploadRecord
 	var expires string
 	var identity, kind string
+	// The credential_generation check fails an in-flight upload closed the
+	// same way an expired lease does: if the account's credential epoch was
+	// bumped since the upload started (password reset, security event,
+	// ...), the session simply stops resolving instead of letting a stale
+	// upload continue writing into the mount.
 	err := s.db.QueryRowContext(ctx, `
 SELECT u.id, u.account_id, u.space_id, u.mount_id, u.target_relative_path,
        u.declared_size, u.part_size, u.temp_dir, u.expires_at,
@@ -530,6 +602,7 @@ SELECT u.id, u.account_id, u.space_id, u.mount_id, u.target_relative_path,
 FROM upload_sessions u
 JOIN mounts m ON m.id = u.mount_id AND m.space_id = u.space_id
 WHERE u.id = ? AND u.account_id = ? AND u.status = 'active'
+  AND u.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
 `, uploadID, subject.AccountID).Scan(&record.ID, &record.AccountID, &record.SpaceID, &record.MountID,
 		&record.TargetPath, &record.ExpectedSize, &record.PartSize, &record.TempDir, &expires,
 		&record.Mount.Root, &kind, &record.Mount.Mode, &identity)
