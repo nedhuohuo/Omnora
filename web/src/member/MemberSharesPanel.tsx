@@ -15,6 +15,7 @@ import { type MemberLocale, localeMessages } from './i18n';
 import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, type MemberSpace } from './types';
 import { copyText } from './clipboard';
 import { joinReadableLabels } from './displayLabels';
+import FileTypeIcon from './FileTypeIcon';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
@@ -196,7 +197,7 @@ function ShareTargetPicker({
             return (
               <div key={`dir-${entryPath}`} className={`member-share-picker-row${isSelected ? ' selected' : ''}`}>
                 <button type="button" className="member-share-picker-item" onClick={() => setBrowsePath(entryPath)}>
-                  <span className="member-file-icon dir">DIR</span>
+                  <FileTypeIcon kind="dir" name={entry.name} className="member-file-icon dir" />
                   <span>{entry.name}</span>
                 </button>
                 <button type="button" className="member-share-picker-select" onClick={() => onSelect(entryPath)}>{text.shareSelectItem}</button>
@@ -212,7 +213,7 @@ function ShareTargetPicker({
               aria-selected={isSelected}
               onClick={() => onSelect(entryPath)}
             >
-              <span className="member-file-icon file">{entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>
+              <FileTypeIcon kind="file" name={entry.name} className="member-file-icon file" />
               <span>{entry.name}</span>
             </button>
           );

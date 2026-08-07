@@ -40,6 +40,8 @@ import MemberSharesPanel, { ShareCreateModal, ShareCreatedResult } from './Membe
 import MemberTokensPanel from './MemberTokensPanel';
 import MemberAccountPanel from './MemberAccountPanel';
 import MemberDocsPanel from './MemberDocsPanel';
+import MarkdownPreview from './MarkdownPreview';
+import FileTypeIcon from './FileTypeIcon';
 import { applyThemePreference } from './theme';
 import { RecentReauthProvider } from './RecentReauthProvider';
 import { stateForSession } from './sessionFlow';
@@ -112,6 +114,13 @@ function canPreview(previewKind: string) {
 
 function isAudioName(name: string) {
   return /\.(aac|flac|m4a|mp3|ogg|wav)$/i.test(name);
+}
+
+// 将 markdown 文档内的相对资源路径改写为同目录文件的 inline 预览链接。
+function markdownAssetURL(spaceId: string, mountId: string, mdPath: string, src: string): string {
+  if (!src || /^(?:[a-z][a-z0-9+.-]*:|\/)/i.test(src)) return src;
+  const dir = normalizeParentPath(mdPath).split('/').filter(Boolean).slice(0, -1).join('/');
+  return previewURL(spaceId, mountId, [dir, src].filter(Boolean).join('/'));
 }
 
 type PreviewTarget = {
@@ -446,6 +455,11 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   function openPreview(entry: MemberDirectoryEntry) {
     const mountId = entry.mountId ?? activeMountId;
     if (!mountId || !canPreview(entry.previewKind)) return;
+    if (entry.previewKind !== 'markdown') {
+      // 图片 / PDF / 音视频 / 纯文本均由浏览器原生渲染：新标签页打开 inline 链接
+      window.open(previewURL(activeSpaceId, mountId, entry.relativePath), '_blank', 'noopener');
+      return;
+    }
     setPreviewFailed(false);
     setPreviewText(null);
     setPreviewBlobUrl(null);
@@ -983,7 +997,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
               <thead><tr><th>{text.name}</th><th>{text.size}</th><th>{text.modified}</th><th>{text.actions}</th></tr></thead>
               <tbody>{visibleEntries.map((entry) => (
                 <tr key={`${entry.kind}-${entry.mountId ?? activeMountId}-${entry.relativePath}`}>
-                  <td><div className="member-file-name"><span className={`member-file-icon ${entry.kind}`}>{entry.kind === 'dir' ? 'DIR' : entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{entry.name}</button> : canPreview(entry.previewKind) ? <button type="button" className="member-file-preview" onClick={() => openPreview(entry)}>{entry.name}</button> : <span>{entry.name}</span>}{searchResults !== null && entry.mountName && <small>{entry.mountName}</small>}</div></td>
+                  <td><div className="member-file-name"><FileTypeIcon kind={entry.kind} name={entry.name} className={`member-file-icon ${entry.kind}`} />{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{entry.name}</button> : canPreview(entry.previewKind) ? <button type="button" className="member-file-preview" onClick={() => openPreview(entry)}>{entry.name}</button> : <span>{entry.name}</span>}{searchResults !== null && entry.mountName && <small>{entry.mountName}</small>}</div></td>
                   <td>{entry.kind === 'dir' ? '--' : formatBytes(entry.size, locale)}</td>
                   <td>{formatDate(entry.modifiedAt, locale)}</td>
                   <td><div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{text.open}</button> : <>{canPreview(entry.previewKind) && <button type="button" onClick={() => openPreview(entry)}>{text.preview}</button>}<a href={downloadURL(activeSpaceId, entry.mountId ?? activeMountId, entry.relativePath)}>{text.download}</a></>}{canManageShares && searchResults === null && <button type="button" onClick={() => openShareForEntry(entry)}>{text.shareAction}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'move')}>{text.move}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'copy')}>{text.copyObject}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openRename(entry)}>{text.rename}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openDelete(entry)}>{text.deleteFile}</button>}</div></td>
@@ -993,7 +1007,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
           ) : (
             <div className="member-file-grid">{visibleEntries.map((entry) => (
               <article key={`${entry.kind}-${entry.mountId ?? activeMountId}-${entry.relativePath}`}>
-                <span className={`member-file-icon ${entry.kind}`}>{entry.kind === 'dir' ? 'DIR' : entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>
+                <FileTypeIcon kind={entry.kind} name={entry.name} className={`member-file-icon ${entry.kind}`} />
                 {entry.kind === 'dir' || canPreview(entry.previewKind) ? <button type="button" className={entry.kind === 'file' ? 'member-file-preview' : undefined} onClick={() => entry.kind === 'dir' ? openDirectory(entry.relativePath, entry.mountId) : openPreview(entry)}><strong>{entry.name}</strong></button> : <strong>{entry.name}</strong>}
                 <small>{entry.kind === 'dir' ? '--' : formatBytes(entry.size, locale)}</small>
                 {searchResults !== null && entry.mountName && <small>{entry.mountName}</small>}
@@ -1011,7 +1025,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
                 <thead><tr><th>{text.name}</th><th>{text.trashOriginalPath}</th><th>{text.size}</th><th>{text.trashDeletedAt}</th><th>{text.actions}</th></tr></thead>
                 <tbody>{trashItems.map((item) => (
                   <tr key={item.id}>
-                    <td><div className="member-file-name"><span className={`member-file-icon ${item.kind === 'dir' ? 'dir' : 'file'}`}>{item.kind === 'dir' ? 'DIR' : item.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span><span>{item.name}</span></div></td>
+                    <td><div className="member-file-name"><FileTypeIcon kind={item.kind === 'dir' ? 'dir' : 'file'} name={item.name} className={`member-file-icon ${item.kind === 'dir' ? 'dir' : 'file'}`} /><span>{item.name}</span></div></td>
                     <td>{item.originalPath}</td>
                     <td>{item.kind === 'dir' ? '--' : formatBytes(item.size, locale)}</td>
                     <td>{formatDate(item.deletedAt, locale)}</td>
@@ -1032,7 +1046,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
 
       {newFolderOpen && <div className="member-modal-backdrop"><form className="member-modal" onSubmit={onCreateFolder}><h2>{text.newFolder}</h2><label>{text.folderName}<input autoFocus value={folderName} onChange={(event) => setFolderName(event.target.value)} required /></label><div><button type="button" onClick={() => setNewFolderOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={loading}>{text.create}</button></div></form></div>}
 
-      {preview && <div className="member-preview-backdrop" onClick={() => setPreview(null)} role="presentation"><div className="member-preview-dialog" role="dialog" aria-modal="true" aria-label={preview.name} onClick={(event) => event.stopPropagation()}><div className="member-preview-toolbar"><strong>{preview.name}</strong><div className="member-preview-actions"><a className="member-preview-download" href={previewDownload}>{text.download}</a><button type="button" onClick={() => setPreview(null)}>{text.closePreview}</button></div></div><div className="member-preview-stage">{previewFailed ? <p className="member-preview-error">{text.previewFailed}</p> : preview.previewKind === 'image' ? <img src={previewSrc} alt={preview.name} onError={() => setPreviewFailed(true)} /> : preview.previewKind === 'media' ? (isAudioName(preview.name) ? <audio src={previewSrc} controls onError={() => setPreviewFailed(true)} /> : <video src={previewSrc} controls onError={() => setPreviewFailed(true)} />) : preview.previewKind === 'text' || preview.previewKind === 'markdown' ? (previewText === null ? <p className="member-preview-loading">{text.loading}</p> : <pre className="member-preview-text">{previewText}</pre>) : previewBlobUrl ? <iframe title={preview.name} src={previewBlobUrl} /> : <p className="member-preview-loading">{text.loading}</p>}</div></div></div>}
+      {preview && <div className="member-preview-backdrop" onClick={() => setPreview(null)} role="presentation"><div className="member-preview-dialog" role="dialog" aria-modal="true" aria-label={preview.name} onClick={(event) => event.stopPropagation()}><div className="member-preview-toolbar"><strong>{preview.name}</strong><div className="member-preview-actions"><a className="member-preview-download" href={previewDownload}>{text.download}</a><button type="button" onClick={() => setPreview(null)}>{text.closePreview}</button></div></div><div className="member-preview-stage">{previewFailed ? <p className="member-preview-error">{text.previewFailed}</p> : preview.previewKind === 'image' ? <img src={previewSrc} alt={preview.name} onError={() => setPreviewFailed(true)} /> : preview.previewKind === 'media' ? (isAudioName(preview.name) ? <audio src={previewSrc} controls onError={() => setPreviewFailed(true)} /> : <video src={previewSrc} controls onError={() => setPreviewFailed(true)} />) : preview.previewKind === 'text' || preview.previewKind === 'markdown' ? (previewText === null ? <p className="member-preview-loading">{text.loading}</p> : preview.previewKind === 'markdown' ? <MarkdownPreview text={previewText} resolveAsset={(src) => markdownAssetURL(activeSpaceId, preview.mountId, preview.relativePath, src)} /> : <pre className="member-preview-text">{previewText}</pre>) : previewBlobUrl ? <iframe title={preview.name} src={previewBlobUrl} /> : <p className="member-preview-loading">{text.loading}</p>}</div></div></div>}
 
       {renameTarget && (
         <div className="member-modal-backdrop">

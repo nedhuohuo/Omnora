@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"mime"
 	"os"
 	"path"
 	"path/filepath"
@@ -15,6 +16,12 @@ import (
 	"omnora/internal/domain"
 	"omnora/internal/storage"
 )
+
+func init() {
+	// .jsonl 不在 Go 内置 MIME 表中，不注册的话 inline 预览会回退为
+	// application/octet-stream，浏览器将下载而不是直接显示文件内容。
+	mime.AddExtensionType(".jsonl", "text/plain; charset=utf-8")
+}
 
 type EntryKind string
 
