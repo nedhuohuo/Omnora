@@ -1575,10 +1575,16 @@ func (s *Server) createAIToken(w http.ResponseWriter, r *http.Request) {
 	if req.ExpiresAt == "" {
 		req.ExpiresAt = req.ExpiresAtAlt
 	}
-	expiresAt, err := time.Parse(time.RFC3339, req.ExpiresAt)
-	if err != nil || !time.Now().UTC().Before(expiresAt.UTC()) {
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "expiresAt must be a future RFC3339 timestamp")
-		return
+	// An empty expiresAt creates a token that never expires; otherwise it must
+	// be a future RFC3339 timestamp.
+	var expiresAt time.Time
+	if req.ExpiresAt != "" {
+		parsed, parseErr := time.Parse(time.RFC3339, req.ExpiresAt)
+		if parseErr != nil || !time.Now().UTC().Before(parsed.UTC()) {
+			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "expiresAt must be a future RFC3339 timestamp")
+			return
+		}
+		expiresAt = parsed
 	}
 	scopes := make([]aitoken.Scope, 0, len(req.Scopes))
 	for _, scope := range req.Scopes {
@@ -2008,6 +2014,17 @@ WHERE id = ? AND status = 'active'
 	if err != nil {
 		return validatedMount{}, err
 	}
+	// Shared-slot registration: an external root path that is a direct child
+	// of the predeclared mount root (a slot) receives a per-space subdirectory
+	// named after the space ID, so multiple spaces can share one slot without
+	// parent-child path conflicts.
+	if kind == "external" && s.isSlotPath(rootPath) {
+		target := filepath.Join(rootPath, spaceID)
+		if err := os.Mkdir(target, 0o750); err != nil && !errors.Is(err, os.ErrExist) {
+			return validatedMount{}, fmt.Errorf("%w: cannot create shared slot subdirectory: %v", errMountNotWritable, err)
+		}
+		rootPath = target
+	}
 	existing, err := s.loadMountIdentities(r)
 	if err != nil {
 		return validatedMount{}, err
@@ -2048,6 +2065,18 @@ func (s *Server) mountRootAllowedForKind(kind, candidatePath string) bool {
 	}
 
 	return candidatePath == configuredRoot || strings.HasPrefix(candidatePath, configuredRoot+string(filepath.Separator))
+}
+
+// isSlotPath reports whether candidatePath is a direct child of the
+// predeclared external mount root (a slot). Slots are not registered directly;
+// registration allocates a per-space subdirectory under them.
+func (s *Server) isSlotPath(candidatePath string) bool {
+	root := filepath.Clean(strings.TrimSpace(s.cfg.Storage.PredeclaredMountRoot))
+	candidatePath = filepath.Clean(strings.TrimSpace(candidatePath))
+	if root == "." || root == string(filepath.Separator) || candidatePath == root {
+		return false
+	}
+	return filepath.Dir(candidatePath) == root
 }
 
 func probeMountWritable(rootPath string) error {

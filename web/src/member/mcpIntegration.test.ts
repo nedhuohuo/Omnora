@@ -6,6 +6,7 @@ import {
   MCP_PATH,
   MCP_PROTOCOL_VERSION,
   MCP_SCOPES,
+  MCP_TOOL_CATALOG,
   MCP_TRANSPORT,
   MCP_PRESETS,
   buildInspectorConnection,
@@ -52,6 +53,22 @@ describe('MCP frontend contract', () => {
       'shares:read', 'shares:create', 'shares:revoke',
     ]);
     expect(MCP_PRESETS.permanentDelete).toEqual(['files:purge']);
+  });
+
+  it('pins the 24-tool catalog to the server contract', () => {
+    expect(MCP_TOOL_CATALOG).toHaveLength(24);
+    expect(new Set(MCP_TOOL_CATALOG.map((tool) => tool.name)).size).toBe(24);
+    const highRisk = MCP_TOOL_CATALOG.filter((tool) => tool.highRisk).map((tool) => tool.name);
+    expect(highRisk).toEqual([
+      'files.move',
+      'files.trash',
+      'trash.purge',
+      'trash.empty',
+      'files.delete_permanently',
+      'shares.create',
+      'shares.revoke',
+    ]);
+    expect(new Set(MCP_TOOL_CATALOG.map((tool) => tool.scope))).toEqual(new Set(MCP_SCOPES));
   });
 
   it('builds a same-origin Inspector connection block without OAuth claims', () => {

@@ -39,6 +39,7 @@ import AdminWorkspace, { type AdminTab } from './AdminWorkspace';
 import MemberSharesPanel, { ShareCreateModal, ShareCreatedResult } from './MemberSharesPanel';
 import MemberTokensPanel from './MemberTokensPanel';
 import MemberAccountPanel from './MemberAccountPanel';
+import MemberDocsPanel from './MemberDocsPanel';
 import { applyThemePreference } from './theme';
 import { RecentReauthProvider } from './RecentReauthProvider';
 import { stateForSession } from './sessionFlow';
@@ -49,7 +50,7 @@ import { useLocale } from './useLocale';
 import { readableLabel } from './displayLabels';
 import './member-files.css';
 
-type MemberTab = 'files' | 'trash' | 'shares' | 'tokens' | 'account';
+type MemberTab = 'files' | 'trash' | 'shares' | 'tokens' | 'docs' | 'account';
 type AdminNavGroup = 'overview' | 'identity-space' | 'storage-search' | 'access-security' | 'backups';
 type AdminNavItem = { id: AdminTab; label: string };
 type AdminNavGroupItem = { id: AdminNavGroup; label: string; tabs: AdminNavItem[] };
@@ -945,6 +946,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             {activeMountSupportsTrash && <button className={`member-nav ${activeTab === 'trash' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('trash')}>{text.recycleBin}</button>}
             <button className={`member-nav ${activeTab === 'shares' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('shares')}>{text.navShares}</button>
             <button className={`member-nav ${activeTab === 'tokens' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('tokens')}>{text.navTokens}</button>
+            <button className={`member-nav ${activeTab === 'docs' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('docs')}>{text.navDocs}</button>
             <button className={`member-nav ${activeTab === 'account' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('account')}>{text.account}</button>
           </nav>}
           {(activeTab === 'files' || activeTab === 'trash') && <><div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => selectSpace(space.id)}>{space.name}<small>{space.role}</small></button>)}</div>
@@ -1020,6 +1022,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             )}
           </> : activeTab === 'shares' ? <MemberSharesPanel locale={locale} />
             : activeTab === 'tokens' ? <MemberTokensPanel locale={locale} />
+            : activeTab === 'docs' ? <MemberDocsPanel locale={locale} />
             : activeTab === 'account' ? <MemberAccountPanel locale={locale} />
             : <AdminWorkspace tab={activeTab as AdminTab} locale={locale} />}
         </section>

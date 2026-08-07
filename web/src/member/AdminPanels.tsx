@@ -714,7 +714,7 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
       {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
       {loading ? <div className="member-loading">{text.loading}</div> : tokens.length === 0 ? <div className="member-empty">{text.tokenGovNoTokens}</div> : (
         <table className="member-admin-table">
-          <thead><tr><th>{text.tokenColumnName}</th><th>{text.tokenGovColumnOwner}</th><th>{text.tokenColumnScopes}</th><th>{text.tokenColumnStatus}</th><th>{text.actions}</th></tr></thead>
+          <thead><tr><th>{text.tokenColumnName}</th><th>{text.tokenGovColumnOwner}</th><th>{text.tokenColumnScopes}</th><th>{text.tokenColumnExpires}</th><th>{text.tokenColumnLastUsed}</th><th>{text.tokenColumnStatus}</th><th>{text.actions}</th></tr></thead>
           <tbody>{tokens.map((token) => {
             const owner = tokenOwnerLabel(token);
             return (
@@ -722,6 +722,8 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
                 <td>{token.name}</td>
                 <td>{owner.primary}{owner.secondary && <small>{owner.secondary}</small>}</td>
                 <td>{(token.scopes ?? []).join(', ') || '--'}</td>
+                <td>{token.expiresAt ? formatDate(token.expiresAt, locale) : text.tokenNeverExpires}</td>
+                <td>{token.lastUsedAt ? formatDate(token.lastUsedAt, locale) : '--'}</td>
                 <td>{tokenStatusLabel(token.status, text)}</td>
                 <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onDelete(token)} disabled={loading}>{text.tokenRevoke}</button></td>
               </tr>

@@ -121,7 +121,8 @@ export type CreateAiTokenPayload = {
     mountId: string;
     path: string;
   }>;
-  expiresAt: string;
+  /** Omit for a token that never expires. */
+  expiresAt?: string;
 };
 
 export type CreateAiTokenResponse = {

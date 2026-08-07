@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"omnora/internal/mountid"
 )
 
 type hostDirectoryEntry struct {
@@ -157,6 +159,13 @@ func (s *Server) suggestHostDirectories(rawPath string) (hostDirectorySuggestion
 		if !isUnderAnyRoot(candidate, roots) {
 			continue
 		}
+		// External slots appear as suggestions only after the operator binds a
+		// host directory to them, which surfaces as their own bind mount in
+		// the container mount table. Unbound slots stay hidden even when an
+		// empty directory exists at the path.
+		if rootKindForPath(candidate, rootDetails) == "external" && s.isSlotPath(candidate) && !s.isBoundSlot(candidate) {
+			continue
+		}
 		add(candidate)
 	}
 
@@ -210,6 +219,14 @@ func isUnderAnyRoot(path string, roots []string) bool {
 		}
 	}
 	return false
+}
+
+// isBoundSlot reports whether candidatePath is an external slot the operator
+// bound to a host directory. A bound slot is its own bind mount point in the
+// container mount table; a mountinfo read failure fails closed to unbound.
+func (s *Server) isBoundSlot(candidatePath string) bool {
+	bound, err := mountid.IsBindMount(candidatePath)
+	return err == nil && bound
 }
 
 func uniqueSorted(values []string) []string {

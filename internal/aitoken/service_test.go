@@ -148,6 +148,49 @@ WHERE key = 'credential_generation'
 	}
 }
 
+func TestCreateWithoutExpiryNeverExpires(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	insertActiveAccountSpaceMount(t, db)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	service := NewService(db, WithClock(func() time.Time { return now }))
+
+	issued, err := service.Create(ctx, CreateRequest{
+		AccountID: "acct_1",
+		Name:      "never-expiring MCP",
+		Scopes:    []Scope{ScopeSpacesRead},
+		Boundaries: []DirectoryBoundary{{
+			SpaceID: "space_1", MountID: "mount_1", RelativePath: ".",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Create() without expiry error = %v", err)
+	}
+	if !issued.Token.ExpiresAt.IsZero() {
+		t.Fatalf("issued token ExpiresAt = %v, want zero value", issued.Token.ExpiresAt)
+	}
+	var storedExpiry string
+	if err := db.QueryRowContext(ctx, "SELECT expires_at FROM ai_tokens WHERE id = ?", issued.Token.ID).Scan(&storedExpiry); err != nil {
+		t.Fatalf("query expires_at: %v", err)
+	}
+	if storedExpiry != "" {
+		t.Fatalf("stored expires_at = %q, want empty string", storedExpiry)
+	}
+
+	// The token must remain valid well beyond the original creation time.
+	farFuture := NewService(db, WithClock(func() time.Time { return now.Add(100 * 365 * 24 * time.Hour) }))
+	principal, err := farFuture.VerifyBearer(ctx, issued.BearerToken)
+	if err != nil {
+		t.Fatalf("VerifyBearer() far in the future error = %v, want success", err)
+	}
+	if !principal.ExpiresAt.IsZero() {
+		t.Fatalf("principal ExpiresAt = %v, want zero value", principal.ExpiresAt)
+	}
+	if _, err := farFuture.RefreshPrincipal(ctx, issued.Token.ID); err != nil {
+		t.Fatalf("RefreshPrincipal() far in the future error = %v, want success", err)
+	}
+}
+
 func TestValidateScopesRejectsUnknownDuplicateAndEmpty(t *testing.T) {
 	for _, scopes := range [][]Scope{
 		nil,

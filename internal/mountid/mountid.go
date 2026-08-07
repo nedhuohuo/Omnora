@@ -74,6 +74,38 @@ func VerifyCandidateRoot(root string, existing []Identity) (Identity, error) {
 	return verifyCandidateRoot(root, existing, defaultMountInfoPath)
 }
 
+// IsBindMount reports whether path is itself a mount point in the container
+// mount table. A predeclared external slot the operator bound to a host
+// directory appears as its own bind mount; unbound slots have no entry.
+func IsBindMount(path string) (bool, error) {
+	return isBindMountAt(path, defaultMountInfoPath)
+}
+
+func isBindMountAt(path string, mountInfoPath string) (bool, error) {
+	cleaned, err := cleanRoot(path)
+	if err != nil {
+		return false, err
+	}
+	file, err := os.Open(mountInfoPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: read mountinfo: %v", ErrIdentityUnverifiable, err)
+	}
+	defer file.Close()
+	entries, err := parseMountInfo(file)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if entry.Available && samePath(entry.Point, cleaned) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func verifyCandidateRoot(root string, existing []Identity, mountInfoPath string) (Identity, error) {
 	identity, err := capture(root, mountInfoPath)
 	if err != nil {

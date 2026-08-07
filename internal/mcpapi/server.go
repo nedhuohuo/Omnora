@@ -84,7 +84,10 @@ func NewHandler(tokens *aitoken.Service, opts HandlerOptions) http.Handler {
 			PropagateRequestCancellation: true,
 		},
 	)
-	return auth.RequireBearerToken(TokenVerifier(tokens), nil)(streamable)
+	// Omnora tokens may never expire; the SDK middleware must accept a
+	// missing Expiration. Real expiry is still enforced by VerifyBearer, which
+	// rejects tokens whose stored expiration has passed.
+	return auth.RequireBearerToken(TokenVerifier(tokens), &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})(streamable)
 }
 
 // NewHandlerWithLimit is a compact convenience for callers that do not need

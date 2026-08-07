@@ -18,11 +18,9 @@ import type { MemberMount, MemberSpace } from './types';
 import { createClientId } from './clientId';
 import { copyText } from './clipboard';
 import { joinReadableLabels, readableLabel } from './displayLabels';
+import McpDocsBlock from './McpDocsBlock';
 import {
-  MCP_OAUTH_STATUS,
   MCP_PRESETS,
-  MCP_PROTOCOL_VERSION,
-  MCP_TRANSPORT,
   buildInspectorConnection,
   getMcpRouteState,
   type InspectorConnection,
@@ -155,7 +153,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!name.trim() || !expiresAt) return;
+    if (!name.trim()) return;
     setCreating(true);
     setError('');
     try {
@@ -176,7 +174,8 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
           mountId: boundary.mountId,
           path: boundary.path.trim() || '.',
         })),
-        expiresAt: new Date(expiresAt).toISOString(),
+        // An empty expiry means the token never expires.
+        ...(expiresAt ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
       }));
       const connection = buildInspectorConnection(globalThis.location?.origin ?? '', result.bearerToken);
       setCreatedToken({ bearerToken: result.bearerToken, connection });
@@ -230,31 +229,20 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
         </div>
       </div>
 
-      <section className="member-mcp-status" aria-label={text.tokenMcpStatusTitle}>
-        <div className="member-mcp-status-heading">
-          <div><h2>{text.tokenMcpStatusTitle}</h2><p>{text.tokenMcpStatusDetail}</p></div>
-          <span className={`member-route-badge ${routeState.exposed ? 'exposed' : 'closed'}`}>{routeState.exposed ? text.routeExposed : text.routeClosed}</span>
-        </div>
-        <div className="member-mcp-status-grid">
-          <div><span>{text.tokenMcpEndpoint}</span><code>{routeState.endpoint}</code></div>
-          <div><span>{text.tokenMcpProtocol}</span><strong>{MCP_PROTOCOL_VERSION}</strong></div>
-          <div><span>{text.tokenMcpTransport}</span><strong>{MCP_TRANSPORT}</strong></div>
-          <div><span>{text.tokenMcpAuth}</span><code>Authorization: Bearer &lt;AI_TOKEN&gt;</code></div>
-          <div><span>{text.tokenMcpOAuth}</span><strong>{MCP_OAUTH_STATUS}</strong></div>
-        </div>
-      </section>
+      <McpDocsBlock endpoint={routeState.endpoint} exposed={routeState.exposed} locale={locale} />
 
       {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
 
       {loading ? <div className="member-loading">{text.loading}</div> : tokens.length === 0 ? <div className="member-empty">{text.tokenListEmpty}</div> : (
         <table className="member-admin-table">
-          <thead><tr><th>{text.tokenColumnName}</th><th>{text.tokenColumnScopes}</th><th>{text.tokenColumnBoundary}</th><th>{text.tokenColumnExpires}</th><th>{text.tokenColumnStatus}</th><th>{text.actions}</th></tr></thead>
+          <thead><tr><th>{text.tokenColumnName}</th><th>{text.tokenColumnScopes}</th><th>{text.tokenColumnBoundary}</th><th>{text.tokenColumnExpires}</th><th>{text.tokenColumnLastUsed}</th><th>{text.tokenColumnStatus}</th><th>{text.actions}</th></tr></thead>
           <tbody>{tokens.map((token) => (
             <tr key={token.id}>
               <td>{token.name}</td>
               <td>{(token.scopes ?? []).join(', ') || '--'}</td>
               <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => boundarySummary(boundary, spaces, mountsBySpace)).join('; ')}</td>
-              <td>{formatDate(token.expiresAt, locale, '--')}</td>
+              <td>{formatDate(token.expiresAt, locale, text.tokenNeverExpires)}</td>
+              <td>{formatDate(token.lastUsedAt, locale, '--')}</td>
               <td>{tokenStatusLabel(token.status, text)}</td>
               <td><button className="member-table-action member-table-danger" type="button" onClick={() => setDeleteTarget(token)} disabled={loading}>{text.tokenRevoke}</button></td>
             </tr>
@@ -283,7 +271,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
               </div>
               <p className="member-mcp-warning">{text.tokenMcpHighRiskWarning}</p>
             </fieldset>
-            <label className="member-admin-form-wide">{text.tokenExpiresAt}<input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} required /></label>
+            <label className="member-admin-form-wide">{text.tokenExpiresAt}<input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /><small className="member-path-hint">{text.tokenExpiryOptional}</small></label>
 
             <div className="member-admin-form-wide member-token-boundaries">
               {boundaries.map((boundary) => (

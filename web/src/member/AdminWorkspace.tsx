@@ -453,6 +453,9 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
   const indexableMounts = mounts.filter(isIndexableMount);
   const heading = tab === 'mounts' ? text.mountManagement : tab === 'index-jobs' ? text.indexJobs : tab === 'route-groups' ? text.routeGroups : text.auditLog;
   const headingDetail = tab === 'mounts' ? text.mountManagementDetail : tab === 'index-jobs' ? text.indexJobsDetail : tab === 'route-groups' ? text.routeGroupsDetail : text.auditLogDetail;
+  const externalRootPath = allowedRoots.find((root) => root.kind === 'external')?.path ?? '';
+  const slotPath = externalRootPath !== '' && mountForm.rootPath.startsWith(externalRootPath + '/') ? mountForm.rootPath.slice(externalRootPath.length + 1) : '';
+  const isSharedSlot = mountForm.kind === 'external' && slotPath !== '' && !slotPath.includes('/');
 
   return (
     <div className="member-admin-workspace">
@@ -505,6 +508,7 @@ export default function AdminWorkspace({ tab, locale }: { tab: AdminTab; locale:
               )}
             </div>
             <small className="member-path-hint">{text.mountRootHint}</small>
+            {isSharedSlot && <p className="member-path-hint">{text.slotShareHint}</p>}
             {allowedRoots.length > 0 && (
               <div className="member-path-roots">
                 <span className="member-path-roots-title">{text.allowedRoots}</span>

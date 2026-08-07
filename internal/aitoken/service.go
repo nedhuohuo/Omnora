@@ -101,7 +101,9 @@ func (s *Service) CreateSecure(ctx context.Context, req CreateRequest, auditWrit
 	accountID := strings.TrimSpace(req.AccountID)
 	name := strings.TrimSpace(req.Name)
 	now := s.now().UTC().Round(0)
-	if accountID == "" || name == "" || !now.Before(req.ExpiresAt) {
+	// A zero ExpiresAt means the token never expires; any other value must be
+	// strictly in the future.
+	if accountID == "" || name == "" || (!req.ExpiresAt.IsZero() && !now.Before(req.ExpiresAt)) {
 		return IssuedToken{}, ErrInvalidInput
 	}
 	scopes, err := ValidateScopes(req.Scopes)
@@ -168,7 +170,7 @@ WHERE key = 'credential_generation'
 	_, err = tx.ExecContext(ctx, `
 	INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, credential_generation, created_at, expires_at, updated_at)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, token.ID, token.PublicID, token.SecretHash, token.AccountID, token.Name, scopeJSON, token.CredentialGeneration, formatTime(token.CreatedAt), formatTime(token.ExpiresAt), formatTime(now))
+`, token.ID, token.PublicID, token.SecretHash, token.AccountID, token.Name, scopeJSON, token.CredentialGeneration, formatTime(token.CreatedAt), formatTokenExpiry(token.ExpiresAt), formatTime(now))
 	if err != nil {
 		return IssuedToken{}, err
 	}
@@ -207,7 +209,7 @@ func (s *Service) VerifyBearer(ctx context.Context, bearer string) (Principal, e
 		return Principal{}, err
 	}
 	now := s.now().UTC().Round(0)
-	if token.RevokedAt.Valid || !now.Before(token.ExpiresAt) || !secretMatches(secret, token.SecretHash) {
+	if token.RevokedAt.Valid || (!token.ExpiresAt.IsZero() && !now.Before(token.ExpiresAt)) || !secretMatches(secret, token.SecretHash) {
 		return Principal{}, ErrInvalidToken
 	}
 
@@ -250,7 +252,7 @@ func (s *Service) RefreshPrincipal(ctx context.Context, tokenID string) (Princip
 		return Principal{}, err
 	}
 	now := s.now().UTC().Round(0)
-	if token.RevokedAt.Valid || !now.Before(token.ExpiresAt) {
+	if token.RevokedAt.Valid || (!token.ExpiresAt.IsZero() && !now.Before(token.ExpiresAt)) {
 		return Principal{}, ErrInvalidToken
 	}
 	return Principal{
@@ -342,9 +344,12 @@ WHERE t.public_id = ?
 	if err != nil {
 		return loadedToken{}, err
 	}
-	token.ExpiresAt, err = parseTime(expiresAt)
-	if err != nil {
-		return loadedToken{}, err
+	// An empty stored value means the token never expires.
+	if expiresAt != "" {
+		token.ExpiresAt, err = parseTime(expiresAt)
+		if err != nil {
+			return loadedToken{}, err
+		}
 	}
 	if lastUsedAt.Valid {
 		token.LastUsedAt, err = parseTime(lastUsedAt.String)
@@ -401,9 +406,12 @@ WHERE t.id = ?
 	if err != nil {
 		return loadedToken{}, err
 	}
-	token.ExpiresAt, err = parseTime(expiresAt)
-	if err != nil {
-		return loadedToken{}, err
+	// An empty stored value means the token never expires.
+	if expiresAt != "" {
+		token.ExpiresAt, err = parseTime(expiresAt)
+		if err != nil {
+			return loadedToken{}, err
+		}
 	}
 	if lastUsedAt.Valid {
 		token.LastUsedAt, err = parseTime(lastUsedAt.String)
@@ -548,6 +556,15 @@ func newPrefixedID(prefix string) (string, error) {
 
 func formatTime(value time.Time) string {
 	return value.UTC().Format(timestampLayout)
+}
+
+// formatTokenExpiry renders the stored expires_at value. The zero value means
+// a token that never expires and is persisted as an empty string.
+func formatTokenExpiry(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return formatTime(value)
 }
 
 func parseTime(value string) (time.Time, error) {

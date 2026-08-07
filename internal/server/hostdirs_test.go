@@ -27,6 +27,16 @@ func TestAdminHostDirectorySuggestionsStayInsideConfiguredRoots(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(external, "readme.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(nested, "photo.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write nested file: %v", err)
+	}
+	// Test directories are not bind mounts, so every external slot stays
+	// hidden regardless of content; the bind detection itself is covered by
+	// the mountid package tests.
+	emptySlot := filepath.Join(external, "empty-slot")
+	if err := os.Mkdir(emptySlot, 0o755); err != nil {
+		t.Fatalf("mkdir empty slot: %v", err)
+	}
 
 	handler := New(config.Config{
 		Routes:            map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
@@ -96,11 +106,11 @@ func TestAdminHostDirectorySuggestionsStayInsideConfiguredRoots(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if !containsHostPath(payload.Entries, nested) {
-			t.Fatalf("entries = %#v, want %s", payload.Entries, nested)
+		if containsHostPath(payload.Entries, nested) {
+			t.Fatalf("external slot without a bind mount must not be suggested: %#v", payload.Entries)
 		}
-		if got := hostDirectoryEntryKind(payload.Entries, nested); got != "external" {
-			t.Fatalf("nested entry kind = %q, want external; entries = %#v", got, payload.Entries)
+		if containsHostPath(payload.Entries, emptySlot) {
+			t.Fatalf("external slot without a bind mount must not be suggested: %#v", payload.Entries)
 		}
 	})
 
