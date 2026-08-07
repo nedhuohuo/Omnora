@@ -24,9 +24,23 @@ CREATE TABLE accounts (
 	status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'deleted')),
 	password_hash TEXT,
 	totp_required INTEGER NOT NULL DEFAULT 0 CHECK (totp_required IN (0, 1)),
+	totp_secret_ciphertext TEXT,
+	totp_confirmed_at TEXT,
+	totp_pending_secret_ciphertext TEXT,
+	totp_pending_expires_at TEXT,
+	password_reset_required INTEGER NOT NULL DEFAULT 0 CHECK (password_reset_required IN (0, 1)),
+	totp_reset_required INTEGER NOT NULL DEFAULT 0 CHECK (totp_reset_required IN (0, 1)),
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE system_state (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO system_state(key, value) VALUES ('credential_generation', '7');
 
 CREATE TABLE spaces (
 	id TEXT PRIMARY KEY,
@@ -264,6 +278,7 @@ func TestSessionTokenIsOpaqueAndStoredHashed(t *testing.T) {
 	issued, err := svc.CreateSession(ctx, SessionRequest{
 		AccountID: created.Account.ID,
 		TTL:       time.Hour,
+		Purpose:   SessionPurposeFull,
 	})
 	if err != nil {
 		t.Fatalf("CreateSession() error = %v", err)
@@ -297,7 +312,168 @@ func TestSessionTokenIsOpaqueAndStoredHashed(t *testing.T) {
 	}
 }
 
-func TestSessionEntryDefaultAndRoundTrip(t *testing.T) {
+func TestCreateSessionPersistsFullPurposeAndCredentialGeneration(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	svc := newTestService(db)
+
+	created, err := svc.CreateAccount(ctx, CreateAccountRequest{
+		Email:       "member@example.com",
+		DisplayName: "Member",
+		Password:    "CorrectHorse1!",
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount() error = %v", err)
+	}
+	issued, err := svc.CreateSession(ctx, SessionRequest{
+		AccountID: created.Account.ID,
+		TTL:       time.Hour,
+		Purpose:   SessionPurposeFull,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	var purpose string
+	var generation int64
+	if err := db.QueryRowContext(ctx, `
+SELECT purpose, credential_generation
+FROM identity_sessions
+WHERE id = ?
+`, issued.Session.ID).Scan(&purpose, &generation); err != nil {
+		t.Fatalf("query session security fields: %v", err)
+	}
+	if purpose != string(SessionPurposeFull) {
+		t.Fatalf("purpose = %q, want %q", purpose, SessionPurposeFull)
+	}
+	if generation != 7 {
+		t.Fatalf("credential_generation = %d, want 7", generation)
+	}
+}
+
+func TestVerifySessionRejectsStaleGenerationAndUnknownPurpose(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	svc := newTestService(db)
+
+	created, err := svc.CreateAccount(ctx, CreateAccountRequest{
+		Email:       "member@example.com",
+		DisplayName: "Member",
+		Password:    "CorrectHorse1!",
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount() error = %v", err)
+	}
+	issued, err := svc.CreateSession(ctx, SessionRequest{
+		AccountID: created.Account.ID,
+		TTL:       time.Hour,
+		Purpose:   SessionPurposeFull,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `
+UPDATE system_state SET value = '8', updated_at = CURRENT_TIMESTAMP
+WHERE key = 'credential_generation'
+`); err != nil {
+		t.Fatalf("bump credential generation: %v", err)
+	}
+	if _, err := svc.VerifySession(ctx, issued.Token); !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("VerifySession() after generation bump error = %v, want ErrSessionInvalid", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `
+UPDATE system_state SET value = '7', updated_at = CURRENT_TIMESTAMP
+WHERE key = 'credential_generation'
+`); err != nil {
+		t.Fatalf("restore credential generation: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+UPDATE identity_sessions SET purpose = 'legacy' WHERE id = ?
+`, issued.Session.ID); err != nil {
+		t.Fatalf("set unknown purpose: %v", err)
+	}
+	if _, err := svc.VerifySession(ctx, issued.Token); !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("VerifySession() with unknown purpose error = %v, want ErrSessionInvalid", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE identity_sessions SET purpose = NULL WHERE id = ?`, issued.Session.ID); err != nil {
+		t.Fatalf("clear purpose: %v", err)
+	}
+	if _, err := svc.VerifySession(ctx, issued.Token); !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("VerifySession() with null purpose error = %v, want ErrSessionInvalid", err)
+	}
+}
+
+func TestVerifyAndListSessionsScanReauthenticatedAt(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	svc := newTestService(db)
+	created, err := svc.CreateAccount(ctx, CreateAccountRequest{Email: "reauth@example.com", DisplayName: "Reauth", Password: "CorrectHorse1!"})
+	if err != nil {
+		t.Fatalf("CreateAccount() error = %v", err)
+	}
+	issued, err := svc.CreateSession(ctx, SessionRequest{AccountID: created.Account.ID, TTL: time.Hour, Purpose: SessionPurposeFull})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	const reauthenticatedAt = "2026-08-06T12:00:00Z"
+	if _, err := db.ExecContext(ctx, `UPDATE identity_sessions SET reauthenticated_at = ? WHERE id = ?`, reauthenticatedAt, issued.Session.ID); err != nil {
+		t.Fatalf("set reauthenticated_at: %v", err)
+	}
+	verified, err := svc.VerifySession(ctx, issued.Token)
+	if err != nil {
+		t.Fatalf("VerifySession() error = %v", err)
+	}
+	if verified.ReauthenticatedAt.IsZero() || verified.ReauthenticatedAt.Format(time.RFC3339) != reauthenticatedAt {
+		t.Fatalf("verified reauthenticated_at = %v, want %s", verified.ReauthenticatedAt, reauthenticatedAt)
+	}
+	sessions, err := svc.ListSessions(ctx, created.Account.ID)
+	if err != nil {
+		t.Fatalf("ListSessions() error = %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ReauthenticatedAt.IsZero() {
+		t.Fatalf("listed sessions = %#v, want reauthenticated_at", sessions)
+	}
+}
+
+func TestListSessionsPreservesPurposeAndCredentialGeneration(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	svc := newTestService(db)
+
+	created, err := svc.CreateAccount(ctx, CreateAccountRequest{
+		Email:       "member@example.com",
+		DisplayName: "Member",
+		Password:    "CorrectHorse1!",
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount() error = %v", err)
+	}
+	if _, err := svc.CreateSession(ctx, SessionRequest{
+		AccountID: created.Account.ID,
+		TTL:       time.Hour,
+		Purpose:   SessionPurposeFull,
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	sessions, err := svc.ListSessions(ctx, created.Account.ID)
+	if err != nil {
+		t.Fatalf("ListSessions() error = %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("ListSessions() count = %d, want 1", len(sessions))
+	}
+	if sessions[0].Purpose != SessionPurposeFull {
+		t.Fatalf("listed purpose = %q, want %q", sessions[0].Purpose, SessionPurposeFull)
+	}
+	if sessions[0].CredentialGeneration != 7 {
+		t.Fatalf("listed credential_generation = %d, want 7", sessions[0].CredentialGeneration)
+	}
+}
+
+func TestCreateSessionRequiresExplicitPurpose(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 	svc := newTestService(db)
@@ -311,11 +487,12 @@ func TestSessionEntryDefaultAndRoundTrip(t *testing.T) {
 		t.Fatalf("CreateAccount() error = %v", err)
 	}
 
-	// An empty entry is normalized to the default HTTP entry so sessions
-	// created without an explicit entry remain compatible with the schema.
-	issued, err := svc.CreateSession(ctx, SessionRequest{AccountID: created.Account.ID, TTL: time.Hour})
+	if _, err := svc.CreateSession(ctx, SessionRequest{AccountID: created.Account.ID, TTL: time.Hour}); err == nil {
+		t.Fatal("CreateSession() with empty purpose succeeded")
+	}
+	issued, err := svc.CreateSession(ctx, SessionRequest{AccountID: created.Account.ID, TTL: time.Hour, Purpose: SessionPurposeFull})
 	if err != nil {
-		t.Fatalf("CreateSession() default error = %v", err)
+		t.Fatalf("CreateSession() full error = %v", err)
 	}
 	if issued.Session.Entry != DefaultSessionEntry {
 		t.Fatalf("default session entry = %q, want %q", issued.Session.Entry, DefaultSessionEntry)
@@ -326,6 +503,19 @@ func TestSessionEntryDefaultAndRoundTrip(t *testing.T) {
 	}
 	if verified.Entry != DefaultSessionEntry {
 		t.Fatalf("verified entry = %q, want %q", verified.Entry, DefaultSessionEntry)
+	}
+}
+
+func TestCreateSessionRejectsEnrollmentForMember(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	svc := newTestService(db)
+	created, err := svc.CreateAccount(ctx, CreateAccountRequest{Email: "member-enrollment@example.com", DisplayName: "Member", Password: "CorrectHorse1!"})
+	if err != nil {
+		t.Fatalf("CreateAccount() error = %v", err)
+	}
+	if _, err := svc.CreateSession(ctx, SessionRequest{AccountID: created.Account.ID, TTL: time.Hour, Purpose: SessionPurposeTOTPEnrollment}); err == nil {
+		t.Fatal("member enrollment session creation succeeded")
 	}
 }
 
@@ -345,6 +535,7 @@ func TestDisabledAccountInvalidatesSession(t *testing.T) {
 	issued, err := svc.CreateSession(ctx, SessionRequest{
 		AccountID: created.Account.ID,
 		TTL:       time.Hour,
+		Purpose:   SessionPurposeFull,
 	})
 	if err != nil {
 		t.Fatalf("CreateSession() error = %v", err)
@@ -377,6 +568,13 @@ func newTestDB(t *testing.T) *sql.DB {
 	}
 	if err := InstallSchema(context.Background(), db); err != nil {
 		t.Fatalf("install identity schema: %v", err)
+	}
+	if _, err := db.Exec(`
+ALTER TABLE identity_sessions ADD COLUMN purpose TEXT;
+ALTER TABLE identity_sessions ADD COLUMN reauthenticated_at TEXT;
+ALTER TABLE identity_sessions ADD COLUMN credential_generation INTEGER;
+`); err != nil {
+		t.Fatalf("install identity security columns: %v", err)
 	}
 	return db
 }

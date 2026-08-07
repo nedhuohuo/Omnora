@@ -95,6 +95,10 @@ WHERE identity_initialization.consumed_at IS NULL
 }
 
 func (s *Service) Initialize(ctx context.Context, req InitializationRequest) (AccountWithPersonalSpace, error) {
+	return s.InitializeSecure(ctx, req, nil)
+}
+
+func (s *Service) InitializeSecure(ctx context.Context, req InitializationRequest, auditWriter AccountAuditWriter) (AccountWithPersonalSpace, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return AccountWithPersonalSpace{}, err
@@ -157,6 +161,11 @@ WHERE id = 1
 	if err != nil {
 		return AccountWithPersonalSpace{}, err
 	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx, created); err != nil {
+			return AccountWithPersonalSpace{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return AccountWithPersonalSpace{}, err
 	}
@@ -164,6 +173,12 @@ WHERE id = 1
 }
 
 func (s *Service) CreateAccount(ctx context.Context, req CreateAccountRequest) (AccountWithPersonalSpace, error) {
+	return s.CreateAccountSecure(ctx, req, nil)
+}
+
+// CreateAccountSecure creates the account and personal space and optionally
+// records its success audit event before committing the same transaction.
+func (s *Service) CreateAccountSecure(ctx context.Context, req CreateAccountRequest, auditWriter AccountAuditWriter) (AccountWithPersonalSpace, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return AccountWithPersonalSpace{}, err
@@ -173,6 +188,11 @@ func (s *Service) CreateAccount(ctx context.Context, req CreateAccountRequest) (
 	created, err := s.createAccountTx(ctx, tx, req)
 	if err != nil {
 		return AccountWithPersonalSpace{}, err
+	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx, created); err != nil {
+			return AccountWithPersonalSpace{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return AccountWithPersonalSpace{}, err
@@ -189,11 +209,12 @@ func (s *Service) CreateSession(ctx context.Context, req SessionRequest) (Sessio
 	}
 
 	var active int
+	var role string
 	if err := s.db.QueryRowContext(ctx, `
-SELECT COUNT(1)
+SELECT COUNT(1), COALESCE(MAX(role), '')
 FROM accounts
 WHERE id = ? AND status = 'active'
-`, req.AccountID).Scan(&active); err != nil {
+`, req.AccountID).Scan(&active, &role); err != nil {
 		return SessionToken{}, err
 	}
 	if active != 1 {
@@ -213,18 +234,35 @@ WHERE id = ? AND status = 'active'
 	if entry == "" {
 		entry = DefaultSessionEntry
 	}
+	purpose := req.Purpose
+	if !purpose.Valid() {
+		return SessionToken{}, fieldError("purpose", "is invalid")
+	}
+	if purpose == SessionPurposeTOTPEnrollment && role != "admin" {
+		return SessionToken{}, fieldError("purpose", "totp enrollment is restricted to administrators")
+	}
+	var credentialGeneration int64
+	if err := s.db.QueryRowContext(ctx, `
+SELECT CAST(value AS INTEGER)
+FROM system_state
+WHERE key = 'credential_generation'
+`).Scan(&credentialGeneration); err != nil {
+		return SessionToken{}, err
+	}
 	session := Session{
-		ID:        sessionID,
-		AccountID: req.AccountID,
-		TokenHash: hashSecret(token),
-		Entry:     entry,
-		CreatedAt: now,
-		ExpiresAt: now.Add(req.TTL),
+		ID:                   sessionID,
+		AccountID:            req.AccountID,
+		TokenHash:            hashSecret(token),
+		Entry:                entry,
+		Purpose:              purpose,
+		CredentialGeneration: credentialGeneration,
+		CreatedAt:            now,
+		ExpiresAt:            now.Add(req.TTL),
 	}
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO identity_sessions (id, account_id, token_hash, entry, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?)
-`, session.ID, session.AccountID, session.TokenHash, session.Entry, formatTime(session.CreatedAt), formatTime(session.ExpiresAt))
+INSERT INTO identity_sessions (id, account_id, token_hash, entry, purpose, credential_generation, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, session.ID, session.AccountID, session.TokenHash, session.Entry, session.Purpose, session.CredentialGeneration, formatTime(session.CreatedAt), formatTime(session.ExpiresAt))
 	if err != nil {
 		return SessionToken{}, err
 	}
@@ -239,8 +277,12 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Acc
 
 	var account Account
 	var createdAt, updatedAt string
+	var totpRequired, passwordResetRequired, totpResetRequired int
+	var totpConfirmedAt sql.NullString
 	err = s.db.QueryRowContext(ctx, `
-SELECT id, email, display_name, role, status, password_hash, created_at, updated_at
+SELECT id, email, display_name, role, status, password_hash,
+       totp_required, totp_confirmed_at, password_reset_required, totp_reset_required,
+       created_at, updated_at
 FROM accounts
 WHERE email = ? AND status = 'active'
 `, normalizedEmail).Scan(
@@ -250,6 +292,10 @@ WHERE email = ? AND status = 'active'
 		&account.Role,
 		&account.Status,
 		&account.PasswordHash,
+		&totpRequired,
+		&totpConfirmedAt,
+		&passwordResetRequired,
+		&totpResetRequired,
 		&createdAt,
 		&updatedAt,
 	)
@@ -258,6 +304,15 @@ WHERE email = ? AND status = 'active'
 	}
 	if err != nil {
 		return Account{}, err
+	}
+	account.TOTPRequired = totpRequired == 1
+	account.PasswordResetRequired = passwordResetRequired == 1
+	account.TOTPResetRequired = totpResetRequired == 1
+	if totpConfirmedAt.Valid {
+		account.TOTPConfirmedAt, err = parseTime(totpConfirmedAt.String)
+		if err != nil {
+			return Account{}, err
+		}
 	}
 	if !s.hasher.Verify(password, account.PasswordHash) {
 		return Account{}, ErrInvalidCredential
@@ -282,22 +337,31 @@ func (s *Service) VerifySession(ctx context.Context, token string) (Session, err
 
 	var session Session
 	var createdAt, expiresAt string
-	var lastUsedAt, revokedAt sql.NullString
+	var lastUsedAt, reauthenticatedAt, revokedAt sql.NullString
+	var purpose string
+	var credentialGeneration int64
 	err := s.db.QueryRowContext(ctx, `
-SELECT s.id, s.account_id, s.token_hash, s.entry, s.created_at, s.expires_at, s.last_used_at, s.revoked_at
+SELECT s.id, s.account_id, s.token_hash, s.entry, s.purpose, s.credential_generation,
+       s.created_at, s.expires_at, s.last_used_at, s.reauthenticated_at, s.revoked_at
 FROM identity_sessions s
 JOIN accounts a ON a.id = s.account_id
 WHERE s.token_hash = ?
   AND s.revoked_at IS NULL
+  AND s.expires_at > ?
   AND a.status = 'active'
-`, tokenHash).Scan(
+  AND s.purpose IN ('full', 'totp_enrollment')
+  AND s.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
+	`, tokenHash, formatTime(now)).Scan(
 		&session.ID,
 		&session.AccountID,
 		&session.TokenHash,
 		&session.Entry,
+		&purpose,
+		&credentialGeneration,
 		&createdAt,
 		&expiresAt,
 		&lastUsedAt,
+		&reauthenticatedAt,
 		&revokedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -306,6 +370,8 @@ WHERE s.token_hash = ?
 	if err != nil {
 		return Session{}, err
 	}
+	session.Purpose = SessionPurpose(purpose)
+	session.CredentialGeneration = credentialGeneration
 	session.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
 		return Session{}, err
@@ -323,6 +389,12 @@ WHERE s.token_hash = ?
 			return Session{}, err
 		}
 	}
+	if reauthenticatedAt.Valid {
+		session.ReauthenticatedAt, err = parseTime(reauthenticatedAt.String)
+		if err != nil {
+			return Session{}, err
+		}
+	}
 	if revokedAt.Valid {
 		session.RevokedAt, err = parseTime(revokedAt.String)
 		if err != nil {
@@ -333,8 +405,8 @@ WHERE s.token_hash = ?
 	if _, err := s.db.ExecContext(ctx, `
 UPDATE identity_sessions
 SET last_used_at = ?
-WHERE id = ? AND revoked_at IS NULL
-`, formatTime(now), session.ID); err != nil {
+WHERE id = ? AND revoked_at IS NULL AND expires_at > ?
+`, formatTime(now), session.ID, formatTime(now)); err != nil {
 		return Session{}, err
 	}
 	session.LastUsedAt = now

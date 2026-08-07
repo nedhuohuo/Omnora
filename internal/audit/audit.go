@@ -15,7 +15,10 @@ import (
 	"omnora/internal/domain"
 )
 
-var ErrSensitiveMetadata = errors.New("audit metadata contains sensitive data")
+var (
+	ErrSensitiveMetadata = errors.New("audit metadata contains sensitive data")
+	ErrWriteFailed       = errors.New("audit write failed")
+)
 
 const ReadinessRiskKey = "audit_write_risk"
 
@@ -29,14 +32,22 @@ const (
 )
 
 type Event struct {
-	ActorAccountID string
-	RouteGroup     domain.RouteGroup
-	Action         string
-	TargetType     string
-	TargetID       string
-	MetadataJSON   string
-	IPHash         string
-	UserAgentHash  string
+	ActorAccountID     string
+	RouteGroup         domain.RouteGroup
+	Action             string
+	TargetType         string
+	TargetID           string
+	MetadataJSON       string
+	IPHash             string
+	UserAgentHash      string
+	CredentialPublicID string
+	ToolName           string
+	Result             string
+	ReasonCode         string
+	RequestID          string
+	TraceID            string
+	ParentEventID      *int64
+	SubjectHash        string
 }
 
 type Recorder struct {
@@ -93,6 +104,25 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.upd
 	return err
 }
 
+// ClearReadinessRisk removes the durable audit failure marker after the audit
+// path is healthy again or an operator has completed recovery.
+func (r Recorder) ClearReadinessRisk(ctx context.Context) error {
+	if r.db == nil {
+		return errors.New("audit database is nil")
+	}
+	_, err := r.db.ExecContext(ctx, `DELETE FROM system_state WHERE key = ?`, ReadinessRiskKey)
+	return err
+}
+
+// WrapWriteError marks a Record/RecordTx failure so HTTP handlers can set
+// readiness risk without treating ordinary business errors as audit failures.
+func WrapWriteError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", ErrWriteFailed, err)
+}
+
 func record(ctx context.Context, exec execContexter, event Event) error {
 	if strings.TrimSpace(event.Action) == "" {
 		return errors.New("audit action is required")
@@ -130,6 +160,48 @@ func record(ctx context.Context, exec execContexter, event Event) error {
 		userAgentHash = event.UserAgentHash
 	}
 
+	result := strings.TrimSpace(event.Result)
+	if result == "" {
+		result = "success"
+	}
+	var credentialPublicID, toolName, reasonCode, requestID, traceID, subjectHash any
+	if strings.TrimSpace(event.CredentialPublicID) != "" {
+		credentialPublicID = event.CredentialPublicID
+	}
+	if strings.TrimSpace(event.ToolName) != "" {
+		toolName = event.ToolName
+	}
+	if strings.TrimSpace(event.ReasonCode) != "" {
+		reasonCode = event.ReasonCode
+	}
+	if strings.TrimSpace(event.RequestID) != "" {
+		requestID = event.RequestID
+	}
+	if strings.TrimSpace(event.TraceID) != "" {
+		traceID = event.TraceID
+	}
+	if strings.TrimSpace(event.SubjectHash) != "" {
+		subjectHash = event.SubjectHash
+	}
+	var parentEventID any
+	if event.ParentEventID != nil {
+		parentEventID = *event.ParentEventID
+	}
+	_, err = exec.ExecContext(ctx, `
+INSERT INTO audit_events(actor_account_id, route_group, action, target_type, target_id, ip_hash, user_agent_hash, metadata_json,
+                         credential_public_id, tool_name, result, reason_code, request_id, trace_id, parent_event_id, subject_hash)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, actor, routeGroup, event.Action, event.TargetType, targetID, ipHash, userAgentHash, metadata,
+		credentialPublicID, toolName, result, reasonCode, requestID, traceID, parentEventID, subjectHash)
+	if err == nil {
+		return nil
+	}
+	// Keep the recorder usable against an expand-phase/legacy fixture while
+	// production migrations expose the full contract. Never hide errors from
+	// the extended insert when the table itself is otherwise complete.
+	if !strings.Contains(strings.ToLower(err.Error()), "no column named") {
+		return err
+	}
 	_, err = exec.ExecContext(ctx, `
 INSERT INTO audit_events(actor_account_id, route_group, action, target_type, target_id, ip_hash, user_agent_hash, metadata_json)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)

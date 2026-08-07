@@ -20,6 +20,12 @@ type Service struct {
 
 type Option func(*Service)
 
+// TxAuditWriter lets callers commit a token mutation and its success audit
+// event atomically without coupling this service to the audit package.
+type TxAuditWriter func(context.Context, *sql.Tx) error
+
+type TokenAuditWriter func(context.Context, *sql.Tx, Token) error
+
 func WithClock(clock func() time.Time) Option {
 	return func(s *Service) {
 		if clock != nil {
@@ -85,6 +91,10 @@ func ValidateScopes(scopes []Scope) ([]Scope, error) {
 }
 
 func (s *Service) Create(ctx context.Context, req CreateRequest) (IssuedToken, error) {
+	return s.CreateSecure(ctx, req, nil)
+}
+
+func (s *Service) CreateSecure(ctx context.Context, req CreateRequest, auditWriter TokenAuditWriter) (IssuedToken, error) {
 	if s == nil || s.db == nil {
 		return IssuedToken{}, ErrInvalidInput
 	}
@@ -171,6 +181,11 @@ VALUES (?, ?, ?, ?)
 			return IssuedToken{}, err
 		}
 	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx, token); err != nil {
+			return IssuedToken{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return IssuedToken{}, err
 	}
@@ -250,16 +265,38 @@ func (s *Service) RefreshPrincipal(ctx context.Context, tokenID string) (Princip
 }
 
 func (s *Service) Revoke(ctx context.Context, tokenID string) error {
+	return s.RevokeSecure(ctx, tokenID, nil)
+}
+
+func (s *Service) RevokeSecure(ctx context.Context, tokenID string, auditWriter TxAuditWriter) error {
 	if s == nil || s.db == nil || strings.TrimSpace(tokenID) == "" {
 		return ErrInvalidInput
 	}
 	now := s.now().UTC().Round(0)
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
 UPDATE ai_tokens
 SET revoked_at = ?, updated_at = ?
 WHERE id = ? AND revoked_at IS NULL
 `, formatTime(now), formatTime(now), strings.TrimSpace(tokenID))
-	return err
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return ErrInvalidInput
+	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Service) loadToken(ctx context.Context, publicID string) (loadedToken, error) {
