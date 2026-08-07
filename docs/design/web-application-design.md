@@ -162,7 +162,7 @@
 
 ### 4.7 AI Token
 
-AI Token 页支持创建、查看元数据、查看最近使用摘要和撤销。创建表单包含名称、有效期、空间、挂载、目录边界、scope、REST/MCP 用途和上传能力。AI Token 是绑定成员账号的受限 PAT，但本页只管理面向 AI/REST/MCP 的受限 Token，不提供通用 PAT 管理入口。Token 默认只读；上传必须单独开启；首版不向 AI Token 开放删除、覆盖、分享、ACL、回收站或管理员操作。
+AI Token 页支持创建、查看元数据、查看最近使用摘要和撤销。创建表单包含名称、有效期、空间、挂载、目录边界、scope、REST/MCP 用途和上传能力。AI Token 是绑定成员账号的受限 PAT，但本页只管理面向 AI/REST/MCP 的受限 Token，不提供通用 PAT 管理入口。Token 默认只读；上传、回收站和分享必须显式授予 scope；移动、删除、清空回收站和分享变更还必须由 MCP MRTR 每次确认。永久删除 scope 独立展示且默认关闭。
 
 明文 Token 只展示一次。关闭创建结果后，只能查看公开 ID、名称、scope 摘要、创建时间、过期时间、最后使用、状态和撤销入口。
 
@@ -409,3 +409,11 @@ Web 验收必须覆盖：
 - 列表为通用目录默认视图，视图偏好按位置记忆。
 - Office 文件不预览，只走下载逻辑。
 - 首版保持低功耗 NAS 资源边界，不引入重型内容处理服务。
+
+## 13. MCP 连接信息
+
+成员 Token 页面展示 `${window.location.origin}/mcp`、`Streamable HTTP`、协议
+`2026-07-28`、`Authorization: Bearer <AI_TOKEN>` 和 OAuth `NOT IMPLEMENTED`。创建结果只在
+一次性面板中显示 bearer，并提供 MCP Inspector Modern connection block；关闭面板会清理
+内存中的 bearer 和派生连接文本。界面明确提示 24 个工具按 scope 过滤，7 个高风险工具
+每次都需要 MRTR，不绑定某一个客户端。

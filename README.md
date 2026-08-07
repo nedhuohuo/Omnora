@@ -27,7 +27,7 @@
 - **文件管理：** 账号、空间 ACL、文件浏览、大文件续传、托管挂载回收站与审计。
 - **受控分享：** 支持文件与文件夹分享，可选密码、有效期、访问 / 下载次数限制和主动撤销。
 - **浏览器预览：** 图片、PDF、文本、Markdown 和原生支持的音视频；Office 文件仅支持下载。
-- **AI 与 API：** 版本化 REST API、OpenAPI 3.1 与 HTTP MCP 入口；AI Token 可限定操作范围与目录边界。当前 MCP 适配器的实现范围见 [MCP 文档](docs/mcp/README.md)。
+- **AI 与 API：** 版本化 REST API、OpenAPI 3.1 与标准 Streamable HTTP MCP 入口（`2026-07-28`，兼容性测试覆盖 `2025-11-25`）；AI Token 可限定 15 个 scope 与目录边界，完整工具/确认/传输规则见 [MCP 文档](docs/mcp/README.md)。
 - **部署入口：** Docker 端口发布或反向代理统一决定访问范围；应用内只维护路由组开关，不再提供额外 LAN / 代理入口配置。
 
 ### 首版非目标
@@ -135,7 +135,7 @@ docker compose --env-file aliyun-test.env \
 | [生产日志](docs/deployment/logging.md) | JSON 日志、请求 ID、代理日志关联和 NAS 证据 |
 | [重装数据连续性](docs/deployment/reinstall-data-continuity.md) | 重装后保留原路径文件可读可用 |
 | [REST API 指南](docs/api/README.md) | REST 接入方式、认证、流程和边界 |
-| [MCP 指南](docs/mcp/README.md) | 当前 MCP HTTP 适配器、方法和兼容性边界 |
+| [MCP 指南](docs/mcp/README.md) | 标准 Streamable HTTP、24 个工具、15 个 scope、MRTR 和 Transfer Ticket |
 | [OpenAPI](openapi/omnora.v1.yaml) | REST 机器可读契约唯一手工源 |
 
 出现冲突时，以许可证、安全模型、领域模型、产品需求、技术架构、Web 设计、验收标准的顺序裁决，详见 [文档地图](docs/README.md)。

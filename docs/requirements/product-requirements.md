@@ -199,11 +199,13 @@ AI Token 的有效权限始终取以下条件的交集：
 
 - `FR-060`：系统必须提供版本化 REST API、可供客户端生成代码和调试的 OpenAPI 文档，以及通过 HTTP 访问的 MCP 服务。
 - `FR-061`：Web、REST 和 MCP 对相同身份、空间和文件必须返回一致的权限结果。
-- `FR-062`：首版 AI 能力必须覆盖空间列表、目录列表、元数据搜索、文件元数据读取、受限文本读取、短期下载地址和上传会话创建。
-- `FR-063`：AI Token 默认只读；上传必须单独授权，并且只对成员本人具有写权限的目录生效。
-- `FR-064`：首版不得向 AI Token 开放删除文件、管理权限或创建公开分享。
-- `FR-065`：MCP 不得直接内联返回大型二进制文件；大文件必须通过受限、短期的下载方式访问。
-- `FR-066`：所有接口必须限制单次结果数、文本读取量、并发请求和流量，超限时返回可识别的错误。
+- `FR-062`：标准 MCP 必须提供 24 个文件、回收站、上传和分享工具；工具由 15 个 scope 过滤，且通过 MCP Inspector/协议测试验收，不绑定具体客户端。
+- MCP scope 枚举固定为：`spaces:read`、`files:list`、`files:metadata`、`files:text`、`files:download_ticket`、`search:read`、`uploads:create`、`files:write`、`files:trash`、`trash:read`、`files:restore`、`files:purge`、`shares:read`、`shares:create`、`shares:revoke`。
+- `FR-063`：AI Token 默认只读；写入、回收站和分享必须单独授权，并且只对成员本人具有实时写权限的目录生效。
+- `FR-064`：永久删除、移动、回收站清理和公开分享等七个高风险 MCP 工具必须每次通过 MRTR；MCP 不提供管理员控制面工具。
+- `FR-065`：MCP 不得直接内联返回大型二进制文件；大文件必须通过短期 Transfer Ticket 的 Range 下载或 multipart 上传路径访问。
+- `FR-066`：MCP 使用 Streamable HTTP `2026-07-28`，兼容性测试覆盖 `2025-11-25`；OAuth 授权配置文件为 `NOT IMPLEMENTED`，只接受 AI Token Bearer。
+- `FR-067`：所有接口必须限制单次结果数、文本读取量、并发请求和流量，超限时返回可识别的错误。
 
 ### 5.8 配额、审计与治理
 
@@ -290,4 +292,4 @@ AI Token 的有效权限始终取以下条件的交集：
 9. 在百万级合成元数据下，分页浏览、文件名搜索、后台索引和文件传输不会相互长时间阻塞。
 10. 极空间实机测量达到空闲内存 100 至 300 MB、普通操作不超过 500 MB 的目标，且不使用 GPU 或重型内容处理服务。
 11. 挂载离线、磁盘不足、任务中断、外部文件移动或删除等故障不会造成越权访问或数据误删，并能给出明确恢复路径。
-12. REST、OpenAPI 与 MCP 能被常见 AI 客户端使用，Token 权限、限额、过期、撤销和审计均可验证。
+12. REST 与 OpenAPI 契约可供客户端接入；MCP 仅以 MCP Inspector Modern 和协议测试验收，不绑定具体客户端，且 Token scope、限额、过期、撤销和审计均可验证。

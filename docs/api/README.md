@@ -1,157 +1,87 @@
 # Omnora REST API
 
-本文档是 REST API 的使用入口。字段、路径参数、请求体和响应 schema 以 [OpenAPI 3.1 契约](../../openapi/omnora.v1.yaml) 为准；本文只说明接入方式、调用顺序和容易踩到的边界。
+REST 的机器可读唯一手工契约是 [OpenAPI 3.1](../../openapi/omnora.v1.yaml)。运行时由
+`GET /openapi` 或 `GET /openapi/omnora.v1.yaml` 提供同一份 YAML；嵌入副本由
+`scripts/verification/sync-openapi-asset.sh` 生成，不能单独修改。
 
-## 契约与入口
+## 路由与三种认证
 
-- 机器可读的唯一手工维护源：[`openapi/omnora.v1.yaml`](../../openapi/omnora.v1.yaml)。
-- 服务运行时的 YAML：`GET /openapi` 或 `GET /openapi/omnora.v1.yaml`。
-- REST 基础路径：`/api/v1`。
-- 健康检查不属于 REST 路由组：`GET /healthz`、`GET /readyz`。
-- OpenAPI 文档路由和 REST 路由是两个独立的路由组。启用 OpenAPI 不会自动启用 REST，反之亦然。
-
-运行时嵌入文件 [`internal/server/openapi_assets/omnora.v1.yaml`](../../internal/server/openapi_assets/omnora.v1.yaml) 由 [`sync-openapi-asset.sh`](../../scripts/verification/sync-openapi-asset.sh) 从根契约生成，不应单独手工修改。
-
-## 前置条件
-
-REST 必须在部署配置中启用：
+REST 基础路径是 `/api/v1`，健康检查 `GET /healthz`、`GET /readyz` 和 OpenAPI/MCP 入口
+使用根路径。REST 路由组必须显式开启：
 
 ```dotenv
 OMNORA_ROUTE_REST_ENABLED=true
 ```
 
-远程访问应通过 HTTPS 反向代理提供。不要把 AI Token、密码、TOTP 秘密或分享片段放入 URL、查询参数、日志或 `Referer`。
+| 凭证 | 放置位置 | 用途 | 失效条件 |
+| --- | --- | --- | --- |
+| 会话 Cookie | `omnora_session` | 浏览器和 `/api/v1` 资源 handler | 登出、轮换、账号禁用 |
+| AI Token | `Authorization: Bearer <AI_TOKEN>` | `/mcp` Streamable HTTP | 撤销、过期、账号/ACL/scope/边界变化 |
+| Transfer Ticket | `Authorization: Bearer <publicId.secret>` | `/mcp/transfers/*` 字节传输 | 短期过期、关闭、对象/挂载/权限变化 |
 
-## 认证
+AI Token Bearer 不是受保护 REST 资源 Cookie 的替代品；受保护的 REST 资源 handler 当前要求会话 Cookie，公开分享/健康检查等入口按各自契约认证。
+Transfer Ticket 只允许传输路由使用，秘密禁止放在 query、fragment、日志或 Referer 中。
 
-Omnora 当前提供两种 REST 认证方式：
-
-| 方式 | 获取方式 | 适用场景 |
-| --- | --- | --- |
-| 浏览器会话 Cookie | `POST /api/v1/auth/session` 成功后由服务设置 `omnora_session` | Web 或需要登录态的人工调用 |
-| Bearer AI Token | 成员通过 `POST /api/v1/ai-tokens` 创建，明文只在创建响应中返回一次 | 当前用于 `/mcp`；REST Bearer 资源访问尚未接入 |
-
-当前 REST 资源 handler（空间、文件、搜索、上传等）要求 `omnora_session` Cookie；只有 `/mcp` 当前调用 AI Token Bearer 校验。AI Token 的权限模型仍以当前账号状态、空间 ACL、Token scope、目录边界、挂载模式和对象状态的交集为目标约束，具体安全规则以[安全模型](../security/security-model.md)为准。
-
-### 健康检查
-
-```bash
-curl -fsS "$OMNORA_BASE_URL/healthz"
-curl -fsS "$OMNORA_BASE_URL/readyz"
-```
-
-其中 `OMNORA_BASE_URL` 不包含 `/api/v1`，例如 `https://omnora.example.com`。
-
-### 创建浏览器会话
+## 会话和 AI Token
 
 ```bash
 curl -i -c /tmp/omnora.cookies \
   -H 'Content-Type: application/json' \
   -d '{"login":"member@example.com","password":"replace-me","totpCode":"123456"}' \
   "$OMNORA_BASE_URL/api/v1/auth/session"
-```
 
-如果账号尚未启用 TOTP 或当前登录流程不要求验证码，可以按 OpenAPI schema 省略 `totpCode`。不要把真实密码写入脚本仓库或 shell 历史。
-
-使用会话访问空间：
-
-```bash
-curl -fsS -b /tmp/omnora.cookies \
-  "$OMNORA_BASE_URL/api/v1/spaces"
-```
-
-### 创建 AI Token（当前用于 MCP）
-
-创建响应中的 `bearerToken` 当前用于 [MCP HTTP 适配器](../mcp/README.md)，不能直接替代 REST 资源接口所需的会话 Cookie。
-
-创建 Token 时必须显式指定有效期、scope 和挂载目录边界：
-
-```bash
 curl -fsS -b /tmp/omnora.cookies \
   -H 'Content-Type: application/json' \
   -d '{
-    "name": "local-reader",
-    "scopes": ["spaces:read", "files:list", "files:metadata", "files:text", "search:read"],
-    "boundaries": [{"spaceId":"space-id","mountId":"mount-id","path":"docs"}],
-    "expiresAt": "2026-09-01T00:00:00Z"
-  }' \
-  "$OMNORA_BASE_URL/api/v1/ai-tokens"
+    "name":"mcp-reader",
+    "scopes":["spaces:read","files:list","files:metadata","files:text","files:download_ticket","search:read"],
+    "boundaries":[{"spaceId":"space-id","mountId":"mount-id","path":"docs"}],
+    "expiresAt":"2026-09-01T00:00:00Z"
+  }' "$OMNORA_BASE_URL/api/v1/ai-tokens"
 ```
 
-创建响应中的 `bearerToken` 只应安全保存；撤销使用 `DELETE /api/v1/ai-tokens/{tokenId}`。Token 默认只读。`uploads:create` scope 会在 Token 创建时校验成员编辑权限和挂载可写条件，但当前 REST 上传 handler 仍要求会话 Cookie；这部分是 REST Bearer 接入的后续契约，不应提前当作已完成能力。
+AI Token scope 的完整枚举为：
+`spaces:read`、`files:list`、`files:metadata`、`files:text`、`files:download_ticket`、
+`search:read`、`uploads:create`、`files:write`、`files:trash`、`trash:read`、
+`files:restore`、`files:purge`、`shares:read`、`shares:create`、`shares:revoke`。
+明文 secret 和 `bearerToken` 只在创建响应显示一次；成员只能管理自己的 Token，管理员只能
+查看元数据和撤销。
 
-## 响应约定
+## 常用 REST 流程
 
-### 成功响应
+1. `GET /api/v1/spaces` 获取可见空间，随后列出挂载和目录。
+2. 使用元数据、搜索和受限文本接口浏览内容；路径始终是挂载内相对路径，不接受宿主绝对路径。
+3. 会话 Cookie 调用 `POST /api/v1/uploads`、`PUT /api/v1/uploads/{uploadId}/parts/{partNumber}`、
+   `POST /api/v1/uploads/{uploadId}/complete` 和取消接口完成分片上传。
+4. 分享创建、撤销和访客换票使用独立 share 路径；fragment 秘密不进入服务器日志。
 
-成功响应的具体 JSON 结构以 OpenAPI 为准。列表接口通常返回 `items`，可分页接口还会返回 `nextCursor`。
+写入、删除、回收站、跨挂载复制/移动和分享都按实时 ACL、挂载身份、只读模式、目录边界
+和对象状态检查。高风险 MCP 工具还需要每次 MRTR 确认；REST 管理空间删除也有服务端确认。
 
-常见分页参数：
+## 错误、分页和传输
 
-- `limit`：请求返回数量，当前契约允许范围是 1 到 200。
-- `cursor`：使用上一页响应中的 `nextCursor`，不要自行拼接或解码。
-
-### 错误响应
-
-服务运行时返回 `application/json`，结构固定为：
+JSON 错误使用：
 
 ```json
-{
-  "error": {
-    "code": "forbidden",
-    "message": "scope is not allowed",
-    "request_id": "request-correlation-id"
-  }
-}
+{"error":{"code":"forbidden","message":"permission denied","request_id":"request-correlation-id"}}
 ```
 
-客户端应按 `error.code` 做机器判断，把 `error.message` 作为诊断信息，并在工单或日志关联时保留 `error.request_id`。常见错误包括 `unauthorized`、`forbidden`、`route_group_disabled`、`not_found`、`invalid_input`、`readonly_mount`、`mount_identity_unverifiable`、`mount_not_writable`、`upload_conflict`、`personal_space_protected` 和 `confirmation_required`；完整路径级响应仍以 OpenAPI 为准。
+按 `error.code` 和 HTTP 状态判断，保留 `request_id`；不要依赖 message。常见 code 包括
+`unauthorized`、`forbidden`、`route_group_disabled`、`not_found`、`invalid_input`、
+`readonly_mount`、`mount_identity_unverifiable`、`mount_not_writable`、`upload_conflict`、
+`confirmation_required` 和 `mcp_audit_degraded`。列表使用 `limit`/`cursor`，当前 limit 范围
+为 1–200。
 
-创建或重新验证读写挂载时，如果容器内实际文件系统无法创建并删除探针文件，服务返回 `409 mount_not_writable`；调用方不应把它当作请求字段格式错误。
+MCP 大文件不通过 MCP JSON 内联返回，而是由 `files.prepare_download` 或
+`files.prepare_upload` 发放 Transfer Ticket。精确的 Range、ETag、状态码和响应头见
+OpenAPI 中的 `/mcp/transfers/{publicId}` 与 `/mcp/transfers/{publicId}/parts/{partNumber}`；
+这两个路径使用 `ticketBearer`，不是 Cookie 或 AI Token 方案。
 
-## 常用业务流程
+## OpenAPI 与验证
 
-### 浏览、搜索与读取
-
-1. `GET /api/v1/spaces` 获取当前主体可见空间。
-2. `GET /api/v1/spaces/{spaceId}/mounts` 获取挂载。
-3. `GET /api/v1/spaces/{spaceId}/mounts/{mountId}/children` 按目录浏览。
-4. `GET /api/v1/spaces/{spaceId}/search` 搜索已启用索引的授权范围。
-5. 按对象需要使用文件元数据、文本读取、下载票据或受限下载接口。
-
-路径参数是挂载内的规范化相对路径，不是宿主机绝对路径；调用方不能通过 API 提交任意宿主路径，也不能访问 `.omnora/` 保留命名空间。
-
-### 分片上传
-
-REST 上传当前采用会话 Cookie 认证的会话式流程：
-
-1. `POST /api/v1/uploads` 创建上传会话。
-2. `PUT /api/v1/uploads/{uploadId}/parts/{partNumber}` 上传每个分片。
-3. `POST /api/v1/uploads/{uploadId}/complete` 提交完成。
-4. 失败或取消时使用 `DELETE /api/v1/uploads/{uploadId}`。
-
-创建阶段、每个分片和最终提交阶段都会重新检查权限、挂载模式、配额和会话状态。不要把上传能力理解成覆盖既有文件的通用权限；首版 AI Token 不开放覆盖既有对象。
-
-### 分享
-
-分享创建、撤销和分享会话交换属于独立的 REST/Share 能力。分享 URL 的秘密只应通过受保护的片段和一次性交换流程处理，具体边界见 OpenAPI 的 `shares` 与 `share-sessions` 定义以及[安全模型](../security/security-model.md)。
-
-### 管理员共享空间生命周期
-
-系统管理员使用 `PATCH /api/v1/admin/spaces/{spaceId}` 和 `{ "name": "新名称" }` 重命名共享空间。重命名只改变显示名称，不改变空间 ID、ACL、挂载归属、分享或 Token 边界。个人空间请求返回 `409 personal_space_protected`。
-
-永久删除共享空间使用 `DELETE /api/v1/admin/spaces/{spaceId}`，请求体必须以 `{ "name": "当前空间名称" }` 精确确认；不匹配返回 `409 confirmation_required`。成功响应明确包含 `deleted: true`、`deleteData: false` 和 `dataDeleted: false`。删除不可恢复，会清理空间、成员、挂载注册、索引、分享及派生会话、Token 边界和上传记录，同时取消相关活动任务并保留其终态记录，但绝不删除服务器上的真实目录、用户文件或上传临时文件。共享空间没有停用或恢复 API。
-
-## 变更与验证
-
-新增或修改 REST 路径时，至少同步：
-
-1. `openapi/omnora.v1.yaml`。
-2. 对应后端路由与测试。
-3. 本文档中的流程或边界说明（仅在行为变化时更新，不复制 schema）。
-4. OpenAPI 嵌入副本和校验门禁。
-
-本地定向检查：
+OpenAPI 只描述 REST 和可建模的 HTTP 传输边界；`/mcp` 是标准 MCP transport，不再描述旧的
+`{method,params}` 私有 envelope，也不重复 24 个 Tool 的 JSON schema。工具、scope、MRTR 和
+协议协商以 [MCP 指南](../mcp/README.md) 与 Inspector/协议测试为准。
 
 ```bash
 scripts/verification/sync-openapi-asset.sh --check

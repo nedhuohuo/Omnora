@@ -28,10 +28,13 @@
 - Share：分享生命周期、密码、次数、派生会话和撤销。
 - Preview：浏览器可预览类型判定、受限内容输出和可选缩略图。
 - MCP Adapter：把应用服务映射为受限 MCP 工具，不直接访问 Storage。
+- MCP Transfer Gateway：使用短期 Transfer Ticket 提供受限 Range 下载和 multipart 上传；每个字节请求都回到 AccessGuard、AI Token 与挂载身份校验。
 - Jobs：持久化任务、优先级、检查点、重试和公平调度。
 - Audit：只追加安全与业务事件、脱敏、保留和导出。
 
-Web、REST、MCP 和分享入口只能调用同一应用服务与 Access Policy，不能分别实现权限规则。
+Web、REST、MCP 和分享入口只能调用同一应用服务与 AccessGuard，不能分别实现权限规则。MCP
+工具目录由 `internal/mcpapi/catalog.go` 生成，当前是 24 个工具、15 个 scope；7 个高风险
+工具在执行前经过一次性 MRTR challenge。
 
 ## 4. SQLite
 
@@ -151,3 +154,17 @@ Omnora 只启动一个 HTTP 监听地址。是否允许局域网或公网访问�
 - 要求管理员重新验证外部挂载的宿主路径、文件系统身份和读写模式后再启用；
 - 校验 SQLite 完整性和托管文件可达性；
 - 记录恢复审计事件。
+
+## 14. 标准 MCP 与秘密隔离
+
+`/mcp` 是官方 SDK `Streamable HTTP` transport，协商首选协议 `2026-07-28`，并保留经过
+协议测试的 `2025-11-25` 兼容路径。它只负责 JSON-RPC transport，不复制 OpenAPI 中的
+工具 schema，也不保留早期 `{method,params}` 私有 envelope。AI Token、MRTR challenge 和
+Transfer Ticket 是三种互相隔离的秘密类型：前者用于 MCP 认证，后者用于一次性人机确认，
+最后一种只用于 `/mcp/transfers/*` 字节流。
+
+大文件通过 `GET /mcp/transfers/{publicId}` 和
+`PUT /mcp/transfers/{publicId}/parts/{partNumber}` 处理；请求使用票据 Bearer、Range/ETag
+和原子字节预算。每次请求重做 Token、ACL、边界、挂载身份和对象指纹检查，票据不能绕过
+AccessGuard。终态审计写入失败会标记 readiness 风险并让 `/readyz` 返回 `503`，从而避免
+“文件已变更但无审计记录”的静默成功。

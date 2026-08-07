@@ -12,10 +12,16 @@
 | [安全模型](security/security-model.md) | 开发、安全、运维 | 信任边界、认证授权、路径安全、网络暴露、凭证和备份恢复 |
 | [验收标准](verification/acceptance-criteria.md) | 开发、测试、发布 | 功能、安全、性能、可靠性和发布门槛 |
 | [REST API 指南](api/README.md) | REST 客户端、开发、测试 | REST 接入、认证、错误、常用流程和契约入口 |
-| [MCP 指南](mcp/README.md) | AI 客户端、开发、测试、安全 | 当前 MCP HTTP 适配器、工具、scope 和目标协议边界 |
+| [MCP 指南](mcp/README.md) | AI 客户端、开发、测试、安全 | 标准 Streamable HTTP、24 个工具、15 个 scope、MRTR、Transfer Ticket 和 Inspector 验收 |
 | [OpenAPI 契约](../openapi/omnora.v1.yaml) | REST 客户端、代码生成、调试工具 | REST API 的机器可读唯一手工源 |
 | [项目框架设计](superpowers/specs/2026-08-02-omnora-project-foundation-design.md) | 开发、测试、运维 | 工程骨架、模块依赖、技术探针、测试与 CI 门禁 |
 | [完整 Web 设计](design/web-application-design.md) | 产品、设计、前端、测试 | 成员端、管理员控制台、公开分享页、响应式、状态和验收范围 |
+| [P1 修复总体设计](superpowers/specs/2026-08-06-p1-remediation-design.md) | 开发、测试、安全、运维 | 当前全项目 Review 的 P1 修复边界、状态机、迁移、顺序和验收门禁 |
+| [P1 身份与 HTTP 安全计划](superpowers/plans/2026-08-06-p1-identity-http-security.md) | 身份、安全、后端、Web | MFA、reauth、CSRF、可信代理、限流、审计和身份 OpenAPI |
+| [P1 文件、上传与分享计划](superpowers/plans/2026-08-06-p1-files-uploads-shares.md) | 文件、存储、分享、Web | 安全 walker、挂载 claim、operation、上传、下载票据和跨挂载一致性 |
+| [P1 恢复与部署计划](superpowers/plans/2026-08-06-p1-backup-recovery-deployment.md) | 运维、恢复、部署、发布 | 离线恢复、备份、路由配置、PUID/PGID/UMASK 和演练门禁 |
+| [P1 Catalog、Jobs 与 API 契约计划](superpowers/plans/2026-08-06-p1-catalog-jobs-api-contracts.md) | Catalog、任务、API、前端 | DFS checkpoint、scan epoch、lease/fencing、RouteDefinition、OpenAPI 与生成类型 |
+| [P2 Review 问题清单](reviews/2026-08-06-code-review-p2-findings.md) | 产品、开发、测试 | 已确认 P2 的证据、影响、修复方向、依赖和关闭条件 |
 | [阿里云测试服务器](deployment/aliyun-test-server.md) | 开发、测试、运维 | 阿里云 ECS 测试服务器边界、外部 `8080` 访问方式和部署文件 |
 | [安全披露](../SECURITY.md) | 安全研究者 | 漏洞报告渠道和响应范围 |
 | [社区许可证](../LICENSE) | 使用者、分发者 | `AGPL-3.0-only` 许可证正文 |
@@ -38,4 +44,4 @@
 
 ## 版本状态
 
-当前文档描述 Omnora 第一版，状态为「设计已收敛，可运行闭环正在实现和验证」。仓库已包含 Go 后端、React 前端、OpenAPI 契约与 Docker Compose 示例；成员端、管理端、分享、审计、AI Token 与 MCP 的首版能力正在按验收标准补齐和验证。尚无正式发布的产品版本，所有资源与性能数值仍为首版目标或验收门槛，不代表已经完整实测达成。
+当前文档描述 Omnora 第一版，状态为「设计已收敛，可运行闭环正在实现和验证」。仓库已包含 Go 后端、React 前端、OpenAPI 契约与 Docker Compose 示例；MCP Wire Protocol 已接入，Inspector/协议测试验收门槛在 Task16，尚未完成正式验收；OAuth 授权配置文件仍为 `NOT IMPLEMENTED`。尚无正式发布的产品版本，所有资源与性能数值仍为首版目标或验收门槛，不代表已经完整实测达成。

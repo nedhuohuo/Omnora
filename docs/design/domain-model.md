@@ -155,13 +155,24 @@
 
 首版只提供绑定成员账号的 AI Token：面向 AI、REST 和 MCP 的受限长期凭证。文档中的 `PAT/AI Token` 是长期凭证统称或未来扩展口径，不表示首版另有通用个人访问令牌（PAT）产品能力，也不要求实现两套凭证管理系统。
 
-首版 AI Token 不允许删除文件或创建公开分享。
+AI Token 的工具能力由 15 个 scope 显式授予；删除、回收站和公开分享不是默认能力，且
+`files.move`、`files.trash`、`trash.purge`、`trash.empty`、`files.delete_permanently`、
+`shares.create`、`shares.revoke` 每次都必须通过 MRTR。scope 之外的工具不出现在目录中，
+但 scope 也不能替代实时 ACL、挂载模式或对象状态检查。
 
 - 成员只能创建、查看元数据和撤销自己的 AI Token；不提供通用 PAT 的自助创建或管理入口。
 - 管理员只能查看 Token 元数据和撤销，不能读取明文。
 - 账号禁用或删除、ACL 降级、Token 过期或撤销后，派生会话和短期 URL 立即失效。
 - Token 目录边界必须位于账号当前可访问的空间和挂载内。
 - 共享空间被永久删除时，指向该空间的 Token 目录边界一并删除；Token 不得凭旧边界继续访问服务器文件。
+
+### 6.1 MCP Transfer Ticket
+
+`files.prepare_download` 和 `files.prepare_upload` 发放短期 Transfer Ticket。票据只绑定
+一个账号、AI Token、操作、空间/挂载/相对路径、对象指纹和字节预算；秘密只通过
+`Authorization: Bearer <publicId.secret>` 传递。每个下载 Range 或上传 part 都重新验证
+Token、ACL、边界、挂载身份、对象指纹和票据状态；`uploads.complete`/`uploads.cancel`
+立即关闭票据。票据不是 AI Token，也不允许调用 MCP 工具。
 
 ## 7. 配额
 

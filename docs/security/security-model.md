@@ -140,16 +140,16 @@ Omnora 首版只提供一个 HTTP 监听地址。私网 IP、Host、客户端提
 
 ### 6.2 Token scope
 
-AI Token 是绑定成员账号的受限 PAT。首版仅允许以下能力组合：
+AI Token 是绑定成员账号的受限 PAT。运行时允许且仅允许以下 15 个 scope：
 
-- 列出空间、目录与文件。
-- 搜索已授权且已索引的范围。
-- 读取文件元数据。
-- 受限读取允许预览的文本内容。
-- 创建绑定单一对象的短期下载地址。
-- 在额外启用上传 scope 后创建上传会话。
+`spaces:read`、`files:list`、`files:metadata`、`files:text`、`files:download_ticket`、
+`search:read`、`uploads:create`、`files:write`、`files:trash`、`trash:read`、
+`files:restore`、`files:purge`、`shares:read`、`shares:create`、`shares:revoke`。
 
-AI Token 首版不得删除、永久移动、恢复、管理 ACL、创建或管理公开分享、访问回收站、执行管理员操作。上传 scope 不隐含覆盖既有文件；覆盖必须是独立能力，首版不向 AI Token 开放。
+scope 只控制 MCP 工具目录和调用资格，不替代账号、ACL、边界、挂载模式、对象状态和
+配额检查。移动、回收站、永久删除和公开分享是显式授权的能力；其中
+`files.move`、`files.trash`、`trash.purge`、`trash.empty`、`files.delete_permanently`、
+`shares.create`、`shares.revoke` 每次都必须经过 MRTR。Token 不提供管理员控制面工具。
 
 目录边界使用挂载 ID 与规范化相对路径保存。Token 对目录的授权包含当时和以后位于该目录子树的对象，但仍受账号当前 ACL、挂载模式和对象状态约束。
 
@@ -172,6 +172,7 @@ AI Token 首版不得删除、永久移动、恢复、管理 ACL、创建或管�
 | 分享会话 | 分享、分享代际、密码验证状态 | 分享仍有效、对象范围、会话期限 | 分享变化、撤销/过期、密码变更、会话超时、恢复代际变化 |
 | 下载票据 | 主体/分享、单一对象、动作、短期有效期 | 原始授权、对象身份、使用状态 | 原始授权失效、对象替换、使用/过期、恢复代际变化 |
 | 上传会话 | Token/会话、目标目录、文件名、声明大小、配额预占 | 原始授权、挂载模式、分片与配额状态 | 原始授权失效、过期、提交/取消、恢复代际变化 |
+| Transfer Ticket | AI Token、操作、单一对象/上传、字节预算、短期有效期 | 每个 Range/part 重新验证 Token、ACL、scope、边界、挂载身份、指纹 | Token/ACL/边界变化、对象漂移、过期、关闭、恢复代际变化 |
 
 短期下载地址和上传会话使用服务端保存的不透明票据，不能使用撤销后仍可离线验证通过的长期自包含签名 URL。
 
@@ -310,7 +311,23 @@ WHERE id = ? AND revoked_at IS NULL AND used < max_uses;
 
 文件系统错误对用户返回通用信息；宿主绝对路径、数据库语句、堆栈和密钥位置只能进入受限诊断日志，并继续脱敏。
 
-### 13.3 保留、容量与可信度
+### 13.3 标准 MCP 安全契约
+
+`/mcp` 使用官方 SDK Streamable HTTP，协商 `2026-07-28`，并测试 `2025-11-25` 兼容性。
+OAuth 授权配置文件为 **NOT IMPLEMENTED**；只接受 AI Token Bearer。Host/Origin 精确白名单
+和 MCP route group 是额外门禁，session ID 不是凭证。旧的 `{method,params}` 私有 envelope
+不再接受。
+
+Transfer Ticket 只在 `/mcp/transfers/{publicId}` 和
+`/mcp/transfers/{publicId}/parts/{partNumber}` 接受，且秘密只允许 Authorization header。
+下载按 Range/ETag 与原子字节预算执行，上传按 part size/声明大小限制。拒绝 query 凭证，
+不记录 bearer、challenge requestState、文件内容、checksum 或宿主路径。
+
+七个高风险工具采用一次性 MRTR：挑战绑定规范化参数、对象指纹、账号和 Token；只有可靠
+form elicitation 客户端才会在目录中看到这些工具。intent 审计失败阻止执行，terminal 审计
+失败记录 `mcp_audit_degraded` 并使 `/readyz` 返回 `503`，直到审计恢复。
+
+### 13.4 保留、容量与可信度
 
 - 审计按可配置保留期和磁盘上限清理，清理策略本身要审计。来源 IP 属于敏感数据，应限制访问和保留时间。
 - ACL、Token、分享、永久删除和恢复等高风险写操作若无法写入审计，应失败关闭。普通读取可继续，但必须产生显著健康告警，避免磁盘故障扩大为全站不可用。
@@ -329,7 +346,7 @@ WHERE id = ? AND revoked_at IS NULL AND used < max_uses;
 - 同一身份、对象和操作通过 Web、REST 与 MCP 得到一致授权结果。
 - 无个人空间 ACL 的管理员无法浏览或搜索内容；管理员账号锁定恢复不得授予个人空间内容权限。
 - 共享空间仅允许系统管理员重命名和永久删除；个人空间返回 `personal_space_protected`，名称确认不匹配返回 `confirmation_required`，任一清理步骤失败时控制面事务整体回滚。
-- AI Token 无法删除、覆盖、分享、访问回收站或越过其目录边界。
+- AI Token 无法覆盖或越过目录边界；删除、回收站和分享只在显式 scope、实时 ACL 和每次 MRTR 均满足时执行。
 
 ### 14.2 分享
 

@@ -110,6 +110,11 @@ paths:
                 $ref: "#/components/schemas/Session"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "400":
+          description: Transfer credentials must be supplied in Authorization, not query parameters.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
         "403":
           $ref: "#/components/responses/Forbidden"
     post:
@@ -172,6 +177,29 @@ paths:
           description: TOTP enabled.
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /account/reauthenticate:
+    post:
+      tags: [Identity]
+      summary: Reauthenticate and rotate the current browser session.
+      description: Verifies the password and current TOTP when enabled, then preserves the original absolute session expiry while recording a five-minute recent-reauthentication window.
+      x-omnora-route-group: rest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReauthenticateRequest"
+      responses:
+        "200":
+          description: Session reauthenticated and rotated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReauthenticateResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /spaces:
     get:
       tags: [Spaces]
@@ -342,6 +370,8 @@ paths:
                 format: binary
         "416":
           $ref: "#/components/responses/RangeNotSatisfiable"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
   /spaces/{spaceId}/search:
     get:
       tags: [Search]
@@ -857,15 +887,35 @@ paths:
                   nextCursor:
                     type: string
   /mcp:
+    get:
+      tags: [MCP]
+      summary: MCP Streamable HTTP transport endpoint.
+      description: >
+        Transport-level endpoint for the standard MCP Streamable HTTP service
+        (protocol 2026-07-28; 2025-11-25 negotiation is tested). The executable
+        tool catalogue and JSON schemas are documented in docs/mcp/README.md and
+        are intentionally not duplicated in OpenAPI. OAuth is NOT IMPLEMENTED;
+        authenticate with an AI Token Bearer. Do not send the obsolete private
+        {method,params} envelope.
+      servers:
+        - url: /
+      x-omnora-route-group: mcp
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: MCP transport response (JSON-RPC or event stream as negotiated by MCP).
+          content:
+            application/json:
+              schema: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
     post:
       tags: [MCP]
-      summary: Call the current HTTP MCP adapter.
-      description: >
-        The current implementation accepts a method-plus-params JSON request and
-        returns a JSON response. It exposes the read-only first-version methods
-        tools/list, spaces.list, files.search, files.list, files.metadata, and
-        files.read_text. This endpoint is not yet documented as a completed
-        standards-compatible Streamable HTTP MCP transport.
+      summary: Send an MCP Streamable HTTP JSON-RPC message.
+      description: See the GET operation. The body is MCP JSON-RPC, not an OpenAPI REST envelope.
       servers:
         - url: /
       x-omnora-route-group: mcp
@@ -875,31 +925,218 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [method]
-              properties:
-                method:
-                  type: string
-                  enum: [tools/list, spaces.list, files.search, files.list, files.metadata, files.read_text]
-                params:
-                  type: object
-                  additionalProperties: true
-                  default: {}
+            schema: {}
       responses:
         "200":
-          description: JSON response for the selected current adapter method.
+          description: MCP transport response.
           content:
             application/json:
-              schema:
-                type: object
-                additionalProperties: true
+              schema: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /mcp/transfers/{publicId}:
+    get:
+      tags: [MCP, Transfers]
+      summary: Stream a ticket-authorized file download.
+      description: >
+        Short-lived Transfer Ticket Bearer endpoint issued by files.prepare_download.
+        The ticket is checked against live AI Token, ACL, directory boundary, mount identity,
+        object fingerprint, route-group state and byte budget on every request. Credentials in
+        query parameters are rejected.
+      servers:
+        - url: /
+      x-omnora-route-group: mcp
+      security:
+        - ticketBearer: []
+      parameters:
+        - name: publicId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/OpaqueId"
+        - name: Range
+          in: header
+          schema:
+            type: string
+          description: A single RFC 9110 byte range, for example bytes=0-1023.
+        - name: If-Match
+          in: header
+          schema:
+            type: string
+        - name: If-None-Match
+          in: header
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Complete file body.
+          headers:
+            Accept-Ranges:
+              schema: {type: string, const: bytes}
+            ETag:
+              schema: {type: string}
+            Content-Length:
+              schema: {type: integer, format: int64}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        "206":
+          description: Partial file body.
+          headers:
+            Accept-Ranges:
+              schema: {type: string, const: bytes}
+            ETag:
+              schema: {type: string}
+            Content-Range:
+              schema: {type: string}
+            Content-Length:
+              schema: {type: integer, format: int64}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        "304":
+          description: Object matches If-None-Match; no body.
+        "400":
+          description: Transfer credentials must be supplied in Authorization, not query parameters.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          description: Transfer Ticket expired or closed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "416":
+          $ref: "#/components/responses/RangeNotSatisfiable"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    head:
+      tags: [MCP, Transfers]
+      summary: Read transfer metadata without consuming download bytes.
+      servers:
+        - url: /
+      x-omnora-route-group: mcp
+      security:
+        - ticketBearer: []
+      parameters:
+        - name: publicId
+          in: path
+          required: true
+          schema: {$ref: "#/components/schemas/OpaqueId"}
+        - name: Range
+          in: header
+          schema: {type: string}
+        - name: If-Match
+          in: header
+          schema: {type: string}
+        - name: If-None-Match
+          in: header
+          schema: {type: string}
+      responses:
+        "200":
+          description: Transfer metadata.
+          headers:
+            Accept-Ranges:
+              schema: {type: string, const: bytes}
+            ETag:
+              schema: {type: string}
+            Content-Length:
+              schema: {type: integer, format: int64}
+        "206":
+          description: Partial transfer metadata for a satisfiable Range.
+          headers:
+            Accept-Ranges:
+              schema: {type: string, const: bytes}
+            ETag:
+              schema: {type: string}
+            Content-Range:
+              schema: {type: string}
+            Content-Length:
+              schema: {type: integer, format: int64}
+        "304":
+          description: Object matches If-None-Match; no body.
+        "400":
+          description: Transfer credentials must be supplied in Authorization, not query parameters.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "410":
+          description: Transfer Ticket expired or closed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "416": {$ref: "#/components/responses/RangeNotSatisfiable"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /mcp/transfers/{publicId}/parts/{partNumber}:
+    put:
+      tags: [MCP, Transfers]
+      summary: Upload one bounded multipart part with a Transfer Ticket.
+      description: >
+        Upload tickets are created by files.prepare_upload. The request body is bounded by the
+        declared upload size, session part size (currently 32 KiB) and remaining ticket budget;
+        MCP JSON-RPC requests use OMNORA_MCP_MAX_BODY_BYTES (default 1 MiB). Repeating a part
+        consumes only a positive size delta. Completion and cancellation are MCP tools.
+      servers:
+        - url: /
+      x-omnora-route-group: mcp
+      security:
+        - ticketBearer: []
+      parameters:
+        - name: publicId
+          in: path
+          required: true
+          schema: {$ref: "#/components/schemas/OpaqueId"}
+        - name: partNumber
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "204":
+          description: Part accepted.
+        "400":
+          description: Invalid part number or request.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "410":
+          description: Transfer Ticket expired or closed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "413":
+          description: Part exceeds the declared upload or ticket budget.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
   /account:
     get:
       tags: [Identity]
@@ -2079,7 +2316,13 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: AI Token for the current MCP adapter
+      bearerFormat: AI Token for MCP Streamable HTTP
+      description: Restricted AI Token. OAuth is NOT IMPLEMENTED.
+    ticketBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: Transfer Ticket publicId.secret
+      description: Short-lived ticket bearer accepted only by /mcp/transfers/*.
     cookieSession:
       type: apiKey
       in: cookie
@@ -2243,6 +2486,9 @@ components:
           format: date-time
         requiresTotpEnrollment:
           type: boolean
+        purpose:
+          type: string
+          enum: [full, totp_enrollment]
     CreateSessionRequest:
       type: object
       required: [login, password]
@@ -2252,6 +2498,10 @@ components:
         password:
           type: string
           format: password
+        newPassword:
+          type: string
+          format: password
+          description: Required when the account is flagged for password reset.
         totpCode:
           type: string
           minLength: 6
@@ -2274,6 +2524,27 @@ components:
           type: string
           minLength: 6
           maxLength: 8
+    ReauthenticateRequest:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+          format: password
+        totpCode:
+          type: string
+          minLength: 6
+          maxLength: 8
+    ReauthenticateResponse:
+      type: object
+      required: [status, reauthenticatedUntil]
+      properties:
+        status:
+          type: string
+          enum: [reauthenticated]
+        reauthenticatedUntil:
+          type: string
+          format: date-time
     User:
       type: object
       required: [id, displayName, role, status]
@@ -2725,7 +2996,7 @@ components:
           type: array
           items:
             type: string
-            enum: ["spaces:read", "files:list", "files:metadata", "files:text", "files:download_ticket", "search:read", "uploads:create"]
+            enum: ["spaces:read", "files:list", "files:metadata", "files:text", "files:download_ticket", "search:read", "uploads:create", "files:write", "files:trash", "trash:read", "files:restore", "files:purge", "shares:read", "shares:create", "shares:revoke"]
         expiresAt:
           type: string
           format: date-time
@@ -2742,7 +3013,7 @@ components:
           type: array
           items:
             type: string
-            enum: ["spaces:read", "files:list", "files:metadata", "files:text", "files:download_ticket", "search:read", "uploads:create"]
+            enum: ["spaces:read", "files:list", "files:metadata", "files:text", "files:download_ticket", "search:read", "uploads:create", "files:write", "files:trash", "trash:read", "files:restore", "files:purge", "shares:read", "shares:create", "shares:revoke"]
         boundaries:
           type: array
           items:

@@ -18,6 +18,12 @@
 - 跨挂载复制和移动具备成功、失败、重试和人工清理路径；移动源端要求 `editor+` 且可写。
 - 图片、PDF、文本、Markdown 和浏览器原生音视频按设计预览；Office 文件始终走下载。
 - REST 与 MCP 提供已定义的首版能力，并与 Web 使用相同授权结果。
+- MCP Wire Protocol：implemented and protocol-tested（MCP Inspector Modern，`2026-07-28`；兼容性测试覆盖 `2025-11-25`）。
+- Omnora AI Token Authorization：implemented, non-OAuth。
+- MCP OAuth Authorization Profile：NOT IMPLEMENTED。
+- MCP 工具目录必须为 24 个工具、15 个 scope；7 个高风险工具每次通过 MRTR，客户端不具备可靠 form elicitation 时不列出这些工具。
+- 15 个 scope 必须逐项覆盖：`spaces:read`、`files:list`、`files:metadata`、`files:text`、`files:download_ticket`、`search:read`、`uploads:create`、`files:write`、`files:trash`、`trash:read`、`files:restore`、`files:purge`、`shares:read`、`shares:create`、`shares:revoke`。
+- 大文件只能通过短期 Transfer Ticket：`GET /mcp/transfers/{publicId}` 支持 Range/ETag，`PUT /mcp/transfers/{publicId}/parts/{partNumber}` 支持有界 multipart；每次请求重新验证 Token、ACL、边界、挂载身份和对象指纹。
 
 ## 2. 空间与分享验收
 
