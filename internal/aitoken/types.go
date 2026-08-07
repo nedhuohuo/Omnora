@@ -15,6 +15,14 @@ const (
 	ScopeFilesDownloadTicket Scope = "files:download_ticket"
 	ScopeSearchRead          Scope = "search:read"
 	ScopeUploadsCreate       Scope = "uploads:create"
+	ScopeFilesWrite          Scope = "files:write"
+	ScopeFilesTrash          Scope = "files:trash"
+	ScopeTrashRead           Scope = "trash:read"
+	ScopeFilesRestore        Scope = "files:restore"
+	ScopeFilesPurge          Scope = "files:purge"
+	ScopeSharesRead          Scope = "shares:read"
+	ScopeSharesCreate        Scope = "shares:create"
+	ScopeSharesRevoke        Scope = "shares:revoke"
 )
 
 var (
@@ -30,17 +38,18 @@ type DirectoryBoundary struct {
 }
 
 type Token struct {
-	ID         string
-	PublicID   string
-	SecretHash string
-	AccountID  string
-	Name       string
-	Scopes     []Scope
-	Boundaries []DirectoryBoundary
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
-	LastUsedAt time.Time
-	RevokedAt  time.Time
+	ID                   string
+	PublicID             string
+	SecretHash           string
+	AccountID            string
+	Name                 string
+	Scopes               []Scope
+	Boundaries           []DirectoryBoundary
+	CredentialGeneration int64
+	CreatedAt            time.Time
+	ExpiresAt            time.Time
+	LastUsedAt           time.Time
+	RevokedAt            time.Time
 }
 
 type IssuedToken struct {

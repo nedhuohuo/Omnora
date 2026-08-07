@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,14 @@ CREATE TABLE mounts (
 	mode TEXT NOT NULL,
 	status TEXT NOT NULL
 );
+
+CREATE TABLE system_state (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO system_state(key, value) VALUES ('credential_generation', '7');
 `
 
 func TestCreateHashesSecretAndVerifyBearerReturnsPrincipal(t *testing.T) {
@@ -100,6 +109,45 @@ func TestCreateHashesSecretAndVerifyBearerReturnsPrincipal(t *testing.T) {
 	}
 }
 
+func TestAITokenCredentialGenerationIsStoredAndEnforced(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	insertActiveAccountSpaceMount(t, db)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	service := NewService(db, WithClock(func() time.Time { return now }))
+
+	issued, err := service.Create(ctx, CreateRequest{
+		AccountID: "acct_1",
+		Name:      "epoch test",
+		Scopes:    []Scope{ScopeSpacesRead},
+		Boundaries: []DirectoryBoundary{{
+			SpaceID: "space_1", MountID: "mount_1", RelativePath: ".",
+		}},
+		ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	var generation int64
+	if err := db.QueryRowContext(ctx, "SELECT credential_generation FROM ai_tokens WHERE id = ?", issued.Token.ID).Scan(&generation); err != nil {
+		t.Fatalf("query credential_generation: %v", err)
+	}
+	if generation != 7 {
+		t.Fatalf("credential_generation = %d, want 7", generation)
+	}
+
+	if _, err := db.ExecContext(ctx, `
+UPDATE system_state SET value = '8', updated_at = CURRENT_TIMESTAMP
+WHERE key = 'credential_generation'
+`); err != nil {
+		t.Fatalf("bump credential generation: %v", err)
+	}
+	if _, err := service.VerifyBearer(ctx, "Bearer "+issued.BearerToken); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("VerifyBearer() after generation bump error = %v, want ErrInvalidToken", err)
+	}
+}
+
 func TestValidateScopesRejectsUnknownDuplicateAndEmpty(t *testing.T) {
 	for _, scopes := range [][]Scope{
 		nil,
@@ -113,6 +161,103 @@ func TestValidateScopesRejectsUnknownDuplicateAndEmpty(t *testing.T) {
 	}
 	if got, err := ValidateScopes([]Scope{ScopeSearchRead, ScopeUploadsCreate}); err != nil || len(got) != 2 {
 		t.Fatalf("ValidateScopes(valid) = %v, %v", got, err)
+	}
+	expected := []Scope{
+		"spaces:read",
+		"files:list",
+		"files:metadata",
+		"files:text",
+		"files:download_ticket",
+		"search:read",
+		"uploads:create",
+		"files:write",
+		"files:trash",
+		"trash:read",
+		"files:restore",
+		"files:purge",
+		"shares:read",
+		"shares:create",
+		"shares:revoke",
+	}
+	if got := AllowlistedScopes(); !reflect.DeepEqual(got, expected) {
+		t.Fatalf("AllowlistedScopes() = %v, want %v", got, expected)
+	}
+	if got, err := ValidateScopes(expected); err != nil || !reflect.DeepEqual(got, expected) {
+		t.Fatalf("ValidateScopes(expected) = %v, %v; want %v", got, err, expected)
+	}
+}
+
+func TestRefreshPrincipalReloadsCurrentTokenAndRejectsInactiveStates(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	insertActiveAccountSpaceMount(t, db)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	service := NewService(db, WithClock(func() time.Time { return now }))
+	issued, err := service.Create(ctx, CreateRequest{
+		AccountID: "acct_1",
+		Name:      "transfer client",
+		Scopes:    []Scope{ScopeFilesWrite},
+		Boundaries: []DirectoryBoundary{{
+			SpaceID: "space_1", MountID: "mount_1", RelativePath: "docs",
+		}},
+		ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE ai_tokens SET scopes = ? WHERE id = ?`, `["files:trash"]`, issued.Token.ID); err != nil {
+		t.Fatalf("update token scopes: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM ai_token_boundaries WHERE token_id = ?`, issued.Token.ID); err != nil {
+		t.Fatalf("replace token boundaries: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO ai_token_boundaries(token_id, space_id, mount_id, relative_path)
+VALUES (?, 'space_1', 'mount_1', 'refreshed')
+`, issued.Token.ID); err != nil {
+		t.Fatalf("insert refreshed token boundary: %v", err)
+	}
+	principal, err := service.RefreshPrincipal(ctx, issued.Token.ID)
+	if err != nil {
+		t.Fatalf("RefreshPrincipal() error = %v", err)
+	}
+	if principal.TokenID != issued.Token.ID || !principal.HasScope(ScopeFilesTrash) || principal.HasScope(ScopeFilesWrite) {
+		t.Fatalf("refreshed principal = %#v", principal)
+	}
+	if len(principal.Boundaries) != 1 || principal.Boundaries[0].SpaceID != "space_1" ||
+		principal.Boundaries[0].MountID != "mount_1" || principal.Boundaries[0].RelativePath != "refreshed" {
+		t.Fatalf("refreshed principal boundaries = %#v", principal.Boundaries)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		stmt  string
+		args  []any
+		clock time.Time
+	}{
+		{name: "inactive account", stmt: `UPDATE accounts SET status = 'disabled' WHERE id = 'acct_1'`, clock: now},
+		{name: "revoked token", stmt: `UPDATE ai_tokens SET revoked_at = ? WHERE id = ?`, args: []any{formatTime(now), issued.Token.ID}, clock: now},
+		{name: "expired token", stmt: `UPDATE ai_tokens SET expires_at = ? WHERE id = ?`, args: []any{formatTime(now), issued.Token.ID}, clock: now},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testDB := cloneTokenDB(t, db)
+			if tc.name == "inactive account" {
+				if _, err := testDB.ExecContext(ctx, tc.stmt, tc.args...); err != nil {
+					t.Fatalf("setup: %v", err)
+				}
+			} else {
+				if _, err := testDB.ExecContext(ctx, `UPDATE accounts SET status = 'active' WHERE id = 'acct_1'`); err != nil {
+					t.Fatalf("activate account: %v", err)
+				}
+				if _, err := testDB.ExecContext(ctx, tc.stmt, tc.args...); err != nil {
+					t.Fatalf("setup: %v", err)
+				}
+			}
+			refreshService := NewService(testDB, WithClock(func() time.Time { return tc.clock }))
+			if _, err := refreshService.RefreshPrincipal(ctx, issued.Token.ID); !errors.Is(err, ErrInvalidToken) {
+				t.Fatalf("RefreshPrincipal() error = %v, want ErrInvalidToken", err)
+			}
+		})
 	}
 }
 
@@ -231,6 +376,9 @@ func newTestDB(t *testing.T) *sql.DB {
 	if err := InstallSchema(context.Background(), db); err != nil {
 		t.Fatalf("InstallSchema() error = %v", err)
 	}
+	if _, err := db.Exec(`ALTER TABLE ai_tokens ADD COLUMN credential_generation INTEGER`); err != nil {
+		t.Fatalf("install credential generation column: %v", err)
+	}
 	return db
 }
 
@@ -262,14 +410,15 @@ func cloneTokenDB(t *testing.T, source *sql.DB) *sql.DB {
 	db := newTestDB(t)
 	insertActiveAccountSpaceMount(t, db)
 	var secretHash, scopes, createdAt, expiresAt string
+	var credentialGeneration int64
 	var id, publicID, accountID, name string
-	if err := source.QueryRow("SELECT id, public_id, secret_hash, account_id, name, scopes, created_at, expires_at FROM ai_tokens LIMIT 1").Scan(&id, &publicID, &secretHash, &accountID, &name, &scopes, &createdAt, &expiresAt); err != nil {
+	if err := source.QueryRow("SELECT id, public_id, secret_hash, account_id, name, scopes, credential_generation, created_at, expires_at FROM ai_tokens LIMIT 1").Scan(&id, &publicID, &secretHash, &accountID, &name, &scopes, &credentialGeneration, &createdAt, &expiresAt); err != nil {
 		t.Fatalf("read source token: %v", err)
 	}
 	if _, err := db.Exec(`
-INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, created_at, expires_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, id, publicID, secretHash, accountID, name, scopes, createdAt, expiresAt, createdAt); err != nil {
+INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, credential_generation, created_at, expires_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, id, publicID, secretHash, accountID, name, scopes, credentialGeneration, createdAt, expiresAt, createdAt); err != nil {
 		t.Fatalf("copy token: %v", err)
 	}
 	if _, err := db.Exec(`

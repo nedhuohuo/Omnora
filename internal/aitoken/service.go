@@ -53,6 +53,14 @@ func AllowlistedScopes() []Scope {
 		ScopeFilesDownloadTicket,
 		ScopeSearchRead,
 		ScopeUploadsCreate,
+		ScopeFilesWrite,
+		ScopeFilesTrash,
+		ScopeTrashRead,
+		ScopeFilesRestore,
+		ScopeFilesPurge,
+		ScopeSharesRead,
+		ScopeSharesCreate,
+		ScopeSharesRevoke,
 	}
 }
 
@@ -102,6 +110,14 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (IssuedToken, e
 	if active != 1 {
 		return IssuedToken{}, ErrInvalidInput
 	}
+	var credentialGeneration int64
+	if err := s.db.QueryRowContext(ctx, `
+SELECT CAST(value AS INTEGER)
+FROM system_state
+WHERE key = 'credential_generation'
+`).Scan(&credentialGeneration); err != nil {
+		return IssuedToken{}, err
+	}
 
 	publicID, err := newPrefixedID("ait")
 	if err != nil {
@@ -121,15 +137,16 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (IssuedToken, e
 	}
 
 	token := Token{
-		ID:         tokenID,
-		PublicID:   publicID,
-		SecretHash: hashSecret(secret),
-		AccountID:  accountID,
-		Name:       name,
-		Scopes:     scopes,
-		Boundaries: boundaries,
-		CreatedAt:  now,
-		ExpiresAt:  req.ExpiresAt.UTC().Round(0),
+		ID:                   tokenID,
+		PublicID:             publicID,
+		SecretHash:           hashSecret(secret),
+		AccountID:            accountID,
+		Name:                 name,
+		Scopes:               scopes,
+		Boundaries:           boundaries,
+		CredentialGeneration: credentialGeneration,
+		CreatedAt:            now,
+		ExpiresAt:            req.ExpiresAt.UTC().Round(0),
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -139,9 +156,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (IssuedToken, e
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, created_at, expires_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, token.ID, token.PublicID, token.SecretHash, token.AccountID, token.Name, scopeJSON, formatTime(token.CreatedAt), formatTime(token.ExpiresAt), formatTime(now))
+	INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, credential_generation, created_at, expires_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, token.ID, token.PublicID, token.SecretHash, token.AccountID, token.Name, scopeJSON, token.CredentialGeneration, formatTime(token.CreatedAt), formatTime(token.ExpiresAt), formatTime(now))
 	if err != nil {
 		return IssuedToken{}, err
 	}
@@ -206,6 +223,32 @@ WHERE id = ? AND revoked_at IS NULL
 	}, nil
 }
 
+// RefreshPrincipal reloads a token by its internal ID for a real-time
+// authorization check. It deliberately does not advance last_used_at; callers
+// use it to revalidate an already-authenticated transfer operation.
+func (s *Service) RefreshPrincipal(ctx context.Context, tokenID string) (Principal, error) {
+	if s == nil || s.db == nil || strings.TrimSpace(tokenID) == "" {
+		return Principal{}, ErrInvalidToken
+	}
+	token, err := s.loadTokenByID(ctx, strings.TrimSpace(tokenID))
+	if err != nil {
+		return Principal{}, err
+	}
+	now := s.now().UTC().Round(0)
+	if token.RevokedAt.Valid || !now.Before(token.ExpiresAt) {
+		return Principal{}, ErrInvalidToken
+	}
+	return Principal{
+		AccountID:  token.AccountID,
+		TokenID:    token.ID,
+		PublicID:   token.PublicID,
+		Scopes:     token.Scopes,
+		Boundaries: token.Boundaries,
+		ExpiresAt:  token.ExpiresAt,
+		LastUsedAt: token.LastUsedAt,
+	}, nil
+}
+
 func (s *Service) Revoke(ctx context.Context, tokenID string) error {
 	if s == nil || s.db == nil || strings.TrimSpace(tokenID) == "" {
 		return ErrInvalidInput
@@ -227,12 +270,13 @@ func (s *Service) loadToken(ctx context.Context, publicID string) (loadedToken, 
 	var scopesJSON, createdAt, expiresAt string
 	var lastUsedAt sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-SELECT t.id, t.public_id, t.secret_hash, t.account_id, t.name, t.scopes,
-       t.created_at, t.expires_at, t.last_used_at, t.revoked_at
+	SELECT t.id, t.public_id, t.secret_hash, t.account_id, t.name, t.scopes,
+	       t.credential_generation, t.created_at, t.expires_at, t.last_used_at, t.revoked_at
 FROM ai_tokens t
 JOIN accounts a ON a.id = t.account_id
 WHERE t.public_id = ?
   AND a.status = 'active'
+  AND t.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
 `, publicID).Scan(
 		&token.ID,
 		&token.PublicID,
@@ -240,6 +284,7 @@ WHERE t.public_id = ?
 		&token.AccountID,
 		&token.Name,
 		&scopesJSON,
+		&token.CredentialGeneration,
 		&createdAt,
 		&expiresAt,
 		&lastUsedAt,
@@ -252,6 +297,65 @@ WHERE t.public_id = ?
 		return loadedToken{}, err
 	}
 
+	token.Scopes, err = unmarshalScopes(scopesJSON)
+	if err != nil {
+		return loadedToken{}, ErrInvalidToken
+	}
+	token.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return loadedToken{}, err
+	}
+	token.ExpiresAt, err = parseTime(expiresAt)
+	if err != nil {
+		return loadedToken{}, err
+	}
+	if lastUsedAt.Valid {
+		token.LastUsedAt, err = parseTime(lastUsedAt.String)
+		if err != nil {
+			return loadedToken{}, err
+		}
+	}
+	token.Boundaries, err = s.loadBoundaries(ctx, token.ID)
+	if err != nil {
+		return loadedToken{}, err
+	}
+	return token, nil
+}
+
+func (s *Service) loadTokenByID(ctx context.Context, tokenID string) (loadedToken, error) {
+	if s == nil || s.db == nil {
+		return loadedToken{}, ErrInvalidToken
+	}
+	var token loadedToken
+	var scopesJSON, createdAt, expiresAt string
+	var lastUsedAt sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+	SELECT t.id, t.public_id, t.secret_hash, t.account_id, t.name, t.scopes,
+	       t.credential_generation, t.created_at, t.expires_at, t.last_used_at, t.revoked_at
+FROM ai_tokens t
+JOIN accounts a ON a.id = t.account_id
+WHERE t.id = ?
+  AND a.status = 'active'
+  AND t.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
+`, tokenID).Scan(
+		&token.ID,
+		&token.PublicID,
+		&token.SecretHash,
+		&token.AccountID,
+		&token.Name,
+		&scopesJSON,
+		&token.CredentialGeneration,
+		&createdAt,
+		&expiresAt,
+		&lastUsedAt,
+		&token.RevokedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return loadedToken{}, ErrInvalidToken
+	}
+	if err != nil {
+		return loadedToken{}, err
+	}
 	token.Scopes, err = unmarshalScopes(scopesJSON)
 	if err != nil {
 		return loadedToken{}, ErrInvalidToken

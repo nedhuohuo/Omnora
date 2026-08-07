@@ -98,6 +98,47 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Name() < entries[j].Name()
 	})
+	expectedNames := make(map[int]string, len(entries))
+	currentVersion := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		version, err := migrationVersion(entry.Name())
+		if err != nil {
+			return err
+		}
+		expectedNames[version] = entry.Name()
+		if version > currentVersion {
+			currentVersion = version
+		}
+	}
+
+	rows, err := db.sql.QueryContext(ctx, "SELECT version, name FROM schema_migrations")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var version int
+		var name string
+		if err := rows.Scan(&version, &name); err != nil {
+			rows.Close()
+			return err
+		}
+		if version > currentVersion {
+			rows.Close()
+			return fmt.Errorf("database schema version %d is newer than supported version %d", version, currentVersion)
+		}
+		if expected, ok := expectedNames[version]; !ok || expected != name {
+			rows.Close()
+			return fmt.Errorf("database migration %d has name %q, want %q", version, name, expected)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
 
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
