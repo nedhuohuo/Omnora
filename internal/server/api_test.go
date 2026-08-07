@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -110,38 +109,66 @@ func TestAdminLoginWithoutTOTPCreatesFullSession(t *testing.T) {
 	}
 }
 
-func TestPasswordResetRequiredIsCompletedDuringLogin(t *testing.T) {
+func TestPasswordResetRequiredIsRecommendedAtLogin(t *testing.T) {
 	db, handler := newAPITestServer(t)
 	_, member := createAPITestAccounts(t, db)
 	if _, err := db.SQL().Exec(`UPDATE accounts SET password_reset_required = 1 WHERE id = ?`, member.ID); err != nil {
 		t.Fatalf("mark password reset: %v", err)
 	}
-	login := func(newPassword string) *httptest.ResponseRecorder {
-		t.Helper()
-		body, err := json.Marshal(map[string]string{"login": member.Email, "password": apiTestPassword, "newPassword": newPassword})
-		if err != nil {
-			t.Fatalf("marshal login: %v", err)
-		}
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/session", bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		return rec
+
+	// A reset-flagged account logs in with its current password alone; no new
+	// password is demanded at login.
+	body, err := json.Marshal(map[string]string{"login": member.Email, "password": apiTestPassword})
+	if err != nil {
+		t.Fatalf("marshal login: %v", err)
 	}
-	missing := login("")
-	if missing.Code != http.StatusUnauthorized || !strings.Contains(missing.Body.String(), `"code":"password_reset_required"`) {
-		t.Fatalf("missing new password response = %d %s", missing.Code, missing.Body.String())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/session", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("login status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
-	success := login("NewCorrectHorse2!")
-	if success.Code != http.StatusCreated {
-		t.Fatalf("reset login status = %d, body = %s", success.Code, success.Body.String())
+	var session struct {
+		PasswordResetRecommended bool `json:"passwordResetRecommended"`
 	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if !session.PasswordResetRecommended {
+		t.Fatalf("passwordResetRecommended = false, want true")
+	}
+
+	// Logging in must not clear the reset flag; it only recommends a change.
 	var resetRequired int
 	if err := db.SQL().QueryRow(`SELECT password_reset_required FROM accounts WHERE id = ?`, member.ID).Scan(&resetRequired); err != nil {
 		t.Fatalf("query reset flag: %v", err)
 	}
+	if resetRequired != 1 {
+		t.Fatalf("password_reset_required = %d, want 1 after login", resetRequired)
+	}
+
+	// Changing the password in the account area clears the recommendation.
+	changeBody, err := json.Marshal(map[string]any{
+		"currentPassword": apiTestPassword,
+		"newPassword":     "NewCorrectHorse2!",
+	})
+	if err != nil {
+		t.Fatalf("marshal change password request: %v", err)
+	}
+	changeReq := httptest.NewRequest(http.MethodPatch, "/api/v1/account/password", bytes.NewReader(changeBody))
+	changeReq.Header.Set("Content-Type", "application/json")
+	changeReq.AddCookie(issueAPITestSession(t, db, member.ID))
+	changeRec := httptest.NewRecorder()
+	handler.ServeHTTP(changeRec, changeReq)
+	if changeRec.Code != http.StatusOK {
+		t.Fatalf("change password status = %d, want %d, body = %s", changeRec.Code, http.StatusOK, changeRec.Body.String())
+	}
+	if err := db.SQL().QueryRow(`SELECT password_reset_required FROM accounts WHERE id = ?`, member.ID).Scan(&resetRequired); err != nil {
+		t.Fatalf("query reset flag: %v", err)
+	}
 	if resetRequired != 0 {
-		t.Fatalf("password_reset_required = %d, want 0", resetRequired)
+		t.Fatalf("password_reset_required = %d, want 0 after change", resetRequired)
 	}
 }
 

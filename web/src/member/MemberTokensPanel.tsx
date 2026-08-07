@@ -211,7 +211,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setLoading(true);
     setError('');
     try {
-      await runSensitive(() => deleteAiToken(deleteTarget.id));
+      await deleteAiToken(deleteTarget.id);
       setDeleteTarget(null);
       await load();
     } catch (caught) {

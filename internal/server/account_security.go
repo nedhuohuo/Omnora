@@ -23,12 +23,12 @@ func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var email, displayName string
-	var totpRequired int
+	var totpRequired, passwordResetRequired int
 	err = s.sqlDB().QueryRowContext(r.Context(), `
-SELECT email, display_name, totp_required
+SELECT email, display_name, totp_required, password_reset_required
 FROM accounts
 WHERE id = ? AND status = 'active'
-`, session.AccountID).Scan(&email, &displayName, &totpRequired)
+`, session.AccountID).Scan(&email, &displayName, &totpRequired, &passwordResetRequired)
 	if errors.Is(err, sql.ErrNoRows) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
@@ -43,10 +43,11 @@ WHERE id = ? AND status = 'active'
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"email":       email,
-		"displayName": displayName,
-		"totpEnabled": totpRequired == 1,
-		"theme":       theme,
+		"email":                    email,
+		"displayName":              displayName,
+		"totpEnabled":              totpRequired == 1,
+		"passwordResetRecommended": passwordResetRequired == 1,
+		"theme":                    theme,
 	})
 }
 

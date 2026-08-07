@@ -38,7 +38,8 @@ import { localeMessages } from './i18n';
 import AdminWorkspace, { type AdminTab } from './AdminWorkspace';
 import MemberSharesPanel, { ShareCreateModal, ShareCreatedResult } from './MemberSharesPanel';
 import MemberTokensPanel from './MemberTokensPanel';
-import MemberAccountPanel, { applyThemePreference } from './MemberAccountPanel';
+import MemberAccountPanel from './MemberAccountPanel';
+import { applyThemePreference } from './theme';
 import { RecentReauthProvider } from './RecentReauthProvider';
 import { stateForSession } from './sessionFlow';
 import { formatDirectoryChildren, mountDeletePolicy, mountSupportsTrash, type MemberDirectoryEntry, type MemberMount, type MemberSearchResult, type MemberSpace, type TransferItem } from './types';
@@ -132,7 +133,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const [isAdmin, setIsAdmin] = useState(false);
   const [activeTab, setActiveTab] = useState<MemberTab | AdminTab>(entry === 'admin' ? 'overview' : 'files');
   const [adminGroupTabs, setAdminGroupTabs] = useState<Record<AdminNavGroup, AdminTab>>(defaultAdminGroupTabs);
-  const [loginForm, setLoginForm] = useState({ login: '', password: '', newPassword: '', totpCode: '' });
+  const [loginForm, setLoginForm] = useState({ login: '', password: '', totpCode: '' });
   const [enrollmentSetup, setEnrollmentSetup] = useState<{ secret: string; otpauthUri?: string } | null>(null);
   const [enrollmentCode, setEnrollmentCode] = useState('');
   const [setupMode, setSetupMode] = useState(false);
@@ -258,6 +259,17 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   }, [activeMountId, activeMountSupportsTrash, activeSpaceId]);
 
   useEffect(() => {
+    // Load the theme preference in parallel with session bootstrap so the
+    // saved theme applies as soon as its round-trip returns, not only after
+    // spaces finish loading.
+    void (async () => {
+      try {
+        const preferences = await getPreferences();
+        applyThemePreference(preferences.theme);
+      } catch {
+        // Preference storage may be unavailable; keep the current theme.
+      }
+    })();
     void (async () => {
       try {
         const session = await getSession();
@@ -266,12 +278,6 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
         setSessionState(nextState);
         if (nextState === 'ready') {
           await loadSpaces();
-        }
-        try {
-          const preferences = await getPreferences();
-          applyThemePreference(preferences.theme);
-        } catch {
-          // Preference storage may be unavailable; keep the default theme.
         }
       } catch {
         setSessionState('signed-out');
@@ -349,7 +355,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     setLoading(true);
     setError('');
     try {
-      const session = await login({ login: loginForm.login, password: loginForm.password, newPassword: loginForm.newPassword || undefined, totpCode: loginForm.totpCode || undefined });
+      const session = await login({ login: loginForm.login, password: loginForm.password, totpCode: loginForm.totpCode || undefined });
       setIsAdmin(session.isAdmin === true);
       const nextState = stateForSession(session);
       setSessionState(nextState);
@@ -408,7 +414,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       setSetupNotice(text.setupComplete);
       setSetupMode(false);
       setInitializationAvailable(false);
-      setLoginForm({ login: setupForm.email, password: '', newPassword: '', totpCode: '' });
+      setLoginForm({ login: setupForm.email, password: '', totpCode: '' });
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -843,7 +849,6 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             <form onSubmit={onLogin}>
               <label>{text.email}<input value={loginForm.login} onChange={(event) => setLoginForm({ ...loginForm, login: event.target.value })} autoComplete="username" required /></label>
               <label>{text.password}<input type="password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} autoComplete="current-password" required /></label>
-              <label>{text.accountNewPassword}<input type="password" value={loginForm.newPassword} onChange={(event) => setLoginForm({ ...loginForm, newPassword: event.target.value })} autoComplete="new-password" /></label>
               {setupNotice && <p className="member-readonly">{setupNotice}</p>}
               {error && <p className="member-error">{text.error}: {error}</p>}
               <button className="member-primary" type="submit" disabled={loading}>{text.signInAction}</button>

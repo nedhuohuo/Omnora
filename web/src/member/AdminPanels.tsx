@@ -267,7 +267,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     setCreating(true);
     setError('');
     try {
-      await runSensitive(() => createAdminUser(form));
+      await createAdminUser(form);
       setForm({ email: '', displayName: '', password: '', role: 'member' });
       setFormOpen(false);
       await load();
@@ -285,7 +285,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
       if (user.status === 'active') {
         await runSensitive(() => disableAdminUser(user.id));
       } else {
-        await runSensitive(() => enableAdminUser(user.id));
+        await enableAdminUser(user.id);
       }
       await load();
     } catch (caught) {
@@ -413,7 +413,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
     setCreating(true);
     setError('');
     try {
-      await runSensitive(() => createAdminSpace({ name: spaceName.trim() }));
+      await createAdminSpace({ name: spaceName.trim() });
       setSpaceName('');
       await loadSpaces();
     } catch (caught) {
@@ -441,7 +441,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
     setLoading(true);
     setError('');
     try {
-      await runSensitive(() => renameAdminSpace(renameTarget.id, renameValue.trim()));
+      await renameAdminSpace(renameTarget.id, renameValue.trim());
       setRenameTarget(null);
       setRenameValue('');
       await loadSpaces();
@@ -475,7 +475,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
     setLoading(true);
     setError('');
     try {
-      await runSensitive(() => putSpaceMember(selectedSpaceId, memberAccountId.trim(), memberPermission));
+      await putSpaceMember(selectedSpaceId, memberAccountId.trim(), memberPermission);
       setMemberAccountId('');
       await loadMembers(selectedSpaceId);
     } catch (caught) {
@@ -488,7 +488,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
   async function onUpdatePermission(accountId: string, permission: SpaceMemberRole) {
     setError('');
     try {
-      await runSensitive(() => putSpaceMember(selectedSpaceId, accountId, permission));
+      await putSpaceMember(selectedSpaceId, accountId, permission);
       await loadMembers(selectedSpaceId);
     } catch (caught) {
       setError(describeError(caught));
@@ -498,7 +498,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
   async function onRemoveMember(accountId: string) {
     setError('');
     try {
-      await runSensitive(() => removeSpaceMember(selectedSpaceId, accountId));
+      await removeSpaceMember(selectedSpaceId, accountId);
       await loadMembers(selectedSpaceId);
     } catch (caught) {
       setError(describeError(caught));
@@ -606,7 +606,6 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
 
 export function AdminShareGovernancePanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
-  const { runSensitive } = useRecentReauth();
   const [shares, setShares] = useState<SharePayload[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -632,7 +631,7 @@ export function AdminShareGovernancePanel({ locale }: { locale: MemberLocale }) 
     setLoading(true);
     setError('');
     try {
-      await runSensitive(() => revokeAdminShare(share.id));
+      await revokeAdminShare(share.id);
       await load();
     } catch (caught) {
       setError(describeError(caught));
@@ -673,7 +672,6 @@ export function AdminShareGovernancePanel({ locale }: { locale: MemberLocale }) 
 
 export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
-  const { runSensitive } = useRecentReauth();
   const [tokens, setTokens] = useState<AiTokenListItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -699,7 +697,7 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
     setLoading(true);
     setError('');
     try {
-      await runSensitive(() => deleteAdminAiToken(token.id));
+      await deleteAdminAiToken(token.id);
       await load();
     } catch (caught) {
       setError(describeError(caught));

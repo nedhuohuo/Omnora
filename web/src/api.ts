@@ -38,7 +38,6 @@ export type InitializePayload = {
 export type LoginPayload = {
   login: string;
   password: string;
-  newPassword?: string;
   totpCode?: string;
 };
 
@@ -309,6 +308,7 @@ export type AccountPayload = {
   email: string;
   displayName: string;
   totpEnabled: boolean;
+  passwordResetRecommended?: boolean;
   theme: ThemePreference;
 };
 

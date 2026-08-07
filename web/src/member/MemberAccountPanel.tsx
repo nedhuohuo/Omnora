@@ -17,6 +17,7 @@ import {
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
 import { useRecentReauth } from './RecentReauthProvider';
+import { applyThemePreference } from './theme';
 
 function describeError(error: unknown) {
   if (isReauthenticationCanceled(error)) return '';
@@ -34,28 +35,6 @@ function formatDate(value: string | undefined, locale: MemberLocale) {
   if (!value) return '--';
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? '--' : new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
-}
-
-const systemDarkQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
-let currentTheme: ThemePreference = 'system';
-
-function resolveTheme(theme: ThemePreference): 'light' | 'dark' {
-  if (theme === 'system') {
-    return systemDarkQuery?.matches ? 'dark' : 'light';
-  }
-  return theme;
-}
-
-function applyTheme() {
-  document.documentElement.setAttribute('data-theme', resolveTheme(currentTheme));
-}
-
-// Re-resolve a "system" preference when the OS color scheme changes.
-systemDarkQuery?.addEventListener?.('change', applyTheme);
-
-export function applyThemePreference(theme: ThemePreference) {
-  currentTheme = theme;
-  applyTheme();
 }
 
 export default function MemberAccountPanel({ locale }: { locale: MemberLocale }) {
@@ -180,7 +159,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
     setLoading(true);
     setError('');
     try {
-      await runSensitive(() => deleteSession(session.id));
+      await deleteSession(session.id);
       await load();
     } catch (caught) {
       setError(describeError(caught));
@@ -218,6 +197,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
 
       <section className="member-account-section">
         <h2>{text.accountPasswordSection}</h2>
+        {account?.passwordResetRecommended && <p className="member-readonly">{text.accountPasswordRecommended}</p>}
         <form className="member-admin-form" onSubmit={onChangePassword}>
           <label>{text.accountCurrentPassword}<input type="password" value={passwordForm.current} onChange={(event) => setPasswordForm({ ...passwordForm, current: event.target.value })} autoComplete="current-password" required /></label>
           <label>{text.accountNewPassword}<input type="password" value={passwordForm.next} onChange={(event) => setPasswordForm({ ...passwordForm, next: event.target.value })} autoComplete="new-password" required /></label>

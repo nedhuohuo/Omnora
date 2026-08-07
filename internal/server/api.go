@@ -342,7 +342,6 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Login       string `json:"login"`
 		Password    string `json:"password"`
-		NewPassword string `json:"newPassword"`
 		TOTPCode    string `json:"totpCode"`
 		TOTPCodeAlt string `json:"totp_code"`
 	}
@@ -367,59 +366,6 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
 		return
 	}
-	if account.PasswordResetRequired {
-		if strings.TrimSpace(req.NewPassword) == "" {
-			httpx.WriteError(w, r, http.StatusUnauthorized, "password_reset_required", "a new password is required")
-			return
-		}
-		newHash, err := svc.HashPassword(req.NewPassword)
-		if err != nil {
-			s.writeIdentityError(w, r, err)
-			return
-		}
-		// TOTP is optional for every role, including administrators. Only
-		// accounts that have already enabled TOTP must supply a code.
-		if ok, err := s.verifyLoginTOTP(r, account.ID, req.TOTPCode); err != nil {
-			writeDBError(w, r, err)
-			return
-		} else if !ok {
-			decision := s.recordCredentialFailure(r, ratelimit.ScopeLogin, req.Login)
-			if !decision.Allowed {
-				writeRateLimited(w, r, decision)
-				return
-			}
-			httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
-			return
-		}
-		issued, err := svc.CompletePasswordResetAndCreateSession(r.Context(), account.ID, account.PasswordHash, newHash, identity.SessionPurposeFull, 8*time.Hour, func(ctx context.Context, tx *sql.Tx) error {
-			if err := s.recordAuditTx(ctx, tx, r, account.ID, "login", "account", account.ID, `{"recoveryReset":true}`); err != nil {
-				return err
-			}
-			return nil
-		})
-		if err != nil {
-			s.markAuditRiskIfNeeded(r.Context(), err)
-			s.writeIdentityError(w, r, err)
-			return
-		}
-		s.recordCredentialSuccess(r, ratelimit.ScopeLogin, req.Login)
-		if s.httpPolicy != nil {
-			if _, err := SetCSRFCookie(w, s.cookieNames(r).CSRF, isSecureRequest(r), time.Now().UTC()); err != nil {
-				writeDBError(w, r, err)
-				return
-			}
-		}
-		http.SetCookie(w, s.sessionCookie(r, issued.Token, issued.Session.ExpiresAt))
-		httpx.WriteJSON(w, http.StatusCreated, map[string]any{
-			"userId":                 account.ID,
-			"expiresAt":              issued.Session.ExpiresAt,
-			"isAdmin":                s.isAdmin(r, account.ID),
-			"purpose":                issued.Session.Purpose,
-			"requiresTotpEnrollment": issued.Session.Purpose == identity.SessionPurposeTOTPEnrollment,
-		})
-		return
-	}
-
 	// TOTP is optional for every role, including administrators. Only
 	// accounts that have already enabled TOTP must supply a code at login.
 	if ok, err := s.verifyLoginTOTP(r, account.ID, req.TOTPCode); err != nil {
@@ -455,11 +401,12 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, s.sessionCookie(r, issued.Token, issued.Session.ExpiresAt))
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
-		"userId":                 account.ID,
-		"expiresAt":              issued.Session.ExpiresAt,
-		"isAdmin":                s.isAdmin(r, account.ID),
-		"purpose":                issued.Session.Purpose,
-		"requiresTotpEnrollment": issued.Session.Purpose == identity.SessionPurposeTOTPEnrollment,
+		"userId":                  account.ID,
+		"expiresAt":               issued.Session.ExpiresAt,
+		"isAdmin":                 s.isAdmin(r, account.ID),
+		"purpose":                 issued.Session.Purpose,
+		"requiresTotpEnrollment":  issued.Session.Purpose == identity.SessionPurposeTOTPEnrollment,
+		"passwordResetRecommended": account.PasswordResetRequired,
 	})
 }
 

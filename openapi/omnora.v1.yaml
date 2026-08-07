@@ -2535,6 +2535,9 @@ components:
           type: string
           enum: [full, totp_enrollment]
           description: Session purpose. New authentications use full; totp_enrollment is retained only for legacy sessions.
+        passwordResetRecommended:
+          type: boolean
+          description: True when the account is flagged as recently reset (e.g. by the offline recovery tool). Login still succeeds; changing the password is recommended, not required.
     CreateSessionRequest:
       type: object
       required: [login, password]
@@ -2544,10 +2547,6 @@ components:
         password:
           type: string
           format: password
-        newPassword:
-          type: string
-          format: password
-          description: Required when the account is flagged for password reset.
         totpCode:
           type: string
           minLength: 6

@@ -8,6 +8,22 @@
       content="Omnora first-version web console shell with member, admin, and share surfaces."
     />
     <title>Omnora 文件空间</title>
+    <script>
+      // Apply the saved theme before first paint to avoid a light/dark flash.
+      // Mirrors web/src/member/theme.ts; the server remains the source of truth.
+      (function () {
+        try {
+          var theme = localStorage.getItem('omnora.theme');
+          var resolved = theme === 'system' || theme === 'light' || theme === 'dark' ? theme : 'system';
+          if (resolved === 'system') {
+            resolved = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          }
+          document.documentElement.setAttribute('data-theme', resolved);
+        } catch (e) {
+          /* localStorage may be unavailable; fall back to the CSS default. */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -55,19 +55,22 @@ var routeMatrix = []RouteRule{
 	{Method: "POST", Pattern: "/api/v1/account/totp/confirm", Mode: RouteAuthCookie, CSRF: true, AllowEnrollment: true, RequiresRecentAuth: true},
 	{Method: "DELETE", Pattern: "/api/v1/auth/session", Mode: RouteAuthCookie, CSRF: true, AllowEnrollment: true},
 	{Method: "PATCH", Pattern: "/api/v1/account/password", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
-	{Method: "DELETE", Pattern: "/api/v1/account/sessions/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "DELETE", Pattern: "/api/v1/account/sessions/*", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "POST", Pattern: "/api/v1/account/totp/disable", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	// Lenient recent-reauth matrix: only credential issuance and hard-to-undo
+	// control-plane damage require a fresh password (and TOTP when enabled).
 	{Method: "POST", Pattern: "/api/v1/ai-tokens", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
-	{Method: "DELETE", Pattern: "/api/v1/ai-tokens/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
-	{Method: "DELETE", Pattern: "/api/v1/admin/ai-tokens/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "DELETE", Pattern: "/api/v1/ai-tokens/*", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "POST", Pattern: "/api/v1/admin/backups", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/backups/*/restore", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
-	// Route-group exposure is an operator convenience toggle, not a credential
-	// or recovery mutation. CSRF + admin session already bound the request.
-	{Method: "PATCH", Pattern: "/api/v1/admin/route-groups/*", Mode: RouteAuthCookie, CSRF: true},
+	{Method: "POST", Pattern: "/api/v1/admin/users/*/disable", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "POST", Pattern: "/api/v1/admin/users/*/revoke-sessions", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	// Member ACL deletes share the spaces/* prefix; keep them off the reauth list.
+	{Method: "DELETE", Pattern: "/api/v1/admin/spaces/*/members/*", Mode: RouteAuthCookie, CSRF: true},
+	{Method: "DELETE", Pattern: "/api/v1/admin/spaces/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "GET", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie},
 	{Method: "HEAD", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie},
-	{Method: "*", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "*", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "GET", Pattern: "/api/v1/share/*", Mode: RouteAuthShareCookie},
 	{Method: "HEAD", Pattern: "/api/v1/share/*", Mode: RouteAuthShareCookie},
 	{Method: "*", Pattern: "/api/v1/share/*", Mode: RouteAuthShareCookie, CSRF: true},
@@ -102,15 +105,29 @@ func routeRuleFor(r *http.Request) RouteRule {
 }
 
 func routePatternMatches(pattern, requestPath string) bool {
-	if wildcard := strings.IndexByte(pattern, '*'); wildcard >= 0 {
-		prefix, suffix := pattern[:wildcard], pattern[wildcard+1:]
-		return strings.HasPrefix(requestPath, prefix) && strings.HasSuffix(requestPath, suffix) && len(requestPath) >= len(prefix)+len(suffix)
+	if !strings.ContainsRune(pattern, '*') {
+		return pattern == requestPath
 	}
-	if strings.HasSuffix(pattern, "/*") {
-		prefix := strings.TrimSuffix(pattern, "/*")
-		return requestPath == prefix || strings.HasPrefix(requestPath, prefix+"/")
+	parts := strings.Split(pattern, "*")
+	if !strings.HasPrefix(requestPath, parts[0]) {
+		return false
 	}
-	return pattern == requestPath
+	cursor := len(parts[0])
+	for i := 1; i < len(parts); i++ {
+		literal := parts[i]
+		if literal == "" {
+			if i == len(parts)-1 {
+				return true
+			}
+			continue
+		}
+		idx := strings.Index(requestPath[cursor:], literal)
+		if idx < 0 {
+			return false
+		}
+		cursor += idx + len(literal)
+	}
+	return cursor == len(requestPath)
 }
 
 func (s *Server) routeSecurity(rule RouteRule, next http.Handler) http.Handler {
