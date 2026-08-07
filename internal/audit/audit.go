@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -15,6 +16,17 @@ import (
 )
 
 var ErrSensitiveMetadata = errors.New("audit metadata contains sensitive data")
+
+const ReadinessRiskKey = "audit_write_risk"
+
+// Domain labels keep the same input in separate audit namespaces.  A client
+// address must not be usable as a subject identifier (or vice versa), even
+// when an operator can query the audit database.
+const (
+	HashDomainClientIP  = "client_ip"
+	HashDomainUserAgent = "user_agent"
+	HashDomainSubject   = "subject"
+)
 
 type Event struct {
 	ActorAccountID string
@@ -31,6 +43,10 @@ type Recorder struct {
 	db *sql.DB
 }
 
+type execContexter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 func NewRecorder(db *sql.DB) Recorder {
 	return Recorder{db: db}
 }
@@ -39,6 +55,45 @@ func (r Recorder) Record(ctx context.Context, event Event) error {
 	if r.db == nil {
 		return errors.New("audit database is nil")
 	}
+	return record(ctx, r.db, event)
+}
+
+// RecordTx writes an audit event using the caller's transaction. High-risk
+// mutations should call this before committing so the state change and its
+// success audit row are atomic.
+func (r Recorder) RecordTx(ctx context.Context, tx *sql.Tx, event Event) error {
+	if tx == nil {
+		return errors.New("audit transaction is nil")
+	}
+	return record(ctx, tx, event)
+}
+
+// MarkReadinessRisk records a durable, non-sensitive audit failure marker.
+// Callers must stop treating the process as ready until the marker is cleared
+// by an operator or a successful recovery gate.
+func (r Recorder) MarkReadinessRisk(ctx context.Context, cause error) error {
+	if r.db == nil {
+		return errors.New("audit database is nil")
+	}
+	reason := "audit_write_failed"
+	if errors.Is(cause, context.Canceled) {
+		reason = "audit_write_canceled"
+	} else if errors.Is(cause, context.DeadlineExceeded) {
+		reason = "audit_write_timeout"
+	}
+	payload, err := json.Marshal(map[string]string{"reason": reason})
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `
+INSERT INTO system_state(key, value, updated_at)
+VALUES (?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+`, ReadinessRiskKey, string(payload))
+	return err
+}
+
+func record(ctx context.Context, exec execContexter, event Event) error {
 	if strings.TrimSpace(event.Action) == "" {
 		return errors.New("audit action is required")
 	}
@@ -75,7 +130,7 @@ func (r Recorder) Record(ctx context.Context, event Event) error {
 		userAgentHash = event.UserAgentHash
 	}
 
-	_, err = r.db.ExecContext(ctx, `
+	_, err = exec.ExecContext(ctx, `
 INSERT INTO audit_events(actor_account_id, route_group, action, target_type, target_id, ip_hash, user_agent_hash, metadata_json)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `, actor, routeGroup, event.Action, event.TargetType, targetID, ipHash, userAgentHash, metadata)
@@ -117,12 +172,84 @@ func NormalizeMetadataJSON(metadataJSON string) (string, error) {
 	return string(encoded), nil
 }
 
-func HashForAudit(value string) string {
-	if strings.TrimSpace(value) == "" {
+// normalizeMCPMetadataJSON applies the regular audit metadata checks plus the
+// stricter MCP boundary: MCP audit rows may contain labels and object IDs, but
+// never bearer material, file contents, or host filesystem paths.
+func normalizeMCPMetadataJSON(metadataJSON string) (string, error) {
+	metadata, err := NormalizeMetadataJSON(metadataJSON)
+	if err != nil {
+		return "", err
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(metadata), &decoded); err != nil {
+		return "", err
+	}
+	if err := rejectMCPMetadataValue("", decoded); err != nil {
+		return "", err
+	}
+	return metadata, nil
+}
+
+func rejectMCPMetadataValue(key string, value any) error {
+	if isSensitiveKey(key) {
+		return fmt.Errorf("%w: %s", ErrSensitiveMetadata, key)
+	}
+	normalizedKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), " ", "_"))
+	compactKey := strings.ReplaceAll(normalizedKey, "_", "")
+	for _, fragment := range []string{"content", "filedata", "checksum", "digest", "rootpath", "hostpath", "absolutepath", "filesystempath"} {
+		if strings.Contains(compactKey, fragment) {
+			return fmt.Errorf("%w: %s", ErrSensitiveMetadata, key)
+		}
+	}
+
+	switch typed := value.(type) {
+	case map[string]any:
+		for childKey, childValue := range typed {
+			if err := rejectMCPMetadataValue(childKey, childValue); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, childValue := range typed {
+			if err := rejectMCPMetadataValue(key, childValue); err != nil {
+				return err
+			}
+		}
+	case string:
+		if isSensitiveString(typed) || looksLikeHostPath(typed) {
+			return fmt.Errorf("%w: %s", ErrSensitiveMetadata, key)
+		}
+	}
+	return nil
+}
+
+func looksLikeHostPath(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~/") || strings.HasPrefix(value, "../") || strings.HasPrefix(value, `\\`) {
+		return true
+	}
+	return len(value) >= 3 && ((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) && value[1] == ':' && (value[2] == '\\' || value[2] == '/')
+}
+
+// HashForAudit returns a stable, non-reversible identifier for audit and rate
+// limiting. The key is generated and persisted by the deployment entrypoint;
+// callers must never fall back to an unkeyed digest for security decisions.
+// A zero key, domain, or value deliberately produces no identifier so a
+// misconfigured instance fails closed instead of silently weakening privacy.
+func HashForAudit(key []byte, domain, value string) string {
+	domain = strings.TrimSpace(domain)
+	if len(key) == 0 || domain == "" || strings.TrimSpace(value) == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(domain))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func RedactValue(key string, value any) any {

@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"embed"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -11,18 +13,37 @@ import (
 	"sync"
 	"time"
 
+	"omnora/internal/access"
+	"omnora/internal/aitoken"
+	"omnora/internal/audit"
+	"omnora/internal/catalog"
 	"omnora/internal/config"
+	"omnora/internal/confirmation"
 	"omnora/internal/domain"
 	"omnora/internal/httpx"
+	"omnora/internal/memberfiles"
+	"omnora/internal/membershare"
+	"omnora/internal/ratelimit"
 	"omnora/internal/store"
+	"omnora/internal/transferticket"
 )
 
 type Server struct {
-	cfg       config.Config
-	db        *store.DB
-	mux       *http.ServeMux
-	routesMu  sync.RWMutex
-	listeners *ListenerManager
+	cfg             config.Config
+	db              *store.DB
+	mux             *http.ServeMux
+	startupErr      error
+	httpPolicy      *HTTPPolicy
+	guard           *access.Guard
+	tokens          *aitoken.Service
+	confirmations   *confirmation.Service
+	transferTickets *transferticket.Service
+	auditRecorder   audit.Recorder
+	authLimiter     *ratelimit.Limiter
+	memberFiles     *memberfiles.Service
+	memberShares    *membershare.Service
+	routesMu        sync.RWMutex
+	listeners       *ListenerManager
 }
 
 const EntryHTTP = "http"
@@ -54,19 +75,82 @@ func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 		db:  db,
 		mux: http.NewServeMux(),
 	}
+	if db != nil {
+		s.guard = access.NewGuard(db.SQL())
+		s.tokens = aitoken.NewService(db.SQL())
+		s.confirmations = confirmation.NewService(db.SQL())
+		s.transferTickets = transferticket.NewService(db.SQL(), s.tokens, s.guard)
+		s.auditRecorder = audit.NewRecorder(db.SQL())
+		s.memberShares = membershare.NewService(db.SQL(), s.guard, membershare.WithAITokenService(s.tokens))
+		s.memberFiles = memberfiles.NewService(db.SQL(), s.guard, catalog.NewService(db.SQL()), memberfiles.WithAITokenService(s.tokens), memberfiles.WithShareInvalidator(s.memberShares))
+	}
+	s.authLimiter = ratelimit.New(ratelimit.Options{})
 	for _, opt := range opts {
 		opt(s)
 	}
+	if policy, err := newHTTPPolicy(cfg.HTTP); err != nil {
+		s.startupErr = err
+	} else {
+		s.httpPolicy = policy
+	}
 	if db != nil {
-		_ = s.hydrateRouteGroups(context.Background())
+		if err := s.hydrateRouteGroups(context.Background()); err != nil {
+			if s.startupErr == nil {
+				s.startupErr = err
+			}
+		}
 	}
 	s.routes()
 	return s
 }
 
+// StartupError reports a fail-closed initialization error that must prevent
+// workers and listeners from starting. New keeps the historical handler API;
+// the executable checks this gate before binding HTTP.
+func (s *Server) StartupError() error {
+	return s.startupErr
+}
+
+// MarkReady persists the final normal-process readiness gate after all
+// migration, identity-rollout, and route-hydration checks have passed.
+func (s *Server) MarkReady(ctx context.Context) error {
+	if s.startupErr != nil {
+		return s.startupErr
+	}
+	if s.db == nil {
+		return nil
+	}
+	for _, key := range []string{"mcp_audit_risk", "audit_write_risk"} {
+		var risk string
+		err := s.db.SQL().QueryRowContext(ctx, `SELECT value FROM system_state WHERE key = ?`, key).Scan(&risk)
+		if err == nil {
+			return errors.New("audit readiness risk is present")
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	result, err := s.db.SQL().ExecContext(ctx, `
+UPDATE recovery_control
+SET ready = 1, updated_at = CURRENT_TIMESTAMP
+WHERE id = 1 AND state = 'normal'
+`)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return errors.New("recovery control is not in normal state")
+	}
+	return nil
+}
+
 // Handler returns the fully wrapped HTTP handler.
 func (s *Server) Handler() http.Handler {
-	return securityHeaders(requestID(accessLog(recoverPanic(s.mux))))
+	return securityHeaders(requestID(s.trustBoundary(accessLog(recoverPanic(s.mux)))))
 }
 
 func (s *Server) routes() {
@@ -79,20 +163,20 @@ func (s *Server) routes() {
 	s.handleWebGroup(domain.RouteGroupAdminWeb, "/admin")
 	s.handleWebGroup(domain.RouteGroupShare, "/share")
 	s.handleProductGroup(domain.RouteGroupREST, "/api/v1")
-	s.handleProductGroup(domain.RouteGroupMCP, "/mcp")
+	s.mcpRoutes()
 	s.handleProductGroup(domain.RouteGroupOpenAPI, "/openapi")
 	s.mux.Handle("/", s.memberRoot())
 }
 
 func (s *Server) memberRoot() http.Handler {
-	spa := s.gate(domain.RouteGroupMemberWeb, http.HandlerFunc(s.serveGroupSPA))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	spa := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.isStaticAssetRequest(r.URL.Path) {
 			s.static(w, r)
 			return
 		}
-		spa.ServeHTTP(w, r)
+		s.serveGroupSPA(w, r)
 	})
+	return s.gate(domain.RouteGroupMemberWeb, spa)
 }
 
 func (s *Server) static(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +284,35 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, r, http.StatusServiceUnavailable, "database_unavailable", "database is not ready")
 			return
 		}
+		var risk string
+		err := s.db.SQL().QueryRowContext(r.Context(), `SELECT value FROM system_state WHERE key = 'mcp_audit_risk'`).Scan(&risk)
+		if err == nil {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "mcp_audit_degraded", "mcp_audit_degraded: MCP audit integrity requires investigation")
+			return
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "database_unavailable", "database is not ready")
+			return
+		}
+		if err := s.db.SQL().QueryRowContext(r.Context(), `SELECT value FROM system_state WHERE key = 'audit_write_risk'`).Scan(&risk); err == nil {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "audit_degraded", "audit integrity requires investigation")
+			return
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "database_unavailable", "database is not ready")
+			return
+		}
+		var recoveryState string
+		var recoveryReady int
+		if err := s.db.SQL().QueryRowContext(r.Context(), `
+SELECT state, ready FROM recovery_control WHERE id = 1
+`).Scan(&recoveryState, &recoveryReady); err != nil {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "recovery_unavailable", "recovery control is not ready")
+			return
+		}
+		if recoveryState != "normal" || recoveryReady != 1 {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "recovery_not_ready", "recovery control is not ready")
+			return
+		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
@@ -211,7 +324,13 @@ func requestID(next http.Handler) http.Handler {
 			requestID = httpx.NewRequestID()
 		}
 		w.Header().Set("X-Request-ID", requestID)
-		next.ServeHTTP(w, r.WithContext(httpx.WithRequestID(r.Context(), requestID)))
+		// Propagate the generated ID to protocol adapters through a cloned
+		// request header as well as context, without mutating the caller-owned
+		// request. MCP tool errors can then include the same stable ID.
+		cloned := r.Clone(httpx.WithRequestID(r.Context(), requestID))
+		cloned.Header = r.Header.Clone()
+		cloned.Header.Set("X-Request-ID", requestID)
+		next.ServeHTTP(w, cloned)
 	})
 }
 
@@ -234,7 +353,7 @@ func accessLog(next http.Handler) http.Handler {
 			slog.Int("status", recorder.status),
 			slog.Int64("duration_ms", duration.Milliseconds()),
 			slog.Int64("bytes", recorder.bytes),
-			slog.String("remote_addr", r.RemoteAddr),
+			slog.String("client_ip", clientIPFromRequest(r)),
 			slog.String("user_agent", r.UserAgent()),
 		)
 	})

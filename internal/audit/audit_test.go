@@ -13,6 +13,7 @@ import (
 
 func TestRecorderWritesNormalizedMetadata(t *testing.T) {
 	db := newAuditDB(t)
+	key := []byte("test-audit-hmac-key-012345678901234567890123")
 	metadata, err := MetadataFromMap(map[string]any{"result": "ok", "count": float64(2)})
 	if err != nil {
 		t.Fatalf("MetadataFromMap() error = %v", err)
@@ -24,8 +25,8 @@ func TestRecorderWritesNormalizedMetadata(t *testing.T) {
 		Action:         "mount_scan",
 		TargetType:     "mount",
 		TargetID:       "mnt_1",
-		IPHash:         HashForAudit("127.0.0.1"),
-		UserAgentHash:  HashForAudit("test-agent"),
+		IPHash:         HashForAudit(key, HashDomainClientIP, "127.0.0.1"),
+		UserAgentHash:  HashForAudit(key, HashDomainUserAgent, "test-agent"),
 		MetadataJSON:   metadata,
 	})
 	if err != nil {
@@ -44,6 +45,25 @@ func TestRecorderWritesNormalizedMetadata(t *testing.T) {
 	}
 	if ipHash == "" || ipHash == "127.0.0.1" {
 		t.Fatalf("ip_hash = %q, want non-empty hash", ipHash)
+	}
+}
+
+func TestHashForAuditUsesKeyedDomainSeparation(t *testing.T) {
+	key := []byte("test-audit-hmac-key-012345678901234567890123")
+	clientIP := HashForAudit(key, HashDomainClientIP, "same-value")
+	userAgent := HashForAudit(key, HashDomainUserAgent, "same-value")
+	otherKey := HashForAudit([]byte("different-audit-hmac-key-012345678901234567"), HashDomainClientIP, "same-value")
+	if clientIP == "" || userAgent == "" || otherKey == "" {
+		t.Fatal("HashForAudit() returned an empty identifier for valid input")
+	}
+	if clientIP == userAgent {
+		t.Fatal("different audit domains produced the same hash")
+	}
+	if clientIP == otherKey {
+		t.Fatal("different audit keys produced the same hash")
+	}
+	if got := HashForAudit(nil, HashDomainClientIP, "same-value"); got != "" {
+		t.Fatalf("HashForAudit() with empty key = %q, want empty", got)
 	}
 }
 
@@ -75,6 +95,30 @@ func TestRecorderRejectsSensitiveMetadata(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("audit event count = %d, want 0", count)
+	}
+}
+
+func TestRecorderRecordTxRollsBackWithMutation(t *testing.T) {
+	db := newAuditDB(t)
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO audit_events(action, target_type) VALUES ('mutation', 'mount')`); err != nil {
+		t.Fatalf("insert mutation: %v", err)
+	}
+	if err := NewRecorder(db).RecordTx(context.Background(), tx, Event{Action: "mutation_success", TargetType: "mount"}); err != nil {
+		t.Fatalf("RecordTx() error = %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(1) FROM audit_events").Scan(&count); err != nil {
+		t.Fatalf("count audit events: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("rolled-back audit count = %d, want 0", count)
 	}
 }
 
