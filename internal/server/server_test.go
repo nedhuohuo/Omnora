@@ -2,16 +2,37 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"omnora/internal/config"
 	"omnora/internal/domain"
+	"omnora/internal/httpx"
+	"omnora/internal/store"
 )
+
+func TestNewServerRecordsRouteHydrationFailure(t *testing.T) {
+	db, err := store.OpenSQLite(context.Background(), store.SQLiteOptions{
+		Path: filepath.Join(t.TempDir(), "closed.db"), BusyTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+	srv := NewServer(config.Config{Routes: map[domain.RouteGroup]bool{}}, db)
+	if srv.StartupError() == nil {
+		t.Fatal("NewServer() did not record route hydration failure")
+	}
+}
 
 func TestRouteGroupsFailClosed(t *testing.T) {
 	handler := New(config.Config{
@@ -85,6 +106,24 @@ func TestRequestLoggingPreservesUpstreamRequestID(t *testing.T) {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("log output missing %s: %s", expected, output)
 		}
+	}
+}
+
+func TestRequestIDPropagatesGeneratedHeaderToMCPAdapters(t *testing.T) {
+	var gotHeader, gotContext string
+	handler := requestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Request-ID")
+		gotContext = httpx.RequestID(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if gotHeader == "" || gotHeader != gotContext || rec.Header().Get("X-Request-ID") != gotHeader {
+		t.Fatalf("request ID propagation header=%q context=%q response=%q", gotHeader, gotContext, rec.Header().Get("X-Request-ID"))
+	}
+	if req.Header.Get("X-Request-ID") != "" {
+		t.Fatalf("requestID mutated caller request: %q", req.Header.Get("X-Request-ID"))
 	}
 }
 
@@ -209,19 +248,23 @@ func TestAdminAndShareEntriesServeSPAWhenEnabled(t *testing.T) {
 
 func TestEnabledProductGroupFallbacksStayJSONErrors(t *testing.T) {
 	for _, tc := range []struct {
-		group domain.RouteGroup
-		path  string
+		group      domain.RouteGroup
+		path       string
+		wantStatus int
 	}{
-		{group: domain.RouteGroupREST, path: "/api/v1/unknown"},
-		{group: domain.RouteGroupMCP, path: "/mcp/unknown"},
-		{group: domain.RouteGroupOpenAPI, path: "/openapi/unknown"},
+		{group: domain.RouteGroupREST, path: "/api/v1/unknown", wantStatus: http.StatusNotImplemented},
+		{group: domain.RouteGroupMCP, path: "/mcp/unknown", wantStatus: http.StatusNotFound},
+		{group: domain.RouteGroupOpenAPI, path: "/openapi/unknown", wantStatus: http.StatusNotImplemented},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			handler := New(config.Config{Routes: map[domain.RouteGroup]bool{tc.group: true}}, nil)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
-			if rec.Code != http.StatusNotImplemented {
-				t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotImplemented)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if tc.group == domain.RouteGroupMCP {
+				return
 			}
 			if !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
 				t.Fatalf("content type = %q, want JSON", rec.Header().Get("Content-Type"))
@@ -330,19 +373,14 @@ func TestHealthBypassesRouteGroups(t *testing.T) {
 	}
 }
 
-func TestStaticAssetsBypassMemberWebRouteGroup(t *testing.T) {
+func TestStaticAssetsRequireMemberWebRouteGroup(t *testing.T) {
 	handler := New(config.Config{Routes: map[domain.RouteGroup]bool{}}, nil)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/placeholder.txt", nil)
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	if rec.Header().Get("Content-Type") == "" {
-		t.Fatal("content type should be set")
-	}
+	assertRouteGroupDisabled(t, rec)
 }
 
 func TestUnknownStaticExtensionReturnsNotFound(t *testing.T) {
@@ -352,9 +390,7 @@ func TestUnknownStaticExtensionReturnsNotFound(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/missing.js", nil)
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
-	}
+	assertRouteGroupDisabled(t, rec)
 }
 
 func assertRouteGroupDisabled(t *testing.T, rec *httptest.ResponseRecorder) {

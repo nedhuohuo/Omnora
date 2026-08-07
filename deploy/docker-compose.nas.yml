@@ -26,6 +26,17 @@ services:
       OMNORA_DATA_DIR: /var/lib/omnora
       OMNORA_DB_PATH: /var/lib/omnora/omnora.db
       OMNORA_HTTP_ADDR: 0.0.0.0:8080
+      # Business routes require an explicit external origin. Set this to the
+      # reverse-proxy HTTPS origin; do not infer it from forwarded headers.
+      OMNORA_PUBLIC_URL: "${OMNORA_PUBLIC_URL:?set OMNORA_PUBLIC_URL}"
+      OMNORA_ALLOWED_HOSTS: "${OMNORA_ALLOWED_HOSTS:-}"
+      OMNORA_ALLOWED_ORIGINS: "${OMNORA_ALLOWED_ORIGINS:-}"
+      OMNORA_TRUSTED_PROXY_CIDRS: "${OMNORA_TRUSTED_PROXY_CIDRS:-}"
+      # MCP is fail-closed: keep the route disabled or configure exact hosts
+      # before exposing it. Origins are optional for non-browser clients.
+      OMNORA_MCP_ALLOWED_HOSTS: "${OMNORA_MCP_ALLOWED_HOSTS:-}"
+      OMNORA_MCP_ALLOWED_ORIGINS: "${OMNORA_MCP_ALLOWED_ORIGINS:-}"
+      OMNORA_MCP_MAX_BODY_BYTES: "${OMNORA_MCP_MAX_BODY_BYTES:-1048576}"
       OMNORA_LOG_FORMAT: "${OMNORA_LOG_FORMAT:-json}"
       OMNORA_LOG_LEVEL: "${OMNORA_LOG_LEVEL:-info}"
       # Leave the secrets empty to let the image entrypoint generate and persist
@@ -33,6 +44,7 @@ services:
       OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:-}"
       OMNORA_INITIALIZATION_TOKEN_TTL: "${OMNORA_INITIALIZATION_TOKEN_TTL:-30m}"
       OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:-}"
+      OMNORA_AUDIT_HMAC_KEY: "${OMNORA_AUDIT_HMAC_KEY:-}"
       OMNORA_MANAGED_STORAGE_DIR: /srv/omnora/managed
       OMNORA_PREDECLARED_MOUNT_ROOT: /mnt/omnora
       OMNORA_ROUTE_ADMIN_WEB_ENABLED: "${OMNORA_ROUTE_ADMIN_WEB_ENABLED:-true}"
