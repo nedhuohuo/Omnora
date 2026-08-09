@@ -129,54 +129,53 @@ export default function MemberDocsPanel({ locale }: { locale: MemberLocale }) {
         <div><h1>{text.docsTitle}</h1><p>{text.docsTitleDetail}</p></div>
       </div>
 
-      <div className="member-admin-subnav" role="tablist" aria-label={text.docsTitle}>
-        <button type="button" role="tab" aria-selected={tab === 'mcp'} aria-pressed={tab === 'mcp'} onClick={() => setTab('mcp')}>{text.docsTabMcp}</button>
-        <button type="button" role="tab" aria-selected={tab === 'openapi'} aria-pressed={tab === 'openapi'} onClick={() => setTab('openapi')}>{text.docsTabOpenapi}</button>
-        <button type="button" role="tab" aria-selected={tab === 'faq'} aria-pressed={tab === 'faq'} onClick={() => setTab('faq')}>{text.docsTabFaq}</button>
+      <div className="member-docs-layout">
+        <MemberDocsNavigation locale={locale} tab={tab} onTabChange={setTab} />
+        <div className="member-docs-content">
+          {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
+
+          {tab === 'mcp' && <>
+            <p className="member-admin-hint">{text.docsMcpHint}</p>
+            <McpDocsBlock endpoint={routeState.endpoint} exposed={routeState.exposed} locale={locale} />
+          </>}
+
+          {tab === 'openapi' && <>
+            <p className="member-admin-hint">{text.docsOpenapiDetail}</p>
+            <p className="member-admin-hint"><code>{text.docsOpenapiBase}</code></p>
+            <a className="member-docs-link" href={openapiUrl} target="_blank" rel="noreferrer">{text.docsOpenapiView}</a>
+            {OPENAPI_GROUPS.map((group) => (
+              <section className="member-docs-section" key={group.title}>
+                <h2>{text[group.title]}</h2>
+                <table className="member-mcp-docs-table member-docs-table">
+                  <thead>
+                    <tr><th>{text.docsOpenapiMethod}</th><th>{text.docsOpenapiPath}</th><th>{text.docsOpenapiDesc}</th><th>{text.docsOpenapiAuth}</th></tr>
+                  </thead>
+                  <tbody>
+                    {group.endpoints.map((endpoint) => (
+                      <tr key={`${endpoint.method}-${endpoint.path}`}>
+                        <td><code>{endpoint.method}</code></td>
+                        <td><code>{endpoint.path}</code></td>
+                        <td>{text[endpoint.desc]}</td>
+                        <td>{authLabel(endpoint.auth, text)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </section>
+            ))}
+          </>}
+
+          {tab === 'faq' && <>
+            <p className="member-admin-hint">{text.docsFaqDetail}</p>
+            {FAQ_ITEMS.map((item) => (
+              <details className="member-docs-faq" key={item.q}>
+                <summary>{text[item.q]}</summary>
+                <p>{text[item.a]}</p>
+              </details>
+            ))}
+          </>}
+        </div>
       </div>
-
-      {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
-
-      {tab === 'mcp' && <>
-        <p className="member-admin-hint">{text.docsMcpHint}</p>
-        <McpDocsBlock endpoint={routeState.endpoint} exposed={routeState.exposed} locale={locale} />
-      </>}
-
-      {tab === 'openapi' && <>
-        <p className="member-admin-hint">{text.docsOpenapiDetail}</p>
-        <p className="member-admin-hint"><code>{text.docsOpenapiBase}</code></p>
-        <a className="member-docs-link" href={openapiUrl} target="_blank" rel="noreferrer">{text.docsOpenapiView}</a>
-        {OPENAPI_GROUPS.map((group) => (
-          <section className="member-docs-section" key={group.title}>
-            <h2>{text[group.title]}</h2>
-            <table className="member-mcp-docs-table member-docs-table">
-              <thead>
-                <tr><th>{text.docsOpenapiMethod}</th><th>{text.docsOpenapiPath}</th><th>{text.docsOpenapiDesc}</th><th>{text.docsOpenapiAuth}</th></tr>
-              </thead>
-              <tbody>
-                {group.endpoints.map((endpoint) => (
-                  <tr key={`${endpoint.method}-${endpoint.path}`}>
-                    <td><code>{endpoint.method}</code></td>
-                    <td><code>{endpoint.path}</code></td>
-                    <td>{text[endpoint.desc]}</td>
-                    <td>{authLabel(endpoint.auth, text)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
-        ))}
-      </>}
-
-      {tab === 'faq' && <>
-        <p className="member-admin-hint">{text.docsFaqDetail}</p>
-        {FAQ_ITEMS.map((item) => (
-          <details className="member-docs-faq" key={item.q}>
-            <summary>{text[item.q]}</summary>
-            <p>{text[item.a]}</p>
-          </details>
-        ))}
-      </>}
     </div>
   );
 }

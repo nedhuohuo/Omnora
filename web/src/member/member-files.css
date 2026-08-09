@@ -168,6 +168,15 @@
 .member-mcp-docs-risk-no { color: var(--text-soft); white-space: nowrap; }
 .member-docs-link { display: inline-flex; align-items: center; min-height: var(--control-md); margin-bottom: var(--space-3); padding: 0 var(--control-padding-inline); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--accent-text); text-decoration: none; font-size: var(--text-lg); }
 .member-docs-link:hover { border-color: var(--accent); }
+.member-docs-layout { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: var(--layout-section-compact); align-items: start; }
+.member-docs-navigation { min-width: 0; }
+.member-docs-directory { display: grid; gap: var(--space-1); padding: var(--space-2); border: 1px solid var(--border-card); border-radius: var(--radius-md); background: var(--surface-2); }
+.member-docs-directory-item { min-height: var(--control-md); padding: 0 var(--control-padding-inline); border: 0; border-left: 3px solid transparent; border-radius: var(--radius-xs); background: transparent; color: var(--text-soft); cursor: pointer; text-align: left; font-size: var(--text-md); }
+.member-docs-directory-item:hover { background: var(--surface-hover); color: var(--accent-text); }
+.member-docs-directory-item[aria-current="page"] { border-left-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); font-weight: 700; }
+.member-docs-select-wrap { display: none; }
+.member-docs-content { min-width: 0; }
+@media (max-width: 700px) { .member-docs-layout { display: block; }.member-docs-directory { display: none; }.member-docs-select-wrap { display: grid; gap: var(--space-1); margin-bottom: var(--layout-component); color: var(--text-muted); font-size: var(--text-sm); }.member-docs-select-wrap select { width: 100%; min-height: var(--control-lg); padding: 0 var(--control-padding-inline); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--input-bg); color: var(--text-body); font-size: var(--text-md); } }
 .member-docs-section { margin-top: var(--space-4); }
 .member-docs-section h2 { margin: 0 0 var(--space-2); color: var(--text-strong); font-size: var(--text-2xl); }
 .member-docs-faq { margin-top: var(--space-2); border: 1px solid var(--border-card); border-radius: var(--radius-sm); background: var(--surface-2); }
