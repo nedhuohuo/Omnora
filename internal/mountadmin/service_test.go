@@ -2,7 +2,6 @@ package mountadmin_test
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -330,5 +329,3 @@ func assertCount(t *testing.T, db *store.DB, query string, want int) {
 		t.Fatalf("count = %d, want %d", got, want)
 	}
 }
-
-var _ *sql.DB

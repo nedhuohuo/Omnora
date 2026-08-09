@@ -269,6 +269,10 @@ VALUES (?, ?, ?, 'common', 'external', ?, ?, ?, 1, 'active', ?)
 }
 
 func (s *Service) UpdateMount(ctx context.Context, actorID, mountID string, req UpdateRequest, audit AuditWriter) (Mount, error) {
+	initial, err := s.isInitialAdmin(ctx, actorID)
+	if err != nil {
+		return Mount{}, err
+	}
 	current, err := s.LoadMount(ctx, actorID, mountID)
 	if err != nil {
 		return Mount{}, err
@@ -313,7 +317,7 @@ WHERE id = ? AND status <> 'deleted'
 `, name, mode, boolInt(indexEnabled), boolInt(shareEnabled), time.Now().UTC().Format(time.RFC3339Nano), current.ID)
 	if err != nil {
 		if isUniqueError(err) {
-			if current.Governance == domain.MountGovernanceRestricted {
+			if !initial {
 				return Mount{}, ErrMountUnavailable
 			}
 			return Mount{}, fmt.Errorf("%w: %v", ErrMountConflict, err)

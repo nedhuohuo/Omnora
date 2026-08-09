@@ -62,6 +62,75 @@ func TestAdminMountRoutesUseAccountMountContract(t *testing.T) {
 	}
 }
 
+func TestAdminMountGrantUpdateAndNonDestructiveDelete(t *testing.T) {
+	db, _ := newAPITestServer(t)
+	initialAdmin, member := createAPITestAccounts(t, db)
+	workspace, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(workspace, ".mount-lifecycle-http-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	keep := filepath.Join(root, "keep.txt")
+	if err := os.WriteFile(keep, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(config.Config{
+		Storage:           config.StorageConfig{PredeclaredMountRoot: filepath.Dir(root)},
+		Routes:            map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+		RouteEnvOverrides: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+	}, db)
+	createBody := []byte(`{"displayName":"Lifecycle","rootPath":"` + root + `","governance":"normal","mode":"read_only","indexEnabled":true,"grants":[]}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/mounts", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.AddCookie(issueAPITestSession(t, db, initialAdmin.ID))
+	createRec := httptest.NewRecorder()
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil || created.ID == "" {
+		t.Fatalf("created mount = %#v, err = %v", created, err)
+	}
+	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/mounts/"+created.ID+"/grants/"+member.ID, bytes.NewReader([]byte(`{"permission":"editor"}`)))
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq.AddCookie(issueAPITestSession(t, db, initialAdmin.ID))
+	putRec := httptest.NewRecorder()
+	handler.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("grant status = %d, body = %s", putRec.Code, putRec.Body.String())
+	}
+	listRec := authorizedAPITestRequest(t, handler, "/api/v1/admin/mounts/"+created.ID+"/grants", issueAPITestSession(t, db, initialAdmin.ID))
+	if listRec.Code != http.StatusOK || !strings.Contains(listRec.Body.String(), member.ID) {
+		t.Fatalf("grant list status/body = %d/%s", listRec.Code, listRec.Body.String())
+	}
+	patchReq := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/mounts/"+created.ID, bytes.NewReader([]byte(`{"shareEnabled":false}`)))
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchReq.AddCookie(issueAPITestSession(t, db, initialAdmin.ID))
+	patchRec := httptest.NewRecorder()
+	handler.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK || strings.Contains(patchRec.Body.String(), `"shareEnabled":true`) {
+		t.Fatalf("patch status/body = %d/%s", patchRec.Code, patchRec.Body.String())
+	}
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/mounts/"+created.ID, bytes.NewReader([]byte(`{"displayName":"Lifecycle"}`)))
+	deleteReq.Header.Set("Content-Type", "application/json")
+	deleteReq.AddCookie(issueAPITestSession(t, db, initialAdmin.ID))
+	deleteRec := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK || !strings.Contains(deleteRec.Body.String(), `"dataDeleted":false`) {
+		t.Fatalf("delete status/body = %d/%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("physical file was removed: %v", err)
+	}
+}
+
 func TestOrdinaryAdminCannotEnqueueRestrictedIndexJob(t *testing.T) {
 	db, handler := newAPITestServer(t)
 	_, member := createAPITestAccounts(t, db)

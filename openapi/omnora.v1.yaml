@@ -2108,7 +2108,17 @@ components:
         grants:
           type: array
           items:
-            $ref: "#/components/schemas/PutMountGrantRequest"
+            $ref: "#/components/schemas/CreateAdminMountGrant"
+    CreateAdminMountGrant:
+      type: object
+      additionalProperties: false
+      required: [accountId, permission]
+      properties:
+        accountId:
+          $ref: "#/components/schemas/OpaqueId"
+        permission:
+          type: string
+          enum: [viewer, editor]
     UpdateAdminMountRequest:
       type: object
       additionalProperties: false
@@ -2186,21 +2196,6 @@ components:
         dataDeleted:
           type: boolean
           const: false
-    CreateMountRequest:
-      type: object
-      required: [name, containerPath, mode, indexMode]
-      properties:
-        name:
-          type: string
-        containerPath:
-          type: string
-          description: Absolute path under the predeclared mount root inside the container. Omnora registers the selected directory directly and does not create an implicit business-level subdirectory.
-        mode:
-          type: string
-          enum: [read_only, read_write]
-        indexMode:
-          type: string
-          enum: [disabled, enabled]
     FileObject:
       type: object
       required: [id, mountId, name, kind, size, modifiedAt]
