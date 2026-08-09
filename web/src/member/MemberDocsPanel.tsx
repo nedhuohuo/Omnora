@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ApiError, getBootstrap, isReauthenticationCanceled } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
+import MemberDocsNavigation from './MemberDocsNavigation';
 import McpDocsBlock from './McpDocsBlock';
 import { getMcpRouteState } from './mcpIntegration';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
-type DocsTab = 'mcp' | 'openapi' | 'faq';
+export type DocsTab = 'mcp' | 'openapi' | 'faq';
 
 type OpenApiEndpoint = {
   method: string;
