@@ -120,7 +120,7 @@ WHERE purpose = 'personal_default' AND status <> 'deleted'
 `).Scan(&mount.ID, &mount.RootPath, &purpose, &storageKind, &governance, &mode, &status, &storedIdentity); err != nil {
 		return Mount{}, err
 	}
-	if mount.ID != DefaultMountID || mount.RootPath != DefaultMountRootPath || purpose != "personal_default" || storageKind != "managed" || governance != "system" || mode != "read_write" || status != "active" {
+	if mount.ID != DefaultMountID || mount.RootPath != DefaultMountRootPath || purpose != "personal_default" || storageKind != "managed" || governance != "system" || mode != "read_write" || (status != "active" && status != "unavailable") {
 		return Mount{}, ErrUnavailable
 	}
 	currentIdentity, err := mountid.Capture(personalRoot)
@@ -128,6 +128,9 @@ WHERE purpose = 'personal_default' AND status <> 'deleted'
 		return Mount{}, ErrUnavailable
 	}
 	if !storedIdentity.Valid || strings.TrimSpace(storedIdentity.String) == "" {
+		if status != "active" {
+			return Mount{}, ErrUnavailable
+		}
 		encoded, err := json.Marshal(currentIdentity)
 		if err != nil {
 			return Mount{}, ErrUnavailable
@@ -139,6 +142,15 @@ WHERE purpose = 'personal_default' AND status <> 'deleted'
 		var expectedIdentity mountid.Identity
 		if err := json.Unmarshal([]byte(storedIdentity.String), &expectedIdentity); err != nil || !access.MountIdentityMatches(expectedIdentity, currentIdentity) {
 			return Mount{}, ErrUnavailable
+		}
+		if status == "unavailable" {
+			result, err := tx.ExecContext(ctx, `UPDATE mounts SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'unavailable'`, mount.ID)
+			if err != nil {
+				return Mount{}, err
+			}
+			if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+				return Mount{}, ErrUnavailable
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

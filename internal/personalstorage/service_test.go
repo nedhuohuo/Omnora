@@ -116,6 +116,61 @@ func TestEnsureDefaultMountAndProvisionAccount(t *testing.T) {
 	}
 }
 
+func TestEnsureDefaultMountReactivatesUnavailableMountWhenIdentityMatches(t *testing.T) {
+	ctx := context.Background()
+	db := openTargetDB(t)
+	managed := realTempDir(t)
+	svc := New(db, managed)
+	if _, err := svc.EnsureDefaultMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE mounts SET status = 'unavailable' WHERE id = ?`, DefaultMountID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.EnsureDefaultMount(ctx); err != nil {
+		t.Fatalf("EnsureDefaultMount() error = %v", err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM mounts WHERE id = ?`, DefaultMountID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Fatalf("default mount status = %q, want active", status)
+	}
+}
+
+func TestEnsureDefaultMountKeepsUnavailableMountWhenIdentityDrifts(t *testing.T) {
+	ctx := context.Background()
+	db := openTargetDB(t)
+	managed := realTempDir(t)
+	svc := New(db, managed)
+	if _, err := svc.EnsureDefaultMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE mounts SET status = 'unavailable' WHERE id = ?`, DefaultMountID); err != nil {
+		t.Fatal(err)
+	}
+	personalRoot := filepath.Join(managed, DefaultMountRootPath)
+	if err := os.Rename(personalRoot, filepath.Join(managed, "personal-old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(personalRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.EnsureDefaultMount(ctx); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("EnsureDefaultMount() error = %v, want ErrUnavailable", err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM mounts WHERE id = ?`, DefaultMountID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "unavailable" {
+		t.Fatalf("default mount status = %q, want unavailable", status)
+	}
+}
+
 func TestEnsureDefaultMountDoesNotRecreateMissingRootForExistingAccounts(t *testing.T) {
 	ctx := context.Background()
 	db := openTargetDB(t)
