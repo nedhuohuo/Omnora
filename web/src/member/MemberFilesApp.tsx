@@ -152,6 +152,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const text = localeMessages[locale];
   const [sessionState, setSessionState] = useState<SessionState>('checking');
   const [isAdmin, setIsAdmin] = useState(false);
+  const [isInitialAdmin, setIsInitialAdmin] = useState(false);
   const [activeTab, setActiveTab] = useState<MemberTab | AdminTab>(entry === 'admin' ? 'overview' : 'files');
   const [adminGroupTabs, setAdminGroupTabs] = useState<Record<AdminNavGroup, AdminTab>>(defaultAdminGroupTabs);
   const [loginForm, setLoginForm] = useState({ login: '', password: '', totpCode: '' });
@@ -306,6 +307,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       try {
         const session = await getSession();
         setIsAdmin(session.isAdmin === true);
+        setIsInitialAdmin(session.isInitialAdmin === true);
         const nextState = stateForSession(session);
         setSessionState(nextState);
         if (nextState === 'ready') {
@@ -316,6 +318,8 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
         }
       } catch {
         setSessionState('signed-out');
+        setIsAdmin(false);
+        setIsInitialAdmin(false);
         try {
           const bootstrap = await getBootstrap();
           setInitializationAvailable(bootstrap.initializationAvailable === true);
@@ -394,6 +398,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     try {
       const session = await login({ login: loginForm.login, password: loginForm.password, totpCode: loginForm.totpCode || undefined });
       setIsAdmin(session.isAdmin === true);
+      setIsInitialAdmin(session.isInitialAdmin === true);
       const nextState = stateForSession(session);
       setSessionState(nextState);
       if (nextState === 'ready') {
@@ -427,6 +432,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       await confirmTOTP(enrollmentCode.trim());
       const session = await getSession();
       setIsAdmin(session.isAdmin === true);
+      setIsInitialAdmin(session.isInitialAdmin === true);
       setEnrollmentSetup(null);
       setEnrollmentCode('');
       const nextState = stateForSession(session);
@@ -463,6 +469,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     await logout().catch(() => undefined);
     setSessionState('signed-out');
     setIsAdmin(false);
+    setIsInitialAdmin(false);
     setSpaces([]);
     setMounts([]);
     setEntries([]);
@@ -1067,7 +1074,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             : activeTab === 'tokens' ? <MemberTokensPanel locale={locale} />
             : activeTab === 'docs' ? <MemberDocsPanel locale={locale} />
             : activeTab === 'account' ? <MemberAccountPanel locale={locale} />
-            : <AdminWorkspace tab={activeTab as AdminTab} locale={locale} />}
+            : <AdminWorkspace tab={activeTab as AdminTab} locale={locale} isInitialAdmin={isInitialAdmin} />}
         </section>
       </div>
 

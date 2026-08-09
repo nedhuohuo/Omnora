@@ -24,6 +24,7 @@ export type SessionPayload = {
   userId?: string;
   expiresAt?: string;
   isAdmin?: boolean;
+  isInitialAdmin?: boolean;
   purpose?: 'full' | 'totp_enrollment';
   requiresTotpEnrollment?: boolean;
 };
@@ -51,13 +52,21 @@ export type ReauthenticateResponse = {
   reauthenticatedUntil?: string;
 };
 
+export type MountGovernance = 'normal' | 'restricted';
+export type MountGrantPermission = 'viewer' | 'editor';
+
+export type AdminMountGrantInput = {
+  accountId: string;
+  permission: MountGrantPermission;
+};
+
 export type AdminMountPayload = {
-  spaceId: string;
   displayName: string;
   rootPath: string;
-  kind: 'external' | 'managed';
+  governance: MountGovernance;
   mode: 'read_only' | 'read_write';
   indexEnabled: boolean;
+  grants: AdminMountGrantInput[];
 };
 
 export type DirectoryChildrenPayload = {
@@ -216,7 +225,6 @@ export type JobPayload = {
   id?: string;
   status?: string;
   kind?: string;
-  spaceName?: string;
   mountName?: string;
   priority?: number;
   payload?: Record<string, unknown>;
@@ -244,14 +252,21 @@ export type SpaceDeletionPayload = {
   dataDeleted: boolean;
 };
 
+export type AdminMountGrant = AdminMountGrantInput & {
+  email: string;
+  displayName: string;
+};
+
 export type AdminMountListItem = {
   id: string;
-  name: string;
-  space: string;
-  mode: string;
-  index: string;
-  health: string;
-  tone: string;
+  displayName: string;
+  rootPath: string;
+  governance: MountGovernance;
+  mode: 'read_only' | 'read_write';
+  indexEnabled: boolean;
+  shareEnabled: boolean;
+  status: 'pending' | 'active' | 'disabled' | 'unavailable';
+  grantCount: number;
 };
 
 export type AdminRouteGroupItem = {
@@ -649,26 +664,36 @@ export function confirmTOTP(code: string, signal?: AbortSignal) {
 }
 
 export function registerAdminMount(payload: AdminMountPayload, signal?: AbortSignal) {
-  return requestJson<unknown>('/api/v1/admin/mounts', {
+  return requestJson<AdminMountListItem>('/api/v1/admin/mounts', {
     method: 'POST',
     body: JSON.stringify(payload),
     signal,
   });
 }
 
-export function renameAdminMount(mountId: string, displayName: string, signal?: AbortSignal) {
+export function updateAdminMount(mountId: string, payload: {
+  displayName?: string;
+  mode?: 'read_only' | 'read_write';
+  indexEnabled?: boolean;
+  shareEnabled?: boolean;
+}, signal?: AbortSignal) {
   return requestJson<AdminMountListItem>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}`, {
     method: 'PATCH',
-    body: JSON.stringify({ displayName }),
+    body: JSON.stringify(payload),
     signal,
   });
 }
 
-export function deleteAdminMount(mountId: string, signal?: AbortSignal) {
-  return requestJson<{ id?: string; deleted?: boolean }>(
+export function renameAdminMount(mountId: string, displayName: string, signal?: AbortSignal) {
+  return updateAdminMount(mountId, { displayName }, signal);
+}
+
+export function deleteAdminMount(mountId: string, displayName: string, signal?: AbortSignal) {
+  return requestJson<{ id: string; deleted: boolean; deleteData: boolean; dataDeleted: boolean }>(
     `/api/v1/admin/mounts/${encodeURIComponent(mountId)}`,
     {
       method: 'DELETE',
+      body: JSON.stringify({ displayName }),
       signal,
     },
   );
@@ -687,6 +712,25 @@ export function listAdminSpaces(signal?: AbortSignal) {
 
 export function listAdminMounts(signal?: AbortSignal) {
   return requestJson<{ items: AdminMountListItem[] }>('/api/v1/admin/mounts', { signal });
+}
+
+export function listAdminMountGrants(mountId: string, signal?: AbortSignal) {
+  return requestJson<{ items: AdminMountGrant[] }>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}/grants`, { signal });
+}
+
+export function putAdminMountGrant(mountId: string, accountId: string, permission: MountGrantPermission, signal?: AbortSignal) {
+  return requestJson<AdminMountGrant>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}/grants/${encodeURIComponent(accountId)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ permission }),
+    signal,
+  });
+}
+
+export function deleteAdminMountGrant(mountId: string, accountId: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}/grants/${encodeURIComponent(accountId)}`, {
+    method: 'DELETE',
+    signal,
+  });
 }
 
 export function listAdminRouteGroups(signal?: AbortSignal) {
