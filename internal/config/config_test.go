@@ -32,6 +32,9 @@ func TestLoadEnvDefaultsFailClosed(t *testing.T) {
 	if cfg.Initialization.Token != "" {
 		t.Fatalf("initialization token = %q, want empty", cfg.Initialization.Token)
 	}
+	if cfg.Initialization.LogToken {
+		t.Fatal("initialization token logging must be disabled by default")
+	}
 	if cfg.Secrets.AuditHMACKey != "" {
 		t.Fatalf("audit HMAC key = %q, want empty", cfg.Secrets.AuditHMACKey)
 	}
@@ -41,6 +44,28 @@ func TestLoadEnvDefaultsFailClosed(t *testing.T) {
 	for _, group := range domain.AllRouteGroups {
 		if cfg.Routes.Enabled(group) {
 			t.Fatalf("route group %s should be disabled by default", group)
+		}
+	}
+}
+
+func TestLoadEnvEnablesInitializationTokenLoggingOnlyForExplicitTruthyValue(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "true", want: true},
+		{value: "1", want: true},
+		{value: "false", want: false},
+		{value: "unexpected", want: false},
+	} {
+		clearEnv(t)
+		t.Setenv("OMNORA_LOG_INITIALIZATION_TOKEN", tc.value)
+		cfg, err := LoadEnv()
+		if err != nil {
+			t.Fatalf("LoadEnv(%q) error = %v", tc.value, err)
+		}
+		if cfg.Initialization.LogToken != tc.want {
+			t.Fatalf("LogToken for %q = %v, want %v", tc.value, cfg.Initialization.LogToken, tc.want)
 		}
 	}
 }
@@ -288,6 +313,7 @@ func clearEnv(t *testing.T) {
 		"OMNORA_SQLITE_BUSY_TIMEOUT",
 		"OMNORA_INITIALIZATION_TOKEN",
 		"OMNORA_INITIALIZATION_TOKEN_TTL",
+		"OMNORA_LOG_INITIALIZATION_TOKEN",
 		"OMNORA_TOTP_ENCRYPTION_KEY",
 		"OMNORA_AUDIT_HMAC_KEY",
 		"OMNORA_ROUTE_MEMBER_WEB_ENABLED",

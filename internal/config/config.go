@@ -66,8 +66,9 @@ type DatabaseConfig struct {
 }
 
 type InitializationConfig struct {
-	Token string
-	TTL   time.Duration
+	Token    string
+	TTL      time.Duration
+	LogToken bool
 }
 
 type SecretConfig struct {
@@ -169,6 +170,7 @@ func LoadEnv() (Config, error) {
 	}
 
 	cfg.Initialization.Token = strings.TrimSpace(os.Getenv("OMNORA_INITIALIZATION_TOKEN"))
+	cfg.Initialization.LogToken = envTruthy("OMNORA_LOG_INITIALIZATION_TOKEN")
 	if value := strings.TrimSpace(os.Getenv("OMNORA_INITIALIZATION_TOKEN_TTL")); value != "" {
 		ttl, err := time.ParseDuration(value)
 		if err != nil {
