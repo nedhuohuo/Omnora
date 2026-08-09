@@ -4,6 +4,11 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 ENTRYPOINT="$ROOT/deploy/docker-entrypoint.sh"
 COMPOSE="$ROOT/deploy/docker-compose.yml"
+
+grep -Fq 'stat -L' "$ENTRYPOINT" || {
+	printf 'FAIL: Docker entrypoint must dereference files when comparing path and fd inodes\n' >&2
+	exit 1
+}
 NAS_COMPOSE="$ROOT/deploy/docker-compose.nas.yml"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/omnora-entrypoint-test.XXXXXX")
 

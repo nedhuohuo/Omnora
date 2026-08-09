@@ -178,9 +178,8 @@ done
 pass "OpenAPI document names first-version route groups"
 
 for path in \
-  '/spaces' \
-  '/spaces/{spaceId}/mounts' \
-  '/spaces/{spaceId}/search' \
+  '/member/content-sources' \
+  '/member/files/children' \
   '/files/{objectId}' \
   '/files/{objectId}/text' \
   '/files/{objectId}/download-ticket' \

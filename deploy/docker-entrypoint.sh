@@ -32,11 +32,11 @@ path_exists() {
 }
 
 inode_number() {
-	if inode_value="$(stat -f '%i' "$1" 2>/dev/null)"; then
+	if inode_value="$(stat -L -c '%i' "$1" 2>/dev/null)"; then
 		printf '%s' "$inode_value"
 		return 0
 	fi
-	stat -c '%i' "$1" 2>/dev/null
+	stat -L -f '%i' "$1" 2>/dev/null
 }
 
 read_instance_file() {
