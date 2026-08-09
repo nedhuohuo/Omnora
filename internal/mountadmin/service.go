@@ -70,6 +70,13 @@ type UpdateRequest struct {
 	ShareEnabled *bool
 }
 
+type Deletion struct {
+	ID          string
+	Deleted     bool
+	DeleteData  bool
+	DataDeleted bool
+}
+
 type AuditEvent struct {
 	Action   string
 	TargetID string
@@ -407,6 +414,103 @@ func (s *Service) DeleteGrant(ctx context.Context, actorID, mountID, accountID s
 	return tx.Commit()
 }
 
+func (s *Service) ReverifyMount(ctx context.Context, actorID, mountID string, audit AuditWriter) (Mount, error) {
+	current, err := s.LoadMount(ctx, actorID, mountID)
+	if err != nil {
+		return Mount{}, err
+	}
+	initial, err := s.isInitialAdmin(ctx, actorID)
+	if err != nil {
+		return Mount{}, err
+	}
+	identity, err := s.validateRoot(ctx, current.RootPath, current.Mode, current.ID, initial)
+	if err != nil {
+		return Mount{}, err
+	}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return Mount{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Mount{}, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `UPDATE mounts SET status = 'active', mount_identity_json = ?, updated_at = ? WHERE id = ? AND status <> 'deleted'`, string(encoded), time.Now().UTC().Format(time.RFC3339Nano), current.ID)
+	if err != nil {
+		return Mount{}, err
+	}
+	if audit != nil {
+		if err := audit(ctx, tx, AuditEvent{Action: "mount_reverify", TargetID: current.ID, Metadata: "{}"}); err != nil {
+			return Mount{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Mount{}, err
+	}
+	current.Status = "active"
+	return current, nil
+}
+
+func (s *Service) DeleteMount(ctx context.Context, actorID, mountID, displayName string, audit AuditWriter) (Deletion, error) {
+	current, err := s.LoadMount(ctx, actorID, mountID)
+	if err != nil {
+		return Deletion{}, err
+	}
+	if displayName != current.DisplayName {
+		return Deletion{}, ErrConfirmationRequired
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Deletion{}, err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM mount_grants WHERE mount_id = ?`, []any{current.ID}},
+		{`DELETE FROM ai_token_boundaries WHERE mount_id = ?`, []any{current.ID}},
+		{`UPDATE shares SET revoked_at = COALESCE(revoked_at, ?), updated_at = ? WHERE mount_id = ?`, []any{now, now, current.ID}},
+		{`UPDATE share_download_tickets SET status = 'canceled', canceled_at = COALESCE(canceled_at, ?) WHERE mount_id = ? AND status IN ('issued', 'streaming')`, []any{now, current.ID}},
+		{`UPDATE mcp_transfer_tickets SET status = 'canceled', closed_at = COALESCE(closed_at, ?) WHERE mount_id = ? AND status = 'active'`, []any{now, current.ID}},
+		{`UPDATE upload_sessions SET status = 'canceled', canceled_at = COALESCE(canceled_at, ?) WHERE mount_id = ? AND status = 'active'`, []any{now, current.ID}},
+		{`DELETE FROM file_operations WHERE source_mount_id = ? OR destination_mount_id = ?`, []any{current.ID, current.ID}},
+		{`DELETE FROM catalog_entries WHERE mount_id = ?`, []any{current.ID}},
+		{`DELETE FROM file_objects WHERE mount_id = ?`, []any{current.ID}},
+		{`DELETE FROM mount_identity_claims WHERE mount_id = ?`, []any{current.ID}},
+		{`DELETE FROM mount_claim_conflicts WHERE mount_id = ? OR conflicting_mount_id = ?`, []any{current.ID, current.ID}},
+		{`UPDATE jobs SET status = 'canceled', updated_at = ?, completed_at = COALESCE(completed_at, ?) WHERE status IN ('queued', 'running', 'paused') AND (instr(payload_json, ?) > 0 OR instr(payload_json, ?) > 0)`, []any{now, now, `"mountId":"` + current.ID + `"`, `"mount_id":"` + current.ID + `"`}},
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			return Deletion{}, err
+		}
+	}
+	tombstone := deletedDisplayName(current.DisplayName, current.ID)
+	result, err := tx.ExecContext(ctx, `UPDATE mounts SET status = 'deleted', display_name = ?, updated_at = ? WHERE id = ? AND status <> 'deleted'`, tombstone, now, current.ID)
+	if err != nil {
+		return Deletion{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Deletion{}, err
+	}
+	if affected != 1 {
+		return Deletion{}, ErrNotFound
+	}
+	if audit != nil {
+		if err := audit(ctx, tx, AuditEvent{Action: "mount_delete", TargetID: current.ID, Metadata: `{"deleteData":false,"dataDeleted":false}`}); err != nil {
+			return Deletion{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Deletion{}, err
+	}
+	return Deletion{ID: current.ID, Deleted: true}, nil
+}
+
 func (s *Service) validateGrantAccount(ctx context.Context, accountID string) error {
 	var status string
 	if err := s.db.QueryRowContext(ctx, `SELECT status FROM accounts WHERE id = ?`, strings.TrimSpace(accountID)).Scan(&status); err != nil {
@@ -527,6 +631,25 @@ func boolInt(value bool) int {
 
 func isUniqueError(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint failed")
+}
+
+func deletedDisplayName(displayName, mountID string) string {
+	suffix := "__deleted__" + mountID
+	maxRunes := 128
+	base := strings.TrimSpace(displayName)
+	if base == "" {
+		base = "mount"
+	}
+	available := maxRunes - utf8.RuneCountInString(suffix)
+	if available < 1 {
+		runes := []rune(suffix)
+		return string(runes[len(runes)-maxRunes:])
+	}
+	runes := []rune(base)
+	if len(runes) > available {
+		runes = runes[:available]
+	}
+	return string(runes) + suffix
 }
 
 type scanner interface {

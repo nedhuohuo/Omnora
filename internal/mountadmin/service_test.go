@@ -3,6 +3,7 @@ package mountadmin_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"omnora/internal/domain"
 	"omnora/internal/mountadmin"
+	"omnora/internal/mountid"
 	"omnora/internal/store"
 )
 
@@ -223,6 +225,109 @@ func TestGrantMutationsOnlyAcceptViewerOrEditor(t *testing.T) {
 	_, err := fixture.service.PutGrant(context.Background(), fixture.ordinaryAdmin.ID, "normal", fixture.member.ID, domain.ContentPermission("manager"), nil)
 	if !errors.Is(err, mountadmin.ErrInvalidInput) {
 		t.Fatalf("manager grant error = %v", err)
+	}
+}
+
+func TestDeleteMountRequiresExactDisplayName(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.insertMount(t, "normal", "Normal", domain.MountGovernanceNormal)
+	_, err := fixture.service.DeleteMount(context.Background(), fixture.ordinaryAdmin.ID, "normal", "normal", nil)
+	if !errors.Is(err, mountadmin.ErrConfirmationRequired) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestDeleteMountKeepsFilesAndRevokesDerivedState(t *testing.T) {
+	fixture := newFixture(t)
+	root := filepath.Join(fixture.root, "archive")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("create mount root: %v", err)
+	}
+	keep := filepath.Join(root, "keep.txt")
+	if err := os.WriteFile(keep, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("write physical file: %v", err)
+	}
+	identityJSON := captureIdentityJSON(t, root)
+	if _, err := fixture.db.SQL().Exec(`
+INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, index_enabled, share_enabled, status, mount_identity_json)
+VALUES ('archive', 'Archive', ?, 'common', 'external', 'normal', 'read_only', 1, 1, 'active', ?)
+`, root, identityJSON); err != nil {
+		t.Fatalf("insert archive mount: %v", err)
+	}
+	if _, err := fixture.db.SQL().Exec(`INSERT INTO mount_grants(mount_id, account_id, permission) VALUES ('archive', ?, 'viewer')`, fixture.member.ID); err != nil {
+		t.Fatalf("insert grant: %v", err)
+	}
+	if _, err := fixture.db.SQL().Exec(`INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, expires_at) VALUES ('token-1', 'public-1', 'hash', ?, 'Token', '[]', '2099-01-01T00:00:00Z')`, fixture.member.ID); err != nil {
+		t.Fatalf("insert token: %v", err)
+	}
+	if _, err := fixture.db.SQL().Exec(`INSERT INTO ai_token_boundaries(token_id, source, mount_id, relative_path) VALUES ('token-1', 'common_mount', 'archive', '')`); err != nil {
+		t.Fatalf("insert token boundary: %v", err)
+	}
+
+	result, err := fixture.service.DeleteMount(context.Background(), fixture.initialAdmin.ID, "archive", "Archive", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Deleted || result.DeleteData || result.DataDeleted {
+		t.Fatalf("result = %#v", result)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("physical file was removed: %v", err)
+	}
+	assertCount(t, fixture.db, `SELECT COUNT(*) FROM mount_grants WHERE mount_id = 'archive'`, 0)
+	assertCount(t, fixture.db, `SELECT COUNT(*) FROM ai_token_boundaries WHERE mount_id = 'archive'`, 0)
+	var status string
+	if err := fixture.db.SQL().QueryRow(`SELECT status FROM mounts WHERE id = 'archive'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "deleted" {
+		t.Fatalf("status = %q", status)
+	}
+}
+
+func TestReverifyMountRestoresActiveStatusWithFreshIdentity(t *testing.T) {
+	fixture := newFixture(t)
+	root := filepath.Join(fixture.root, "reverify")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("create mount root: %v", err)
+	}
+	identityJSON := captureIdentityJSON(t, root)
+	if _, err := fixture.db.SQL().Exec(`
+INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, index_enabled, share_enabled, status, mount_identity_json)
+VALUES ('reverify', 'Reverify', ?, 'common', 'external', 'normal', 'read_only', 0, 1, 'unavailable', ?)
+`, root, identityJSON); err != nil {
+		t.Fatalf("insert reverify mount: %v", err)
+	}
+	updated, err := fixture.service.ReverifyMount(context.Background(), fixture.ordinaryAdmin.ID, "reverify", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "active" {
+		t.Fatalf("status = %q, want active", updated.Status)
+	}
+}
+
+func captureIdentityJSON(t *testing.T, root string) string {
+	t.Helper()
+	identity, err := mountid.Capture(root)
+	if err != nil {
+		t.Fatalf("capture identity: %v", err)
+	}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		t.Fatalf("marshal identity: %v", err)
+	}
+	return string(encoded)
+}
+
+func assertCount(t *testing.T, db *store.DB, query string, want int) {
+	t.Helper()
+	var got int
+	if err := db.SQL().QueryRow(query).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("count = %d, want %d", got, want)
 	}
 }
 
