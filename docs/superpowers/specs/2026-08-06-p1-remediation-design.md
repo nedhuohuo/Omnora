@@ -1,5 +1,7 @@
 # Omnora P1 Remediation Design
 
+> **资源模型说明：** 本文保留迁移前 P1 问题与安全整改背景；其中 Space、`spaceId`、空间 ACL 和旧资源边界不属于目标契约。目标账号、个人目录、共用挂载和协作关系以[账号、挂载与内容授权设计](2026-08-08-account-mount-access-design.md)为准，安全约束以[安全模型](../../security/security-model.md)为准。
+
 日期：2026-08-06
 
 状态：待用户评审

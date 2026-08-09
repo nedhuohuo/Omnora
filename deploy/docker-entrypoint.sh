@@ -8,6 +8,7 @@ MANAGED_DIR="${OMNORA_MANAGED_STORAGE_DIR:-/srv/omnora/managed}"
 SECRETS_FILE="${OMNORA_SECRETS_FILE:-$CONFIG_DIR/runtime.env}"
 CONFIG_INSTANCE_FILE="${OMNORA_CONFIG_INSTANCE_FILE:-$CONFIG_DIR/.omnora-instance-id}"
 DATA_INSTANCE_FILE="${OMNORA_DATA_INSTANCE_FILE:-$DATA_DIR/.omnora-instance-id}"
+MANAGED_INSTANCE_FILE="${OMNORA_MANAGED_INSTANCE_FILE:-$MANAGED_DIR/.omnora-instance-id}"
 ROOT_CONFIG_DIR=/etc/omnora
 ROOT_DATA_DIR=/var/lib/omnora
 ROOT_MANAGED_DIR=/srv/omnora/managed
@@ -18,9 +19,90 @@ fail_persistence_check() {
 	exit 1
 }
 
+directory_has_entries() {
+	directory_entries=''
+	if ! directory_entries="$(find "$1" -mindepth 1 -maxdepth 1 -print -quit)"; then
+		fail_persistence_check "cannot inspect a persistent directory"
+	fi
+	[ -n "$directory_entries" ]
+}
+
+path_exists() {
+	[ -e "$1" ] || [ -L "$1" ]
+}
+
+inode_number() {
+	if inode_value="$(stat -f '%i' "$1" 2>/dev/null)"; then
+		printf '%s' "$inode_value"
+		return 0
+	fi
+	stat -c '%i' "$1" 2>/dev/null
+}
+
+read_instance_file() {
+	volume="$1"
+	file="$2"
+	[ ! -L "$file" ] || fail_persistence_check "$volume instance marker is a symbolic link; use the offline migration command to repair persistent volume identity"
+	[ -f "$file" ] || fail_persistence_check "$volume instance marker is missing or is not a regular file; use the offline migration command to repair persistent volume identity"
+	if ! exec 3< "$file"; then
+		fail_persistence_check "$volume instance marker cannot be opened"
+	fi
+	marker_path_inode="$(inode_number "$file")" || marker_path_inode=''
+	marker_fd_inode="$(inode_number /dev/fd/3)" || marker_fd_inode=''
+	if [ -L "$file" ] || [ ! -f "$file" ] || [ -z "$marker_path_inode" ] ||
+		[ "$marker_path_inode" != "$marker_fd_inode" ]; then
+		exec 3<&-
+		fail_persistence_check "$volume instance marker changed during validation"
+	fi
+
+	marker_id=''
+	if IFS= read -r marker_id <&3; then
+		extra_marker_data=''
+		if IFS= read -r extra_marker_data <&3 || [ -n "$extra_marker_data" ]; then
+			exec 3<&-
+			fail_persistence_check "$volume instance marker is invalid"
+		fi
+	fi
+	exec 3<&-
+	[ "${#marker_id}" = 64 ] || fail_persistence_check "$volume instance marker is invalid"
+	case "$marker_id" in
+		*[!0-9a-f]*) fail_persistence_check "$volume instance marker is invalid" ;;
+	esac
+	printf '%s' "$marker_id"
+}
+
+validate_persistent_state() {
+	persistent_instance_exists=false
+	for persistent_dir in "$CONFIG_DIR" "$DATA_DIR" "$MANAGED_DIR"; do
+		if path_exists "$persistent_dir"; then
+			[ ! -L "$persistent_dir" ] && [ -d "$persistent_dir" ] ||
+				fail_persistence_check "persistent root is not a real directory"
+			if directory_has_entries "$persistent_dir"; then
+				persistent_instance_exists=true
+			fi
+		fi
+	done
+	if path_exists "$CONFIG_INSTANCE_FILE" || path_exists "$DATA_INSTANCE_FILE" ||
+		path_exists "$MANAGED_INSTANCE_FILE" || path_exists "$SECRETS_FILE" ||
+		path_exists "$DB_PATH" || path_exists "$DB_PATH-wal" || path_exists "$DB_PATH-shm"; then
+		persistent_instance_exists=true
+	fi
+
+	[ "$persistent_instance_exists" = true ] || return 0
+	config_instance_id="$(read_instance_file config "$CONFIG_INSTANCE_FILE")"
+	data_instance_id="$(read_instance_file data "$DATA_INSTANCE_FILE")"
+	managed_instance_id="$(read_instance_file managed "$MANAGED_INSTANCE_FILE")"
+	[ "$config_instance_id" = "$data_instance_id" ] && [ "$config_instance_id" = "$managed_instance_id" ] ||
+		fail_persistence_check "config, data, and managed volumes belong to different Omnora instances"
+	[ -f "$DB_PATH" ] && [ ! -L "$DB_PATH" ] ||
+		fail_persistence_check "database is missing or is not a regular file; check the data bind mount before redeploying"
+	INSTANCE_ID="$config_instance_id"
+}
+
 drop_privileges_for_persistence() {
 	[ "$(id -u)" = 0 ] || return 0
 
+	validate_persistent_state
 	command -v su-exec >/dev/null 2>&1 || fail_persistence_check "su-exec is required to drop root privileges"
 	mkdir -p "$ROOT_CONFIG_DIR" "$ROOT_DATA_DIR" "$ROOT_MANAGED_DIR" ||
 		fail_persistence_check "cannot prepare persistent directories"
@@ -42,45 +124,54 @@ random_hex() {
 
 write_instance_file() {
 	file="$1"
-	tmp_file="$file.tmp"
-	{
-		printf '%s\n' "$INSTANCE_ID"
-	} > "$tmp_file" || fail_persistence_check "cannot write $file"
-	mv "$tmp_file" "$file" || fail_persistence_check "cannot install $file"
+	if [ -e "$file" ] || [ -L "$file" ]; then
+		fail_persistence_check "refusing to replace an existing instance marker"
+	fi
+	instance_tmp_file="$(mktemp "$file.tmp.XXXXXX")" || fail_persistence_check "cannot create a temporary instance marker"
+	case "$instance_tmp_file" in
+		"$file".tmp.*) ;;
+		*) fail_persistence_check "temporary instance marker is outside its persistent directory" ;;
+	esac
+	[ ! -L "$instance_tmp_file" ] && [ -f "$instance_tmp_file" ] ||
+		fail_persistence_check "temporary instance marker is not a regular file"
+	printf '%s\n' "$INSTANCE_ID" > "$instance_tmp_file" || fail_persistence_check "cannot write a temporary instance marker"
+	chmod 600 "$instance_tmp_file" || fail_persistence_check "cannot protect a temporary instance marker"
+	ln -n "$instance_tmp_file" "$file" || fail_persistence_check "instance marker target already exists or cannot be installed"
+	temporary_inode="$(inode_number "$instance_tmp_file")" || temporary_inode=''
+	published_inode="$(inode_number "$file")" || published_inode=''
+	if [ -L "$file" ] || [ ! -f "$file" ] || [ -z "$temporary_inode" ] ||
+		[ "$temporary_inode" != "$published_inode" ]; then
+		fail_persistence_check "instance marker changed during installation"
+	fi
+	rm -f "$instance_tmp_file" || fail_persistence_check "cannot remove a temporary instance marker"
+	instance_tmp_file=''
 }
 
-config_instance_id=''
-data_instance_id=''
-persistent_instance_exists=false
-instance_markers_created=false
-if [ -f "$CONFIG_INSTANCE_FILE" ] || [ -f "$DATA_INSTANCE_FILE" ] ||
-	[ -f "$SECRETS_FILE" ] || [ -f "$DB_PATH" ] || [ -f "$DB_PATH-wal" ] || [ -f "$DB_PATH-shm" ]; then
-	persistent_instance_exists=true
-	if [ -f "$CONFIG_INSTANCE_FILE" ] || [ -f "$DATA_INSTANCE_FILE" ]; then
-		[ -f "$CONFIG_INSTANCE_FILE" ] || fail_persistence_check "missing $CONFIG_INSTANCE_FILE; check the config bind mount"
-		[ -f "$DATA_INSTANCE_FILE" ] || fail_persistence_check "missing $DATA_INSTANCE_FILE; check the data bind mount"
-		[ -f "$DB_PATH" ] || fail_persistence_check "missing $DB_PATH; check the data bind mount before redeploying"
-		config_instance_id="$(tr -d ' \r\n\t' < "$CONFIG_INSTANCE_FILE")"
-		data_instance_id="$(tr -d ' \r\n\t' < "$DATA_INSTANCE_FILE")"
-		[ -n "$config_instance_id" ] || fail_persistence_check "$CONFIG_INSTANCE_FILE is empty"
-		[ "$config_instance_id" = "$data_instance_id" ] || fail_persistence_check "config and data bind mounts belong to different Omnora instances"
-		INSTANCE_ID="$config_instance_id"
-	elif [ -f "$DB_PATH" ]; then
-		# Adopt a database created before instance markers were introduced, but
-		# never create a new database when persistent state is incomplete.
-		INSTANCE_ID="$(random_hex)"
-		umask 077
-		write_instance_file "$CONFIG_INSTANCE_FILE"
-		write_instance_file "$DATA_INSTANCE_FILE"
-		instance_markers_created=true
-	else
-		fail_persistence_check "persistent state exists but $DB_PATH is missing; check the config/data bind mounts"
+instance_tmp_file=''
+cleanup_instance_tmp() {
+	if [ -n "${instance_tmp_file:-}" ]; then
+		case "$instance_tmp_file" in
+			"$CONFIG_INSTANCE_FILE".tmp.*|"$DATA_INSTANCE_FILE".tmp.*|"$MANAGED_INSTANCE_FILE".tmp.*)
+				rm -f "$instance_tmp_file" || true
+				;;
+		esac
+		instance_tmp_file=''
 	fi
+}
+
+trap 'cleanup_instance_tmp' EXIT
+
+instance_markers_created=false
+validate_persistent_state
+
+if [ "$persistent_instance_exists" = true ]; then
+	:
 else
 	INSTANCE_ID="$(random_hex)"
 	umask 077
 	write_instance_file "$CONFIG_INSTANCE_FILE"
 	write_instance_file "$DATA_INSTANCE_FILE"
+	write_instance_file "$MANAGED_INSTANCE_FILE"
 	instance_markers_created=true
 fi
 
@@ -150,7 +241,7 @@ append_secret_line() {
 
 # Remove only the validated same-directory temporary path if any persistence
 # step exits before the atomic rename completes.
-trap 'cleanup_runtime_tmp' EXIT
+trap 'cleanup_instance_tmp; cleanup_runtime_tmp' EXIT
 
 if [ "$save_runtime_secrets" = true ]; then
 	umask 077
@@ -178,7 +269,7 @@ forward_child_signal() {
 	fi
 }
 
-trap 'cleanup_runtime_tmp; forward_child_signal' HUP INT TERM
+trap 'cleanup_instance_tmp; cleanup_runtime_tmp; forward_child_signal' HUP INT TERM
 set +e
 "$@" &
 child_pid=$!
@@ -189,7 +280,7 @@ trap - HUP INT TERM
 child_pid=''
 
 if [ "$child_status" -ne 0 ] && [ "$instance_markers_created" = true ] && [ ! -f "$DB_PATH" ]; then
-	rm -f "$CONFIG_INSTANCE_FILE" "$DATA_INSTANCE_FILE"
+	rm -f "$CONFIG_INSTANCE_FILE" "$DATA_INSTANCE_FILE" "$MANAGED_INSTANCE_FILE"
 	if [ "$runtime_secrets_created" = true ]; then
 		rm -f "$SECRETS_FILE"
 	fi

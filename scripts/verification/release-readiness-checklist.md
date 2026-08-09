@@ -25,10 +25,10 @@ This checklist is local scaffolding for implementers. It summarizes release chec
 ## API Contract
 
 - The OpenAPI document is versioned under `/api/v1` and uses OpenAPI 3.1.
-- Core REST groups cover identity, spaces, mounts, directory listing, metadata search, metadata read, bounded text preview, download tickets, resumable uploads, shares, AI Tokens, admin mount registration, audit, and MCP entry exposure.
+- Core REST groups cover identity, personal files, common mounts, directory collaborations, directory listing, metadata search, metadata read, bounded text preview, download tickets, resumable uploads, shares, AI Tokens, admin mount registration, audit, and MCP entry exposure.
 - API errors include stable codes for route group denial, mount identity verification failure, read-only mounts, stale objects, quota, rate limits, and share-password requirements.
 - Share secrets are represented as URL-fragment secrets exchanged by `POST`; path, query, and Referer submission are rejected by implementation tests.
-- AI Token scopes are read-only by default, with upload session creation represented as an explicit additional scope.
+- AI Token scopes are read-only by default, with upload session creation represented as an explicit additional scope. Token boundaries are limited to `all_account_content`, `personal`, and `common_mount`; received collaborations are always rejected by MCP.
 
 ## Local Smoke Checks
 
@@ -49,7 +49,8 @@ This checklist is local scaffolding for implementers. It summarizes release chec
 ## MCP Inspector and Protocol Gates
 
 - `scripts/verification/verify-mcp-protocol.sh` runs the official Go SDK Streamable HTTP client tests, raw protocol negative tests, transfer coverage, and the catalogue/documentation contract without external network access.
-- `internal/server` protocol tests negotiate modern `2026-07-28`, cover tested `2025-11-25` compatibility, verify the 24-tool/15-scope contract, and confirm form Elicitation MRTR retry for high-risk operations.
+- `internal/server` protocol tests negotiate modern `2026-07-28`, cover tested `2025-11-25` compatibility, verify the 24-tool/15-scope contract, and confirm form Elicitation MRTR retry for all 8 high-risk operations.
+- The MCP catalogue contains `files.update` and no legacy Space tool. `mounts.list` accepts no input and only returns currently granted common mounts. File locators use only `personal` or `common_mount`.
 - `scripts/verification/verify-mcp-inspector.sh` is an operator-only live check. Run it only with a short-lived scoped `OMNORA_MCP_AI_TOKEN`, `OMNORA_MCP_URL`, and a separate completed evidence file based on `docs/verification/mcp-inspector-checklist.md`.
 - The Inspector check is conditional in `release-gate.sh`; when URL and token are absent the deterministic protocol gate still runs and the live check is skipped. When supplied, the gate rejects evidence with unchecked `- [ ]` items, requires all 22 checklist items from `docs/verification/mcp-inspector-checklist.md` to be checked, and requires `Status: COMPLETE` plus a redacted evidence summary. The token is never printed, but is visible to the local Inspector process while the command runs.
 - Acceptance evidence is limited to MCP Inspector Modern / Streamable HTTP and protocol responses; no specific desktop or product client is required.

@@ -125,16 +125,17 @@ docker-compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compos
 
 | Container path | Host path | Purpose |
 | --- | --- | --- |
-| `/srv/omnora/managed` | `deploy/aliyun-test/managed` | Managed mounts (always read-write in the container) |
+| `/srv/omnora/managed` | `deploy/aliyun-test/managed` | Reserved single `personal_default` mount, per-account personal directories, and personal trash |
 | `/mnt/omnora` | `deploy/aliyun-test/mounts` | Predeclared external mount root (read-write on this test box) |
 
-Register external mounts under `/mnt/omnora/...`, or managed mounts under `/srv/omnora/managed/...`. Do not point mounts at `/srv/omnora/data` or other paths that are not bind-mounted into the container.
+Register external common mounts only under `/mnt/omnora/...`. Never register `/srv/omnora/managed` or one of its account directories as a common mount; it is system-managed personal storage. Do not point mounts at `/srv/omnora/data` or other paths that are not bind-mounted into the container.
 
 ### Slot mounts (recommended NAS layout)
 
 The recommended external-mount layout binds each NAS folder to its own slot
 (independent mount point) under `/mnt/omnora` instead of mounting the whole
-predeclared root:
+predeclared root. The full design rationale, registration flow, and
+troubleshooting checklist live in [mount-slots.md](mount-slots.md):
 
 ```yaml
 volumes:
@@ -151,21 +152,24 @@ shown. Remove the whole-root bind (`./mounts:/mnt/omnora:rw`) when adopting
 this layout — with the whole root bound, slots are not independent mount
 points and are never treated as bound.
 
-Registering a mount against a slot creates a per-space subdirectory
-automatically (named by the space ID) and registers that subdirectory, so
-multiple spaces can share one slot. The slot itself must not be registered as
-a mount; registering it blocks every child path via the parent-child conflict
-check.
+Under the 2026-08-08 account-mount target model, registering a mount uses the
+selected slot or deeper directory itself as the mount root. Omnora must not
+create a per-space or other implicit business subdirectory. Each common mount
+has its own account grants, and overlapping parent/child roots remain invalid.
+The current runtime may still implement the older per-space behavior until the
+breaking migration is complete; see [mount-slots.md](mount-slots.md).
 
 Effective write access is still `Docker volume mode ∩ Omnora mount mode`. If you later switch the Compose bind back to `:ro`, existing `read_write` mounts will fail create/upload until the volume is remounted read-write.
 
 For reinstall or container recreation tests, keep `deploy/aliyun-test/config`,
 `deploy/aliyun-test/data`, `deploy/aliyun-test/managed`, and
 `deploy/aliyun-test/mounts` in place and mount them back to the same container
-paths. Existing files under registered managed and external mounts must remain
-browsable and downloadable without re-registering the mount. If a directory is
+paths. Existing files in account “My Files” and registered external common mounts must remain
+browsable and downloadable without replacing personal-directory mappings or re-registering the external mount. If a directory is
 replaced or mounted to a different container path, Omnora should mark that mount
-unavailable until an administrator confirms and re-verifies the intended source.
+unavailable until a governing administrator confirms and re-verifies the intended source.
+Any administrator may handle a normal mount; restricted and default personal
+mounts require the initial administrator.
 
 ## Guardrails
 

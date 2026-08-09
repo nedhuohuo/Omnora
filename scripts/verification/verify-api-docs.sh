@@ -48,6 +48,15 @@ grep -Fq 'protected:' "$OPENAPI" || fail "OpenAPI User schema must retain protec
 grep -Fq 'initial_admin_protected' "$OPENAPI" || fail "OpenAPI must document initial admin protection errors"
 grep -Fq 'mount_root_not_allowed' "$OPENAPI" || fail "OpenAPI must document mount root allowlist errors"
 grep -Fq 'mount_not_writable' "$OPENAPI" || fail "OpenAPI must document mount not writable errors"
+grep -Fq '  /member/content-sources:' "$OPENAPI" || fail "OpenAPI must describe member content sources"
+grep -Fq '  /member/files/children:' "$OPENAPI" || fail "OpenAPI must describe member file children"
+grep -Fq '"mounts:read"' "$OPENAPI" || fail "OpenAPI AI Token scopes must include mounts:read"
+if grep -Fq '    DirectoryBoundary:' "$OPENAPI"; then
+  fail "OpenAPI must not define the obsolete Space-scoped DirectoryBoundary"
+fi
+for source in all_account_content personal common_mount; do
+  grep -Fq "const: $source" "$OPENAPI" || fail "OpenAPI AI Token boundary union is missing source: $source"
+done
 pass "OpenAPI transport, transfer, security, and error contracts are present"
 
 GOCACHE=${GOCACHE:-/private/tmp/omnora-go-cache}
@@ -55,7 +64,7 @@ GOMODCACHE=${GOMODCACHE:-/private/tmp/omnora-go-modcache}
 export GOCACHE GOMODCACHE
 (
   cd "$ROOT"
-  go test ./internal/mcpapi -run '^TestDocumentationMatchesMCPContract$' -count=1
+  go test ./internal/mcpapi -run '^Test(DocumentationMatchesMCPContract|OpenAPIUsesAccountMountTokenContract)$' -count=1
 )
 pass "MCP catalogue and documentation contract test passed"
 

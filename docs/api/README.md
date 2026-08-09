@@ -1,8 +1,28 @@
 # Omnora REST API
 
+状态：账号—挂载模型的现行 REST 与 MCP 认证契约
+
 REST 的机器可读唯一手工契约是 [OpenAPI 3.1](../../openapi/omnora.v1.yaml)。运行时由
 `GET /openapi` 或 `GET /openapi/omnora.v1.yaml` 提供同一份 YAML；嵌入副本由
 `scripts/verification/sync-openapi-asset.sh` 生成，不能单独修改。
+
+## 账号—挂载契约
+
+现行模型移除 Space：
+
+- 普通共用挂载使用 `mountId + relativePath`；
+- “我的文件”使用当前账号绑定的虚拟个人根，客户端不能指定其他账号；
+- 收到的目录协作使用 `collaborationId + relativePath`；
+- AI Token 可选择动态覆盖当前账号个人目录和全部获权共用挂载，但收到的协作不能进入 Token boundary；
+- 文件访问、挂载发现和 Token scope 均直接基于账号与挂载授权；
+- `mounts.list` 只返回当前账号获权的共用挂载；
+- 受限挂载管理路由只对初始管理员可发现，普通管理员直接请求返回不泄露存在性的 `404`。
+- 普通管理员创建或重命名普通挂载时，候选资源与隐藏挂载或其他不可用条件冲突统一返回 `mount_unavailable`，不得返回冲突对象信息，并执行限速与审计；该主动占用探测是明确记录的残余侧信道。
+- 解除挂载要求精确名称确认，只删控制面且允许同路径以新挂载 ID 重新注册；旧授权不得恢复。
+
+REST 使用三个不可混用的资源族：账号作用域“我的文件”、`mountId` 作用域共用挂载、`collaborationId` 作用域收到的协作。客户端不得用可选 `mountId`、默认挂载 ID 或账号 ID 推断资源类型；个人资源永远绑定当前账号，协作资源每次重验接收账号和协作根。管理接口按挂载维护 `mount_grants`，只接受 `viewer/editor`，禁止为默认个人挂载创建授权；普通挂载由任一管理员治理，受限挂载仅初始管理员可发现和治理。
+
+允许 AI Token Bearer 的文件 REST 路由必须在 OpenAPI 中逐条白名单化，并复用与 MCP 相同的 scope 和资源边界；AI Token 不得进入账号、会话或管理员控制面。完整决策见[账号、挂载与内容授权设计](../superpowers/specs/2026-08-08-account-mount-access-design.md)。
 
 ## 路由与三种认证
 
@@ -16,10 +36,10 @@ OMNORA_ROUTE_REST_ENABLED=true
 | 凭证 | 放置位置 | 用途 | 失效条件 |
 | --- | --- | --- | --- |
 | 会话 Cookie | `omnora_session` | 浏览器和 `/api/v1` 资源 handler | 登出、轮换、账号禁用 |
-| AI Token | `Authorization: Bearer <AI_TOKEN>` | `/mcp` Streamable HTTP | 撤销、过期、账号/ACL/scope/边界变化 |
+| AI Token | `Authorization: Bearer <AI_TOKEN>` | `/mcp` Streamable HTTP | 撤销、过期、账号/挂载授权/scope/边界变化 |
 | Transfer Ticket | `Authorization: Bearer <publicId.secret>` | `/mcp/transfers/*` 字节传输 | 短期过期、关闭、对象/挂载/权限变化 |
 
-AI Token Bearer 不是受保护 REST 资源 Cookie 的替代品；受保护的 REST 资源 handler 当前要求会话 Cookie，公开分享/健康检查等入口按各自契约认证。
+AI Token Bearer 不是受保护 REST 资源 Cookie 的替代品；REST 资源 handler 当前要求会话 Cookie，公开分享/健康检查等入口按各自契约认证。
 Transfer Ticket 只允许传输路由使用，秘密禁止放在 query、fragment、日志或 Referer 中。
 
 ## 会话和 AI Token
@@ -34,33 +54,35 @@ curl -fsS -b /tmp/omnora.cookies \
   -H 'Content-Type: application/json' \
   -d '{
     "name":"mcp-reader",
-    "scopes":["spaces:read","files:list","files:metadata","files:text","files:download_ticket","search:read"],
-    "boundaries":[{"spaceId":"space-id","mountId":"mount-id","path":"docs"}],
+    "scopes":["mounts:read","files:list","files:metadata","files:text","files:download_ticket","search:read"],
+    "boundaries":[{"source":"all_account_content"}],
     "expiresAt":"2026-09-01T00:00:00Z"
   }' "$OMNORA_BASE_URL/api/v1/ai-tokens"
 ```
 
 AI Token scope 的完整枚举为：
-`spaces:read`、`files:list`、`files:metadata`、`files:text`、`files:download_ticket`、
+`mounts:read`、`files:list`、`files:metadata`、`files:text`、`files:download_ticket`、
 `search:read`、`uploads:create`、`files:write`、`files:trash`、`trash:read`、
 `files:restore`、`files:purge`、`shares:read`、`shares:create`、`shares:revoke`。
+Token boundary 的 `source` 只允许 `all_account_content`、`personal`、`common_mount`：
+`all_account_content` 动态覆盖当前账号个人目录和全部实时获权共用挂载，`personal` 可限制个人根内
+相对路径，`common_mount` 必须携带获权的 `mountId` 且可限制相对路径。收到的目录协作永远不能
+加入 AI Token boundary，也不能通过 MCP 访问或搜索。
 明文 secret 和 `bearerToken` 只在创建响应显示一次；成员只能管理自己的 Token，管理员只能
 查看元数据和撤销。
 
 ## 常用 REST 流程
 
-1. `GET /api/v1/spaces` 获取可见空间，随后列出挂载和目录。
+1. `GET /api/v1/member/content-sources` 获取“我的文件”和实时获权的共用挂载，随后按显式内容源列出目录。
 2. 使用元数据、搜索和受限文本接口浏览内容；路径始终是挂载内相对路径，不接受宿主绝对路径。
 3. 会话 Cookie 调用 `POST /api/v1/uploads`、`PUT /api/v1/uploads/{uploadId}/parts/{partNumber}`、
    `POST /api/v1/uploads/{uploadId}/complete` 和取消接口完成分片上传。
 4. 分享创建、撤销和访客换票使用独立 share 路径；fragment 秘密不进入服务器日志。
 
-写入、删除、回收站、跨挂载复制/移动和分享都按实时 ACL、挂载身份、只读模式、目录边界
-和对象状态检查。高风险 MCP 工具还需要每次 MRTR 确认；REST 管理空间删除也有服务端确认。
+写入、删除、回收站、跨挂载复制/移动和分享按实时内容授权、挂载身份、只读模式、目录边界
+和对象状态检查。高风险 MCP 工具还需要每次 MRTR 确认；REST 解除挂载也要求精确名称确认。
 
-外部挂载注册到预声明根的直接子路径（插槽）时，系统自动在该插槽下创建以空间 ID 命名的
-子目录并注册为挂载，多个空间可共享同一插槽；插槽本身不注册。插槽只在其为独立 bind
-mount（部署者已映射 NAS 文件夹）时出现在宿主目录建议中，未绑定的插槽不展示。
+挂载注册直接把管理员选中的外部目录登记为挂载根，不创建任何隐式业务子目录。插槽只在其为独立 bind mount 时出现在宿主目录建议中，未绑定插槽不展示。
 
 ## 错误、分页和传输
 

@@ -9,7 +9,7 @@ recreating the container must preserve both:
 If those paths are preserved, files under registered mounts remain readable and
 usable after reinstall. If a host directory is replaced, moved to a different
 container path, or mounted from a different filesystem identity, Omnora marks
-the mount unavailable until an administrator re-verifies it.
+the mount unavailable until an authorized governing administrator re-verifies it.
 
 ## Required Persistent Paths
 
@@ -19,7 +19,7 @@ For the default Compose deployment, preserve these host-side directories:
 | --- | --- | --- |
 | `/etc/omnora` | `deploy/config` | Yes |
 | `/var/lib/omnora` | `deploy/data` | Yes |
-| `/srv/omnora/managed` | `deploy/managed` | Yes |
+| `/srv/omnora/managed` | `deploy/managed` | Yes; reserved for the single `personal_default` mount, per-account personal directories, and personal trash |
 | `/mnt/omnora/...` | operator-provided NAS bind paths | Yes, same container path |
 
 Also preserve these secrets:
@@ -44,10 +44,12 @@ one-time bootstrap token.
 3. Start Compose with the same `deploy/config`, `deploy/data`, `deploy/managed`,
    and external NAS bind mounts.
 4. Confirm `/readyz` is ready.
-5. Browse an existing managed mount file.
+5. Sign in with an existing account and browse an existing file in “My Files”.
 6. Browse and download an existing external mount file.
-7. If a mount is unavailable, inspect the admin mount list and use re-verify
-   only after confirming the host directory is the intended original source.
+7. If a mount is unavailable, inspect the authorized governance view and use
+   re-verify only after confirming the host directory is the intended original
+   source. Any administrator may handle a normal mount; restricted and default
+   personal mounts require the initial administrator.
 
 If startup reports `persistent state check failed`, inspect the effective
 mounts before changing any application data:
@@ -59,19 +61,22 @@ docker inspect omnora --format '{{range .Mounts}}{{println .Source "->" .Destina
 The original config and data host directories must be mounted to
 `/etc/omnora` and `/var/lib/omnora` respectively.
 
-Do not reinitialize Omnora with an empty database if you expect previous spaces,
-mounts, ACLs, shares, Tokens, audit events, or upload sessions to remain.
+Do not reinitialize Omnora with an empty database if you expect previous
+accounts, personal-directory mappings, mounts, mount grants, collaborations,
+shares, Tokens, audit events, or upload sessions to remain. Space records only
+belong to the pre-migration schema and receive no compatibility guarantee.
 
 ## Verification Command Sketch
 
-Before reinstall, create a known file under a registered mount:
+Before reinstall, create a known file in an account personal directory or an external common mount:
 
 ```bash
 echo reinstall-check > /path/on/nas/reinstall-check.txt
 ```
 
-After reinstall, use the same account to browse/download the file from the same
-Omnora mount. The request should succeed without re-registering the mount.
+After reinstall, use the same account to browse/download the file from “My Files”
+or the same external common mount. The request should succeed without replacing
+the personal-directory mapping or re-registering the external mount.
 
 When recording release evidence, include the container path, host path, file
 name, request ID, and result.

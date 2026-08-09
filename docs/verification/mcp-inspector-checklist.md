@@ -1,5 +1,7 @@
 # MCP Inspector / 协议验收清单
 
+> **现行契约：** 账号—挂载模型，24 tools、15 scopes、8 个逐操作 MRTR 工具；不兼容旧 Space MCP。
+
 本清单只面向 MCP Inspector v2.1.0 Modern（Streamable HTTP）和仓库内协议测试，
 不绑定任何桌面或第三方客户端。现场验收应保存脱敏后的请求摘要、响应状态和工具目录，
 不得保存 AI Token、Transfer Ticket、确认 requestState 或分享 fragment。
@@ -19,12 +21,15 @@ Redacted evidence: <脱敏后的 Inspector/protocol 摘要>
 - [ ] Inspector 明确选择 Modern / Streamable HTTP，未静默降级到 legacy transport。
 - [ ] `initialize` 成功，协商协议版本为 `2026-07-28`。
 - [ ] 使用短期、最小 scope 的 AI Token；OAuth 授权配置显示为 **NOT IMPLEMENTED**。
-- [ ] `tools/list` 只返回该 Token 当前 scope 且属于 24-tool contract 的工具。
-- [ ] 没有可靠 form Elicitation 能力时，7 个高风险工具不会出现在目录中。
+- [ ] `tools/list` 只返回该 Token 当前 scope 且属于 24-tool contract 的工具；全 scope Token
+      恰好返回 24 个工具，包含 `files.update` 且不含旧 Space 工具；`mounts.list` 的 input schema
+      不接受任何字段。
+- [ ] 没有可靠 form Elicitation 能力时，8 个高风险工具不会出现在目录中。
 
 ## 代表性操作
 
-- [ ] `files.list` 或 `files.metadata` 成功，返回内容不含宿主机路径。
+- [ ] `files.list` 或 `files.metadata` 分别使用 `{source: "personal", path}` 和
+      `{source: "common_mount", mountId, path}` 成功，返回内容不含宿主机路径；未授权挂载不可发现。
 - [ ] `files.read_text` 成功，返回 typed structured content，且正文受大小上限约束。
 - [ ] `files.prepare_download` 返回短期 Transfer Ticket；通过 ticket HTTP GET 验证 `Range`、`ETag`、
       `If-Match`、`If-None-Match` 和 416 边界。
@@ -34,7 +39,7 @@ Redacted evidence: <脱敏后的 Inspector/protocol 摘要>
 ## 每次确认与拒绝
 
 - [ ] 逐项触发 `files.move`、`files.trash`、`trash.purge`、`trash.empty`、
-      `files.delete_permanently`、`shares.create`、`shares.revoke`，每次都出现 form MRTR 确认。
+      `files.delete_permanently`、`shares.create`、`shares.revoke`、`files.update`，每次都出现 form MRTR 确认。
 - [ ] 接受确认后 SDK/Inspector 完成 `input_required → elicitation → retry`，原始参数和对象指纹保持绑定。
 - [ ] 拒绝或取消不产生文件、回收站或分享状态变化。
 - [ ] 过期、重复提交、参数变化、对象变化、Token 撤销和并发重放均失败且不执行第二次变更。
@@ -44,7 +49,9 @@ Redacted evidence: <脱敏后的 Inspector/protocol 摘要>
 
 - [ ] 协议测试覆盖 `2025-11-25` 协商、parse error、invalid request、method not found、invalid params、
       malformed protocol headers、body limit、Origin/Host 拒绝、路由关闭和 stateless GET/DELETE 405。
-- [ ] Token 撤销、账号停用、ACL 降级、只读挂载和挂载 identity 漂移会使后续 MCP/transfer 请求立即失败。
+- [ ] Token boundary 只接受 `all_account_content`、`personal`、`common_mount`；收到的目录协作不能作为
+      locator、boundary、MCP 搜索或 Transfer Ticket 来源；Token 撤销、账号停用、挂载授权降级、
+      只读挂载和挂载 identity 漂移会使后续 MCP/transfer 请求立即失败。
 - [ ] REST 与 MCP 代表性读写/分享操作使用同一授权结果和应用服务。
 - [ ] `/mcp/transfers/*` 只接受 Authorization header，不接受 query、fragment 或 Referer 中的 ticket secret。
 

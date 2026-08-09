@@ -1,6 +1,8 @@
 # Shared Space Lifecycle Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: superseded.** Space 已从目标模型移除；本文仅保留为迁移前实现记录，不得继续执行。解除共用挂载以[账号、挂载与内容授权设计](../specs/2026-08-08-account-mount-access-design.md)为准。
+
+> Historical record only. The remaining steps are non-executable examples of the superseded implementation.
 
 **Goal:** Add administrator-only shared-space rename and permanent control-plane deletion while preserving all server-side files and excluding personal spaces.
 

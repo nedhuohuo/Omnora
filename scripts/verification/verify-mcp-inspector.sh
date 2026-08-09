@@ -46,12 +46,12 @@ const fs = require("fs");
 const file = process.argv[2];
 const expectedRaw = process.argv[3] || "";
 const known = new Set([
-  "spaces.list", "mounts.list", "files.list", "files.metadata", "files.search",
+  "mounts.list", "files.list", "files.metadata", "files.search",
   "files.read_text", "files.prepare_download", "directories.create",
   "files.prepare_upload", "uploads.status", "uploads.complete", "uploads.cancel",
   "files.rename", "files.copy", "files.move", "files.trash", "trash.list",
   "trash.restore", "trash.purge", "trash.empty", "files.delete_permanently",
-  "shares.list", "shares.create", "shares.revoke",
+  "shares.list", "shares.create", "shares.revoke", "files.update",
 ]);
 let payload;
 try { payload = JSON.parse(fs.readFileSync(file, "utf8")); } catch (_) {
@@ -65,6 +65,15 @@ if (!Array.isArray(tools) || tools.length < 1 || tools.length > 24) {
 for (const tool of tools) {
   if (!tool || typeof tool.name !== "string" || !known.has(tool.name)) {
     console.error("FAIL: Inspector returned a tool outside the 24-tool contract"); process.exit(1);
+  }
+}
+const mountsList = tools.find(tool => tool.name === "mounts.list");
+if (mountsList) {
+  const schema = mountsList.inputSchema || {};
+  const properties = schema.properties || {};
+  const required = schema.required || [];
+  if (Object.keys(properties).length !== 0 || required.length !== 0) {
+    console.error("FAIL: mounts.list must have an empty input schema"); process.exit(1);
   }
 }
 const expected = expectedRaw.split(",").map(s => s.trim()).filter(Boolean);
