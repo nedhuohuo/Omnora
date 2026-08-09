@@ -28,11 +28,15 @@ Also preserve these secrets:
 - Any deployment-specific route-group env settings
 - The operator vault entry for external mount source paths
 
-The entrypoint also writes the same non-secret instance marker to
-`/etc/omnora/.omnora-instance-id` and `/var/lib/omnora/.omnora-instance-id`.
-If either marker is missing or they disagree, startup stops instead of silently
-creating a new SQLite instance. Do not delete either marker to make the service
-start; verify that the original config and data directories are mounted back.
+The entrypoint writes the same non-secret instance marker to
+`/etc/omnora/.omnora-instance-id`, `/var/lib/omnora/.omnora-instance-id`, and
+`/srv/omnora/managed/.omnora-instance-id`. If config and data markers are
+missing or disagree, startup stops instead of silently creating a new SQLite
+instance. If the config and data markers match and the managed directory is
+empty, startup creates the managed marker for that empty volume. A non-empty
+managed directory without a matching marker is rejected; verify that the
+original managed directory is mounted before repairing its marker. Do not
+delete config or data markers to make the service start.
 
 Changing `OMNORA_INITIALIZATION_TOKEN` after initialization is safe; it is only a
 one-time bootstrap token.

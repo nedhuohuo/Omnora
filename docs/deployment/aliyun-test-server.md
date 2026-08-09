@@ -81,12 +81,14 @@ OMNORA_TOTP_ENCRYPTION_KEY
 
 Both values may be left blank on a new test deployment. The container entrypoint
 generates them and persists them in `aliyun-test/config/runtime.env`; preserve
-that file when recreating the container. It also writes matching instance
-markers to `aliyun-test/config/.omnora-instance-id` and
-`aliyun-test/data/.omnora-instance-id`; if those markers no longer match, the
-container stops so a new empty instance cannot be created accidentally. When
-restoring an existing data directory, keep using the original TOTP encryption
-key.
+that file when recreating the container. It writes matching instance markers to
+`aliyun-test/config/.omnora-instance-id`, `aliyun-test/data/.omnora-instance-id`,
+and `aliyun-test/managed/.omnora-instance-id`. When config and data markers
+match but the managed directory is empty, the entrypoint safely creates the
+managed marker during startup. A non-empty managed directory without its
+matching marker is rejected so an unrelated personal-storage directory cannot
+be silently adopted. When restoring an existing data directory, keep using the
+original TOTP encryption key.
 
 Start the test server (this host uses Docker Compose 1.29.2, so prefer `docker-compose`):
 

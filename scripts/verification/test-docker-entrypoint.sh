@@ -563,12 +563,16 @@ printf '%s\n' "$existing_id" > "$missing_managed_config/.omnora-instance-id"
 printf '%s\n' "$existing_id" > "$missing_managed_data/.omnora-instance-id"
 printf 'OMNORA_INITIALIZATION_TOKEN=existing-init-token\nOMNORA_TOTP_ENCRYPTION_KEY=existing-totp-key\nOMNORA_AUDIT_HMAC_KEY=existing-audit-key\n' > "$missing_managed_config/runtime.env"
 : > "$missing_managed_data/omnora.db"
-if run_entrypoint "$missing_managed_config" "$missing_managed_data" "$missing_managed_root" >/dev/null 2>&1; then
-	printf 'FAIL: existing config/data without a managed marker was accepted\n' >&2
+if ! run_entrypoint "$missing_managed_config" "$missing_managed_data" "$missing_managed_root" >/dev/null 2>&1; then
+	printf 'FAIL: empty managed volume with matching config/data markers was not adopted\n' >&2
 	exit 1
 fi
-[ ! -e "$missing_managed_root/.omnora-instance-id" ] || {
-	printf 'FAIL: entrypoint silently adopted a managed volume for an existing instance\n' >&2
+[ -f "$missing_managed_root/.omnora-instance-id" ] || {
+	printf 'FAIL: entrypoint did not create the managed instance marker for an empty volume\n' >&2
+	exit 1
+}
+[ "$(sed -n '1p' "$missing_managed_root/.omnora-instance-id")" = "$existing_id" ] || {
+	printf 'FAIL: managed marker did not reuse the existing instance identity\n' >&2
 	exit 1
 }
 

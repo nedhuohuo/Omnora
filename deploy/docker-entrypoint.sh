@@ -71,6 +71,8 @@ read_instance_file() {
 	printf '%s' "$marker_id"
 }
 
+managed_marker_needs_bootstrap=false
+
 validate_persistent_state() {
 	persistent_instance_exists=false
 	for persistent_dir in "$CONFIG_DIR" "$DATA_DIR" "$MANAGED_DIR"; do
@@ -91,9 +93,17 @@ validate_persistent_state() {
 	[ "$persistent_instance_exists" = true ] || return 0
 	config_instance_id="$(read_instance_file config "$CONFIG_INSTANCE_FILE")"
 	data_instance_id="$(read_instance_file data "$DATA_INSTANCE_FILE")"
-	managed_instance_id="$(read_instance_file managed "$MANAGED_INSTANCE_FILE")"
-	[ "$config_instance_id" = "$data_instance_id" ] && [ "$config_instance_id" = "$managed_instance_id" ] ||
-		fail_persistence_check "config, data, and managed volumes belong to different Omnora instances"
+	[ "$config_instance_id" = "$data_instance_id" ] ||
+		fail_persistence_check "config and data volumes belong to different Omnora instances"
+	if path_exists "$MANAGED_INSTANCE_FILE"; then
+		managed_instance_id="$(read_instance_file managed "$MANAGED_INSTANCE_FILE")"
+		[ "$config_instance_id" = "$managed_instance_id" ] ||
+			fail_persistence_check "config, data, and managed volumes belong to different Omnora instances"
+	elif path_exists "$MANAGED_DIR" && directory_has_entries "$MANAGED_DIR"; then
+		fail_persistence_check "managed instance marker is missing while the managed volume is non-empty; verify the original managed volume and repair its marker only after confirming the config/data instance identity"
+	else
+		managed_marker_needs_bootstrap=true
+	fi
 	[ -f "$DB_PATH" ] && [ ! -L "$DB_PATH" ] ||
 		fail_persistence_check "database is missing or is not a regular file; check the data bind mount before redeploying"
 	INSTANCE_ID="$config_instance_id"
@@ -163,6 +173,11 @@ trap 'cleanup_instance_tmp' EXIT
 
 instance_markers_created=false
 validate_persistent_state
+
+if [ "$managed_marker_needs_bootstrap" = true ]; then
+	umask 077
+	write_instance_file "$MANAGED_INSTANCE_FILE"
+fi
 
 if [ "$persistent_instance_exists" = true ]; then
 	:
