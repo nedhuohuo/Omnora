@@ -51,6 +51,9 @@ services:
       # them in ./config/runtime.env.
       OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:-}"
       OMNORA_INITIALIZATION_TOKEN_TTL: "${OMNORA_INITIALIZATION_TOKEN_TTL:-30m}"
+      # High-risk opt-in: logs the full token only while the database confirms
+      # that initialization is still available. Keep false by default.
+      OMNORA_LOG_INITIALIZATION_TOKEN: "${OMNORA_LOG_INITIALIZATION_TOKEN:-false}"
       OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:-}"
       OMNORA_AUDIT_HMAC_KEY: "${OMNORA_AUDIT_HMAC_KEY:-}"
       OMNORA_MANAGED_STORAGE_DIR: /srv/omnora/managed

@@ -81,9 +81,8 @@ OMNORA_TOTP_ENCRYPTION_KEY
 
 Both values may be left blank on a new test deployment. The container entrypoint
 generates them and persists them in `aliyun-test/config/runtime.env`; preserve
-that file when recreating the container. For security, the initialization token
-is deliberately not printed in `docker logs`. Read it only on the server when
-performing first setup:
+that file when recreating the container. The recommended retrieval method is to
+read that protected file only on the server:
 
 ```bash
 sed -n 's/^OMNORA_INITIALIZATION_TOKEN=//p' aliyun-test/config/runtime.env
@@ -91,6 +90,26 @@ sed -n 's/^OMNORA_INITIALIZATION_TOKEN=//p' aliyun-test/config/runtime.env
 docker exec omnora-aliyun-test sh -c \
   'sed -n "s/^OMNORA_INITIALIZATION_TOKEN=//p" /etc/omnora/runtime.env'
 ```
+
+If the deployment console cannot read the protected file, explicitly set this
+high-risk compatibility switch in `aliyun-test.env` before recreating the
+container:
+
+```text
+OMNORA_LOG_INITIALIZATION_TOKEN=true
+```
+
+只有 `OMNORA_LOG_INITIALIZATION_TOKEN=true` 且数据库确认尚未初始化时，
+the backend writes the complete token once per startup to the WARN log field
+`initialization_token`. The default must remain `false`. A missing database,
+empty token, failed initialization check, or initialized database never logs the
+token. TOTP encryption and audit HMAC keys are never logged under any setting.
+
+The full token will remain in Docker log storage, rotated logs, and any external
+log collector. After first setup, restore the setting to `false`, recreate the
+container, and remove retained token-bearing logs according to the log system's
+retention policy. This opt-in does not change `runtime.env` persistence or
+permissions.
 
 It writes matching instance markers to
 `aliyun-test/config/.omnora-instance-id`, `aliyun-test/data/.omnora-instance-id`,

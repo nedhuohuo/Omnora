@@ -66,6 +66,10 @@ grep -Fq 'OMNORA_LOG_FORMAT' "$COMPOSE" ||
   fail "compose file must expose log format configuration"
 grep -Fq 'OMNORA_LOG_LEVEL' "$COMPOSE" ||
   fail "compose file must expose log level configuration"
+grep -Fq 'OMNORA_LOG_INITIALIZATION_TOKEN: "${OMNORA_LOG_INITIALIZATION_TOKEN:-false}"' "$COMPOSE" ||
+  fail "base compose must default initialization token logging to false"
+grep -Fq 'OMNORA_LOG_INITIALIZATION_TOKEN: "${OMNORA_LOG_INITIALIZATION_TOKEN:-false}"' "$NAS_COMPOSE" ||
+  fail "NAS compose must default initialization token logging to false"
 grep -Fq 'driver: local' "$COMPOSE" ||
   fail "compose file must configure bounded local container logs"
 grep -Fq 'COPY --from=web-build' "$DOCKERFILE" ||
@@ -74,6 +78,10 @@ grep -Fq 'OMNORA_TEST_SERVER_SSH_PORT=22' "$ALIYUN_TEST_ENV_EXAMPLE" ||
   fail "Aliyun test env example must use the current SSH port"
 grep -Fq 'OMNORA_LOG_FORMAT=json' "$ALIYUN_TEST_ENV_EXAMPLE" ||
   fail "Aliyun test env example must default to JSON logs"
+grep -Fq 'OMNORA_LOG_INITIALIZATION_TOKEN=false' "$ALIYUN_TEST_ENV_EXAMPLE" ||
+  fail "Aliyun env example must default initialization token logging to false"
+grep -Fq '数据库确认尚未初始化' "$ALIYUN_TEST_DOC" ||
+  fail "Aliyun deployment doc must require database confirmation before token logging"
 pass "deployment image and current Aliyun SSH settings are wired"
 
 "$ENTRYPOINT_TEST"
