@@ -3,21 +3,20 @@ import {
   type AiTokenScope,
   type AiTokenBoundary,
   type AiTokenListItem,
+  type MemberContentSourcesPayload,
   ApiError,
   createAiToken,
   deleteAiToken,
   getBootstrap,
   isReauthenticationCanceled,
   listAiTokens,
-  listMounts,
-  listSpaces,
+  listMemberContentSources,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
 import { useRecentReauth } from './RecentReauthProvider';
-import type { MemberMount, MemberSpace } from './types';
 import { createClientId } from './clientId';
 import { copyText } from './clipboard';
-import { joinReadableLabels, readableLabel } from './displayLabels';
+import { readableLabel } from './displayLabels';
 import McpDocsBlock from './McpDocsBlock';
 import {
   MCP_PRESETS,
@@ -56,22 +55,43 @@ function tokenStatusLabel(status: string | undefined, text: LocaleText) {
   return status ? (labels[status] ?? status) : text.tokenStatusActive;
 }
 
-type BoundaryDraft = { key: string; spaceId: string; mountId: string; path: string };
+export type BoundaryDraft = {
+  key: string;
+  source: AiTokenBoundary['source'];
+  mountId: string;
+  path: string;
+};
 
-function boundarySummary(boundary: AiTokenBoundary, spaces: MemberSpace[], mountsBySpace: Record<string, MemberMount[]>) {
-  const path = boundary.path && boundary.path !== '.' ? boundary.path : '/';
-  const spaceName = readableLabel(boundary.spaceName) || spaces.find((space) => space.id === boundary.spaceId)?.name;
-  const mountName = readableLabel(boundary.mountName) || mountsBySpace[boundary.spaceId]?.find((mount) => mount.id === boundary.mountId)?.name;
-  const location = joinReadableLabels([spaceName, mountName]);
-  return location ? `${location} · ${path}` : path;
+export function boundaryPayload(boundary: BoundaryDraft): AiTokenBoundary {
+  const path = boundary.path.trim();
+  if (boundary.source === 'all_account_content') return { source: 'all_account_content' };
+  if (boundary.source === 'personal') {
+    return { source: 'personal', ...(path ? { path } : {}) };
+  }
+  return { source: 'common_mount', mountId: boundary.mountId, ...(path ? { path } : {}) };
+}
+
+export function boundarySummary(
+  boundary: AiTokenBoundary,
+  sources: MemberContentSourcesPayload | null,
+  allAccountContentLabel: string,
+) {
+  if (boundary.source === 'all_account_content') return allAccountContentLabel;
+  const location = boundary.source === 'personal'
+    ? (sources?.personal.label ?? '')
+    : (readableLabel(boundary.mountName)
+      || sources?.commonMounts.find((mount) => mount.mountId === boundary.mountId)?.displayName
+      || '');
+  const path = boundary.path && boundary.path !== '.' ? boundary.path : '';
+  if (location && path) return `${location} · ${path}`;
+  return location || path || '/';
 }
 
 export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
   const { runSensitive } = useRecentReauth();
   const [tokens, setTokens] = useState<AiTokenListItem[]>([]);
-  const [spaces, setSpaces] = useState<MemberSpace[]>([]);
-  const [mountsBySpace, setMountsBySpace] = useState<Record<string, MemberMount[]>>({});
+  const [contentSources, setContentSources] = useState<MemberContentSourcesPayload | null>(null);
   const [name, setName] = useState('');
   const [preset, setPreset] = useState<Exclude<McpPreset, 'permanentDelete'>>('readOnly');
   const [permanentDelete, setPermanentDelete] = useState(false);
@@ -92,23 +112,15 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setLoading(true);
     setError('');
     try {
-      const [tokenResponse, spaceResponse, bootstrapResponse] = await Promise.all([listAiTokens(), listSpaces(), getBootstrap()]);
+      const [tokenResponse, sourceResponse, bootstrapResponse] = await Promise.all([
+        listAiTokens(),
+        listMemberContentSources(),
+        getBootstrap(),
+      ]);
       const nextTokens = tokenResponse.items ?? [];
       setTokens(nextTokens);
-      setSpaces(spaceResponse.items);
+      setContentSources(sourceResponse);
       setBootstrap(bootstrapResponse);
-      const tokenSpaceIds = Array.from(new Set(nextTokens.flatMap((token) => (token.boundaries ?? []).map((boundary) => boundary.spaceId)).filter(Boolean)));
-      if (tokenSpaceIds.length > 0) {
-        const mountEntries = await Promise.all(tokenSpaceIds.map(async (spaceId) => {
-          try {
-            const response = await listMounts(spaceId);
-            return [spaceId, response.items] as const;
-          } catch {
-            return [spaceId, []] as const;
-          }
-        }));
-        setMountsBySpace((current) => ({ ...current, ...Object.fromEntries(mountEntries) }));
-      }
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -121,8 +133,9 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
   }, [load]);
 
   function addBoundary() {
-    const firstSpace = spaces[0]?.id ?? '';
-    setBoundaries((current) => [...current, { key: createClientId(), spaceId: firstSpace, mountId: '', path: '' }]);
+    setBoundaries((current) => [...current, {
+      key: createClientId(), source: 'all_account_content', mountId: '', path: '',
+    }]);
   }
 
   function removeBoundary(key: string) {
@@ -132,16 +145,6 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
   function updateBoundary(key: string, patch: Partial<BoundaryDraft>) {
     setBoundaries((current) => current.map((boundary) => (boundary.key === key ? { ...boundary, ...patch } : boundary)));
   }
-
-  useEffect(() => {
-    boundaries.forEach((boundary) => {
-      if (boundary.spaceId && !mountsBySpace[boundary.spaceId]) {
-        void listMounts(boundary.spaceId).then((response) => {
-          setMountsBySpace((current) => ({ ...current, [boundary.spaceId]: response.items }));
-        }).catch(() => undefined);
-      }
-    });
-  }, [boundaries, mountsBySpace]);
 
   function resetForm() {
     setName('');
@@ -157,7 +160,9 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setCreating(true);
     setError('');
     try {
-      const validBoundaries = boundaries.filter((boundary) => boundary.spaceId && boundary.mountId);
+      const validBoundaries = boundaries.filter((boundary) => (
+        boundary.source !== 'common_mount' || Boolean(boundary.mountId)
+      ));
       if (validBoundaries.length === 0) {
         setError(text.tokenBoundaryRequired);
         return;
@@ -169,11 +174,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
       const result = await runSensitive(() => createAiToken({
         name: name.trim(),
         scopes,
-        boundaries: validBoundaries.map((boundary) => ({
-          spaceId: boundary.spaceId,
-          mountId: boundary.mountId,
-          path: boundary.path.trim() || '.',
-        })),
+        boundaries: validBoundaries.map(boundaryPayload),
         // An empty expiry means the token never expires.
         ...(expiresAt ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
       }));
@@ -240,7 +241,9 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
             <tr key={token.id}>
               <td>{token.name}</td>
               <td>{(token.scopes ?? []).join(', ') || '--'}</td>
-              <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => boundarySummary(boundary, spaces, mountsBySpace)).join('; ')}</td>
+              <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => (
+                boundarySummary(boundary, contentSources, text.tokenBoundaryAllAccountContent)
+              )).join('; ')}</td>
               <td>{formatDate(token.expiresAt, locale, text.tokenNeverExpires)}</td>
               <td>{formatDate(token.lastUsedAt, locale, '--')}</td>
               <td>{tokenStatusLabel(token.status, text)}</td>
@@ -276,15 +279,24 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
             <div className="member-admin-form-wide member-token-boundaries">
               {boundaries.map((boundary) => (
                 <div className="member-token-boundary-row" key={boundary.key}>
-                  <select value={boundary.spaceId} onChange={(event) => updateBoundary(boundary.key, { spaceId: event.target.value, mountId: '' })}>
-                    <option value="" disabled>{text.tokenBoundarySpace}</option>
-                    {spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}
+                  <select value={boundary.source} onChange={(event) => updateBoundary(boundary.key, {
+                    source: event.target.value as BoundaryDraft['source'], mountId: '', path: '',
+                  })}>
+                    <option value="all_account_content">{text.tokenBoundaryAllAccountContent}</option>
+                    <option value="personal">{text.tokenBoundaryPersonal}</option>
+                    <option value="common_mount">{text.tokenBoundaryCommonMount}</option>
                   </select>
-                  <select value={boundary.mountId} onChange={(event) => updateBoundary(boundary.key, { mountId: event.target.value })}>
-                    <option value="" disabled>{text.tokenBoundaryMount}</option>
-                    {(mountsBySpace[boundary.spaceId] ?? []).map((mount) => <option key={mount.id} value={mount.id}>{mount.name}</option>)}
-                  </select>
-                  <input value={boundary.path} onChange={(event) => updateBoundary(boundary.key, { path: event.target.value })} placeholder={text.tokenBoundaryPath} />
+                  {boundary.source === 'common_mount' && (
+                    <select value={boundary.mountId} onChange={(event) => updateBoundary(boundary.key, { mountId: event.target.value })}>
+                      <option value="" disabled>{text.tokenBoundaryMount}</option>
+                      {(contentSources?.commonMounts ?? []).map((mount) => (
+                        <option key={mount.mountId} value={mount.mountId}>{mount.displayName}</option>
+                      ))}
+                    </select>
+                  )}
+                  {boundary.source !== 'all_account_content' && (
+                    <input value={boundary.path} onChange={(event) => updateBoundary(boundary.key, { path: event.target.value })} placeholder={text.tokenBoundaryPath} />
+                  )}
                   <button type="button" onClick={() => removeBoundary(boundary.key)} aria-label={text.tokenBoundaryRemove} title={text.tokenBoundaryRemove}>×</button>
                 </div>
               ))}

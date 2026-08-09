@@ -69,6 +69,56 @@ export type DirectoryChildrenPayload = {
   nextCursor?: string;
 };
 
+export type PersonalContentLocator = {
+  source: 'personal';
+  path: string;
+};
+
+export type CommonMountContentLocator = {
+  source: 'common_mount';
+  mountId: string;
+  path: string;
+};
+
+export type CollaborationContentLocator = {
+  source: 'collaboration';
+  collaborationId: string;
+  path: string;
+};
+
+export type MemberContentLocator =
+  | PersonalContentLocator
+  | CommonMountContentLocator
+  | CollaborationContentLocator;
+
+export type MemberContentSourcesPayload = {
+  personal: {
+    source: 'personal';
+    label: string;
+  };
+  commonMounts: Array<{
+    source: 'common_mount';
+    mountId: string;
+    displayName: string;
+    permission: 'viewer' | 'editor';
+    mode: 'read_only' | 'read_write';
+  }>;
+};
+
+export type MemberCollaboration = {
+  id: string;
+  displayName?: string;
+  path?: string;
+  ownerName?: string;
+  recipientName?: string;
+  permission: 'viewer' | 'editor';
+  status?: string;
+};
+
+export type MemberCollaborationsPayload = {
+  items: MemberCollaboration[];
+};
+
 export type CreateDirectoryPayload = {
   parentPath: string;
   name: string;
@@ -97,7 +147,7 @@ export type CreateShareResponse = {
 };
 
 export type AiTokenScope =
-  | 'spaces:read'
+  | 'mounts:read'
   | 'files:list'
   | 'files:metadata'
   | 'files:text'
@@ -116,11 +166,7 @@ export type AiTokenScope =
 export type CreateAiTokenPayload = {
   name: string;
   scopes: AiTokenScope[];
-  boundaries: Array<{
-    spaceId: string;
-    mountId: string;
-    path: string;
-  }>;
+  boundaries: AiTokenBoundary[];
   /** Omit for a token that never expires. */
   expiresAt?: string;
 };
@@ -277,13 +323,23 @@ export type SharePayload = {
   status: ShareStatus;
 };
 
-export type AiTokenBoundary = {
-  spaceId: string;
-  spaceName?: string;
-  mountId: string;
-  mountName?: string;
-  path: string;
-};
+export type AiTokenBoundary =
+  | {
+    source: 'all_account_content';
+    mountId?: never;
+    path?: never;
+  }
+  | {
+    source: 'personal';
+    mountId?: never;
+    path?: string;
+  }
+  | {
+    source: 'common_mount';
+    mountId: string;
+    mountName?: string;
+    path?: string;
+  };
 
 export type AiTokenStatus = 'active' | 'expired' | 'revoked';
 
@@ -316,6 +372,7 @@ export type AccountPayload = {
 export type UpdatePasswordPayload = {
   currentPassword: string;
   newPassword: string;
+  totpCode?: string;
   revokeTokens?: boolean;
   revokeShares?: boolean;
 };
@@ -372,7 +429,7 @@ export type SharePortalChildrenPayload = {
 
 export type AdminOverviewPayload = {
   accounts?: Record<string, number>;
-  spaces?: number;
+  commonMounts?: number;
   mountsByHealth?: Record<string, number>;
   jobsByStatus?: Record<string, number>;
   routeGroups?: AdminRouteGroupItem[];
@@ -665,6 +722,24 @@ export function listDirectoryChildren(spaceId: string, mountId: string, path: st
     `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/children${suffix}`,
     { signal },
   );
+}
+
+export function listMemberContentSources(signal?: AbortSignal) {
+  return requestJson<MemberContentSourcesPayload>('/api/v1/member/content-sources', { signal });
+}
+
+export function listMemberDirectoryChildren(locator: MemberContentLocator, signal?: AbortSignal) {
+  const params = new URLSearchParams();
+  params.set('source', locator.source);
+  params.set('path', locator.path);
+  if (locator.source === 'common_mount') params.set('mountId', locator.mountId);
+  if (locator.source === 'collaboration') params.set('collaborationId', locator.collaborationId);
+  return requestJson<DirectoryChildrenPayload>(`/api/v1/member/files/children?${params.toString()}`, { signal });
+}
+
+export function listMemberCollaborations(direction: 'incoming' | 'outgoing', signal?: AbortSignal) {
+  const params = new URLSearchParams({ direction });
+  return requestJson<MemberCollaborationsPayload>(`/api/v1/member/collaborations?${params.toString()}`, { signal });
 }
 
 export function listSpaces(signal?: AbortSignal) {

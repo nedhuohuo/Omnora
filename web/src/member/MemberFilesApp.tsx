@@ -40,6 +40,9 @@ import MemberSharesPanel, { ShareCreateModal, ShareCreatedResult } from './Membe
 import MemberTokensPanel from './MemberTokensPanel';
 import MemberAccountPanel from './MemberAccountPanel';
 import MemberDocsPanel from './MemberDocsPanel';
+import MemberSpaceDirectory from './MemberSpaceDirectory';
+import MemberStorageWorkspace from './MemberStorageWorkspace';
+import MemberContentNavigation from './MemberContentNavigation';
 import MarkdownPreview from './MarkdownPreview';
 import FileTypeIcon from './FileTypeIcon';
 import { applyThemePreference } from './theme';
@@ -50,9 +53,17 @@ import { resumedUploadProgress, uploadStorageKey } from './uploadQueue';
 import { createClientId } from './clientId';
 import { useLocale } from './useLocale';
 import { readableLabel } from './displayLabels';
+import {
+  categoryForSpace,
+  categoryForTab,
+  memberSpaceTabs,
+  tabForCategory,
+  type MemberSpaceCategory,
+  type MemberSpaceTab,
+} from './spaceNavigation';
 import './member-files.css';
 
-type MemberTab = 'files' | 'trash' | 'shares' | 'tokens' | 'docs' | 'account';
+type MemberTab = MemberSpaceTab | 'files' | 'collaborations' | 'trash' | 'shares' | 'tokens' | 'docs' | 'account';
 type AdminNavGroup = 'overview' | 'identity-space' | 'storage-search' | 'access-security' | 'backups';
 type AdminNavItem = { id: AdminTab; label: string };
 type AdminNavGroupItem = { id: AdminNavGroup; label: string; tabs: AdminNavItem[] };
@@ -190,6 +201,14 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const pendingDirectoryPathRef = useRef<string | null>(null);
 
   const activeSpace = useMemo(() => spaces.find((space) => space.id === activeSpaceId) ?? null, [activeSpaceId, spaces]);
+  const activeSpaceTab = activeTab === 'personal-spaces' || activeTab === 'team-spaces' ? activeTab : null;
+  const activeCategory = activeSpaceTab
+    ? categoryForTab(activeSpaceTab)
+    : activeSpace
+      ? categoryForSpace(activeSpace)
+      : null;
+  const showingSpaceDirectory = activeSpaceTab !== null && activeSpace === null;
+  const showingSpaceFiles = activeSpaceTab !== null && activeSpace !== null;
   const activeMount = useMemo(() => mounts.find((mount) => mount.id === activeMountId) ?? null, [activeMountId, mounts]);
   const activeMountSupportsTrash = mountSupportsTrash(activeMount);
   const mountUnavailable = activeMount?.health === 'unavailable' || activeMount?.health === 'disabled';
@@ -219,7 +238,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     try {
       const response = await listSpaces();
       setSpaces(response.items);
-      setActiveSpaceId((current) => response.items.some((space) => space.id === current) ? current : (response.items[0]?.id ?? ''));
+      setActiveSpaceId((current) => response.items.some((space) => space.id === current && categoryForSpace(space) !== null) ? current : '');
     } catch (caught) {
       setError(describeError(caught));
       if (caught instanceof ApiError && caught.status === 401) setSessionState('signed-out');
@@ -228,23 +247,37 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     }
   }, []);
 
-  function selectSpace(spaceId: string) {
-    setActiveSpaceId(spaceId);
-    setActiveTab('files');
+  function clearSpaceBrowserState() {
+    setActiveSpaceId('');
     setMounts([]);
     setActiveMountId('');
     setTrashItems([]);
     setEntries([]);
     setRelativePath('.');
+    setSearchQuery('');
     setSearchResults(null);
     setSearchNextCursor('');
     setError('');
   }
 
+  function openSpaceCategory(category: MemberSpaceCategory) {
+    setActiveTab(tabForCategory(category));
+    clearSpaceBrowserState();
+  }
+
+  function selectSpace(space: MemberSpace) {
+    const category = categoryForSpace(space);
+    if (!category) return;
+    clearSpaceBrowserState();
+    setActiveTab(tabForCategory(category));
+    setActiveSpaceId(space.id);
+  }
+
   function selectMount(mount: MemberMount) {
     setActiveMountId(mount.id);
     if (!mountSupportsTrash(mount)) {
-      setActiveTab('files');
+      const category = activeSpace ? categoryForSpace(activeSpace) : null;
+      if (category) setActiveTab(tabForCategory(category));
       setTrashItems([]);
       setError('');
     }
@@ -286,7 +319,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
         setIsAdmin(session.isAdmin === true);
         const nextState = stateForSession(session);
         setSessionState(nextState);
-        if (nextState === 'ready') {
+        if (nextState === 'ready' && entry === 'admin') {
           await loadSpaces();
         }
       } catch {
@@ -299,7 +332,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
         }
       }
     })();
-  }, [loadSpaces]);
+  }, [entry, loadSpaces]);
 
   useEffect(() => {
     if (!activeSpaceId || sessionState !== 'ready') return;
@@ -335,13 +368,15 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   useEffect(() => {
     if (activeTab !== 'trash') return;
     if (!activeMountSupportsTrash) {
-      setActiveTab('files');
+      const category = activeSpace ? categoryForSpace(activeSpace) : null;
+      setActiveTab(category ? tabForCategory(category) : 'personal-spaces');
+      if (!category) setActiveSpaceId('');
       setTrashItems([]);
       setError('');
       return;
     }
     if (sessionState === 'ready') void refreshTrash();
-  }, [activeMountSupportsTrash, activeTab, refreshTrash, sessionState]);
+  }, [activeMountSupportsTrash, activeSpace, activeTab, refreshTrash, sessionState]);
 
   useEffect(() => {
     if (!operationTarget || !destinationSpaceId) {
@@ -931,7 +966,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const deleteTargetPolicy = mountDeletePolicy(deleteTargetMount);
   const adminNavigation: AdminNavGroupItem[] = [
     { id: 'overview', label: text.adminOverview, tabs: [{ id: 'overview', label: text.adminOverview }] },
-    { id: 'identity-space', label: text.adminIdentitySpace, tabs: [{ id: 'users', label: text.adminUsers }, { id: 'spaces', label: text.adminSpaces }] },
+    { id: 'identity-space', label: text.adminIdentitySpace, tabs: [{ id: 'users', label: text.adminUsers }] },
     { id: 'storage-search', label: text.adminStorageSearch, tabs: [{ id: 'mounts', label: text.adminMounts }, { id: 'index-jobs', label: text.adminIndexJobs }] },
     { id: 'access-security', label: text.adminAccessSecurity, tabs: [{ id: 'route-groups', label: text.adminRouteGroups }, { id: 'share-governance', label: text.adminShareGovernance }, { id: 'token-governance', label: text.adminTokenGovernance }, { id: 'audit', label: text.adminAudit }] },
     { id: 'backups', label: text.adminBackups, tabs: [{ id: 'backups', label: text.adminBackups }] },
@@ -944,7 +979,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     <main className="member-app">
       <header className="member-topbar">
         <div className="member-brand"><span>O</span>Omnora</div>
-        {activeTab === 'files' && <form className="member-search" onSubmit={onSearch}><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder={text.searchPlaceholder} /><button type="submit">{text.search}</button></form>}
+        {showingSpaceFiles && <form className="member-search" onSubmit={onSearch}><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder={text.searchPlaceholder} /><button type="submit">{text.search}</button></form>}
         <div className="member-top-actions"><div className="member-language" aria-label={text.language}><button type="button" onClick={() => setLocale('zh-CN')} aria-pressed={locale === 'zh-CN'}>中文</button><button type="button" onClick={() => setLocale('en-US')} aria-pressed={locale === 'en-US'}>EN</button></div><button className="member-account" type="button" onClick={onLogout}>{text.signOut}</button></div>
       </header>
 
@@ -956,15 +991,14 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             ))}
           </nav>}
           {entry === 'member' && <nav aria-label="Member workspace">
-            <button className={`member-nav ${activeTab === 'files' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('files')}>{text.files}</button>
+            <MemberContentNavigation locale={locale} active={activeTab === 'files' || activeTab === 'collaborations' ? activeTab : null} onSelect={setActiveTab} />
             {activeMountSupportsTrash && <button className={`member-nav ${activeTab === 'trash' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('trash')}>{text.recycleBin}</button>}
             <button className={`member-nav ${activeTab === 'shares' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('shares')}>{text.navShares}</button>
             <button className={`member-nav ${activeTab === 'tokens' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('tokens')}>{text.navTokens}</button>
             <button className={`member-nav ${activeTab === 'docs' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('docs')}>{text.navDocs}</button>
             <button className={`member-nav ${activeTab === 'account' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('account')}>{text.account}</button>
           </nav>}
-          {(activeTab === 'files' || activeTab === 'trash') && <><div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => selectSpace(space.id)}>{space.name}<small>{space.role}</small></button>)}</div>
-          <div className="member-sidebar-section"><p>{text.mounts}</p>{mounts.map((mount) => <button className={`member-mount ${mount.id === activeMountId ? 'selected' : ''}`} key={mount.id} type="button" onClick={() => selectMount(mount)}><span>{mount.name}</span><small>{mount.health === 'unavailable' ? text.statusUnavailable : mount.mode === 'read-only' ? text.readOnly : text.readWrite}</small></button>)}</div></>}
+          {entry === 'member' && activeSpace && (activeSpaceTab !== null || activeTab === 'trash') && <div className="member-sidebar-section"><p>{text.mounts}</p>{mounts.map((mount) => <button className={`member-mount ${mount.id === activeMountId ? 'selected' : ''}`} key={mount.id} type="button" onClick={() => selectMount(mount)}><span>{mount.name}</span><small>{mount.health === 'unavailable' ? text.statusUnavailable : mount.mode === 'read-only' ? text.readOnly : text.readWrite}</small></button>)}</div>}
         </aside>
 
         <section className="member-content">
@@ -984,9 +1018,12 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
               ))}
             </div>
           )}
-          {activeTab === 'files' ? <div className="member-page-flow">
-          <div className="member-crumbs"><button type="button" onClick={() => openDirectory('.')}>{activeSpace?.name ?? text.myFiles}</button>{crumbItems.map((part, index) => <span key={`${part}-${index}`}><b>/</b><button type="button" onClick={() => openDirectory(crumbItems.slice(0, index + 1).join('/'))}>{part}</button></span>)}</div>
-          <div className="member-heading"><div><h1>{searchResults === null ? text.myFiles : `${text.search}: ${searchQuery}`}</h1><p>{activeMount ? `${activeMount.name} · ${mountUnavailable ? text.statusUnavailable : readOnly ? text.readOnly : text.readWrite}` : text.noMount}</p></div><div className="member-view-toggle"><button type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}>{text.list}</button><button type="button" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}>{text.grid}</button></div></div>
+          {activeTab === 'files' ? <MemberStorageWorkspace locale={locale} view="files" />
+          : activeTab === 'collaborations' ? <MemberStorageWorkspace locale={locale} view="collaborations" />
+          : showingSpaceDirectory && activeCategory ? <MemberSpaceDirectory category={activeCategory} locale={locale} spaces={spaces} error={error} onOpen={selectSpace} />
+          : showingSpaceFiles && activeSpace && activeCategory ? <div className="member-page-flow">
+          <div className="member-crumbs"><button type="button" onClick={() => openSpaceCategory(activeCategory)}>{activeCategory === 'personal' ? text.personalSpaces : text.teamSpaces}</button><span><b>/</b><button type="button" onClick={() => openDirectory('.')}>{activeSpace.name}</button></span>{crumbItems.map((part, index) => <span key={`${part}-${index}`}><b>/</b><button type="button" onClick={() => openDirectory(crumbItems.slice(0, index + 1).join('/'))}>{part}</button></span>)}</div>
+          <div className="member-heading"><div><h1>{searchResults === null ? activeSpace.name : `${text.search}: ${searchQuery}`}</h1><p>{activeMount ? `${activeMount.name} · ${mountUnavailable ? text.statusUnavailable : readOnly ? text.readOnly : text.readWrite}` : text.noMount}</p></div><div className="member-view-toggle"><button type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}>{text.list}</button><button type="button" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}>{text.grid}</button></div></div>
           <div className="member-toolbar"><button className="member-primary" type="button" disabled={writeBlocked || !activeMountId} onClick={() => fileInputRef.current?.click()}>{text.upload}</button><button type="button" disabled={writeBlocked || !activeMountId} onClick={() => setNewFolderOpen(true)}>{text.newFolder}</button>{canManageShares && searchResults === null && <button type="button" disabled={!activeMountId} onClick={openShareForCurrentPath}>{text.shareAction}</button>}{searchResults !== null && <button type="button" onClick={() => { setSearchResults(null); setSearchNextCursor(''); setSearchQuery(''); }}>{text.clearSearch}</button>}<span className="member-toolbar-spacer" /><button type="button" onClick={() => void refreshDirectory(activeSpaceId, activeMountId, relativePath)} disabled={loading || !activeMountId || mountUnavailable}>{text.refresh}</button><input ref={fileInputRef} type="file" multiple hidden onChange={onFileInput} /></div>
           {mountUnavailable && activeMount && <p className="member-readonly">{text.mountUnavailableHint}</p>}
           {!mountUnavailable && readOnly && activeMount && <p className="member-readonly">{text.uploadBlocked}</p>}

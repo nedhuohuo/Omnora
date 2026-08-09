@@ -12,7 +12,7 @@ export const MCP_OAUTH_STATUS = 'NOT IMPLEMENTED' as const;
  * used when displaying scopes in the token creation form.
  */
 export const MCP_SCOPES = [
-  'spaces:read',
+  'mounts:read',
   'files:list',
   'files:metadata',
   'files:text',
@@ -59,8 +59,7 @@ export type McpToolSpec = {
  * server; tools without the caller's scopes are omitted from tools/list.
  */
 export const MCP_TOOL_CATALOG = [
-  { name: 'spaces.list', scope: 'spaces:read', highRisk: false },
-  { name: 'mounts.list', scope: 'spaces:read', highRisk: false },
+  { name: 'mounts.list', scope: 'mounts:read', highRisk: false },
   { name: 'files.list', scope: 'files:list', highRisk: false },
   { name: 'files.metadata', scope: 'files:metadata', highRisk: false },
   { name: 'files.search', scope: 'search:read', highRisk: false },
@@ -83,6 +82,7 @@ export const MCP_TOOL_CATALOG = [
   { name: 'files.delete_permanently', scope: 'files:purge', highRisk: true },
   { name: 'shares.create', scope: 'shares:create', highRisk: true },
   { name: 'shares.revoke', scope: 'shares:revoke', highRisk: true },
+  { name: 'files.update', scope: 'uploads:create', highRisk: true },
 ] as const satisfies readonly McpToolSpec[];
 
 export type InspectorConnection = {

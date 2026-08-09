@@ -179,8 +179,8 @@ export function AdminOverviewPanel({ locale }: { locale: MemberLocale }) {
           <CountList title={text.overviewMountHealth} counts={overview?.mountsByHealth} />
           <CountList title={text.overviewJobs} counts={overview?.jobsByStatus} />
           <div className="member-overview-group">
-            <h2>{text.overviewSpaces}</h2>
-            <p className="member-overview-metric">{overview?.spaces ?? 0}</p>
+            <h2>{text.overviewCommonMounts}</h2>
+            <p className="member-overview-metric">{overview?.commonMounts ?? 0}</p>
           </div>
           <div className="member-overview-group">
             <h2>{text.overviewLatestBackup}</h2>

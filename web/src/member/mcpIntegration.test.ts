@@ -27,7 +27,7 @@ describe('MCP frontend contract', () => {
 
   it('keeps the fifteen scopes stable and maps the four presets', () => {
     expect(MCP_SCOPES).toEqual([
-      'spaces:read',
+      'mounts:read',
       'files:list',
       'files:metadata',
       'files:text',
@@ -55,9 +55,11 @@ describe('MCP frontend contract', () => {
     expect(MCP_PRESETS.permanentDelete).toEqual(['files:purge']);
   });
 
-  it('pins the 24-tool catalog to the server contract', () => {
+  it('exposes the account-mount catalog without the legacy spaces.list tool', () => {
     expect(MCP_TOOL_CATALOG).toHaveLength(24);
     expect(new Set(MCP_TOOL_CATALOG.map((tool) => tool.name)).size).toBe(24);
+    expect(MCP_TOOL_CATALOG.map((tool) => tool.name)).not.toContain('spaces.list');
+    expect(MCP_TOOL_CATALOG).toContainEqual({ name: 'mounts.list', scope: 'mounts:read', highRisk: false });
     const highRisk = MCP_TOOL_CATALOG.filter((tool) => tool.highRisk).map((tool) => tool.name);
     expect(highRisk).toEqual([
       'files.move',
@@ -67,6 +69,7 @@ describe('MCP frontend contract', () => {
       'files.delete_permanently',
       'shares.create',
       'shares.revoke',
+      'files.update',
     ]);
     expect(new Set(MCP_TOOL_CATALOG.map((tool) => tool.scope))).toEqual(new Set(MCP_SCOPES));
   });

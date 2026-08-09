@@ -41,7 +41,7 @@ export default function McpDocsBlock({ endpoint, exposed, locale, showDocs = tru
   }
 
   const scopeDescriptions: Record<AiTokenScope, string> = {
-    'spaces:read': text.tokenMcpScopeSpacesRead,
+    'mounts:read': text.tokenMcpScopeMountsRead,
     'files:list': text.tokenMcpScopeFilesList,
     'files:metadata': text.tokenMcpScopeFilesMetadata,
     'files:text': text.tokenMcpScopeFilesText,

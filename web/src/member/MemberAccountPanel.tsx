@@ -47,7 +47,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '', revokeTokens: false, revokeShares: false });
+  const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '', totpCode: '', revokeTokens: false, revokeShares: false });
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [passwordError, setPasswordError] = useState('');
 
@@ -93,13 +93,14 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
     }
     setPasswordSaving(true);
     try {
-      await runSensitive(() => updateAccountPassword({
+      await updateAccountPassword({
         currentPassword: passwordForm.current,
         newPassword: passwordForm.next,
+        totpCode: passwordForm.totpCode.trim() || undefined,
         revokeTokens: passwordForm.revokeTokens,
         revokeShares: passwordForm.revokeShares,
-      }));
-      setPasswordForm({ current: '', next: '', confirm: '', revokeTokens: false, revokeShares: false });
+      });
+      setPasswordForm({ current: '', next: '', confirm: '', totpCode: '', revokeTokens: false, revokeShares: false });
       setNotice(text.accountPasswordUpdated);
       await load();
     } catch (caught) {
@@ -202,6 +203,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
           <label>{text.accountCurrentPassword}<input type="password" value={passwordForm.current} onChange={(event) => setPasswordForm({ ...passwordForm, current: event.target.value })} autoComplete="current-password" required /></label>
           <label>{text.accountNewPassword}<input type="password" value={passwordForm.next} onChange={(event) => setPasswordForm({ ...passwordForm, next: event.target.value })} autoComplete="new-password" required /></label>
           <label>{text.accountConfirmPassword}<input type="password" value={passwordForm.confirm} onChange={(event) => setPasswordForm({ ...passwordForm, confirm: event.target.value })} autoComplete="new-password" required /></label>
+          {account?.totpEnabled && <label>{text.accountTotpCode}<input type="text" value={passwordForm.totpCode} onChange={(event) => setPasswordForm({ ...passwordForm, totpCode: event.target.value })} inputMode="numeric" autoComplete="one-time-code" required /></label>}
           <label className="member-admin-checkbox"><input type="checkbox" checked={passwordForm.revokeTokens} onChange={(event) => setPasswordForm({ ...passwordForm, revokeTokens: event.target.checked })} />{text.accountRevokeTokens}</label>
           <label className="member-admin-checkbox"><input type="checkbox" checked={passwordForm.revokeShares} onChange={(event) => setPasswordForm({ ...passwordForm, revokeShares: event.target.checked })} />{text.accountRevokeShares}</label>
           {passwordError && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {passwordError}</div>}
