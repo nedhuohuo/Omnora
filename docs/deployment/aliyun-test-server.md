@@ -81,7 +81,18 @@ OMNORA_TOTP_ENCRYPTION_KEY
 
 Both values may be left blank on a new test deployment. The container entrypoint
 generates them and persists them in `aliyun-test/config/runtime.env`; preserve
-that file when recreating the container. It writes matching instance markers to
+that file when recreating the container. For security, the initialization token
+is deliberately not printed in `docker logs`. Read it only on the server when
+performing first setup:
+
+```bash
+sed -n 's/^OMNORA_INITIALIZATION_TOKEN=//p' aliyun-test/config/runtime.env
+# Or, while the container is running:
+docker exec omnora-aliyun-test sh -c \
+  'sed -n "s/^OMNORA_INITIALIZATION_TOKEN=//p" /etc/omnora/runtime.env'
+```
+
+It writes matching instance markers to
 `aliyun-test/config/.omnora-instance-id`, `aliyun-test/data/.omnora-instance-id`,
 and `aliyun-test/managed/.omnora-instance-id`. When config and data markers
 match but the managed directory is empty, the entrypoint safely creates the
