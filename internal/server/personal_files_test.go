@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,6 +144,29 @@ VALUES ('common-visible', 'Team NAS', ?, 'common', 'external', 'normal', 'read_o
 	}
 	if len(listing.Entries) != 1 || listing.Entries[0].Name != "mine.txt" {
 		t.Fatalf("entries = %#v", listing.Entries)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/member/files/directories", strings.NewReader(`{"source":"personal","parentPath":".","name":"notes"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: issued.Token})
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("personal directory status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(managed, "personal", memberID, "notes")); err != nil {
+		t.Fatalf("personal directory missing: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/member/files/rename", strings.NewReader(`{"source":"personal","path":"mine.txt","toName":"renamed.txt"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: issued.Token})
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("personal rename status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(managed, "personal", memberID, "renamed.txt")); err != nil {
+		t.Fatalf("renamed personal file missing: %v", err)
 	}
 
 	rec = httptest.NewRecorder()

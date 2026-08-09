@@ -1,6 +1,6 @@
 import { localeMessages, type MemberLocale } from './i18n';
 
-type MemberContentTab = 'files' | 'collaborations';
+type MemberContentTab = 'personal' | 'team-folders' | 'collaborations';
 
 type Props = {
   locale: MemberLocale;
@@ -12,7 +12,8 @@ export default function MemberContentNavigation({ locale, active, onSelect }: Pr
   const text = localeMessages[locale];
   return (
     <>
-      <button className={`member-nav ${active === 'files' ? 'active' : ''}`} type="button" onClick={() => onSelect('files')}>{text.myFiles}</button>
+      <button className={`member-nav ${active === 'personal' ? 'active' : ''}`} type="button" onClick={() => onSelect('personal')}>{text.personalSpace}</button>
+      <button className={`member-nav ${active === 'team-folders' ? 'active' : ''}`} type="button" onClick={() => onSelect('team-folders')}>{text.teamFolders}</button>
       <button className={`member-nav ${active === 'collaborations' ? 'active' : ''}`} type="button" onClick={() => onSelect('collaborations')}>{text.collaboration}</button>
     </>
   );
