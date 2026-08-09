@@ -2100,6 +2100,22 @@ WHERE id = ? AND status <> 'deleted'
 	mount.IndexEnabled = indexEnabled == 1
 	mount.IdentityVerified = identity != ""
 	mount.IdentityJSON = identity
+	if mount.Status != catalog.MountStatusActive || !mount.IndexEnabled {
+		return mount, nil
+	}
+
+	// The personal mount stores the stable sentinel "personal" in root_path;
+	// resolve it through the identity-aware access loader before the catalog
+	// scanner treats Root as a filesystem path. Common mounts are resolved by
+	// the same loader so the worker and request paths share the same contract.
+	loaded, err := access.NewGuard(s.sqlDB()).LoadMountIdentity(r.Context(), mountID)
+	if err != nil {
+		return catalog.Mount{}, err
+	}
+	mount.Source = loaded.Source
+	mount.Root = loaded.MountRoot
+	mount.IdentityVerified = strings.TrimSpace(loaded.IdentityJSON) != ""
+	mount.IdentityJSON = loaded.IdentityJSON
 	return mount, nil
 }
 
