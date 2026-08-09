@@ -18,6 +18,7 @@ import (
 	"omnora/internal/domain"
 	"omnora/internal/httpx"
 	"omnora/internal/identity"
+	"omnora/internal/mountadmin"
 	"omnora/internal/recovery"
 	"omnora/internal/store"
 )
@@ -57,10 +58,20 @@ WHERE id = ? AND status = 'active'
 // ---- Overview ----
 
 func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	session, ok := s.requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	db := s.sqlDB()
+	initialAdminID, err := s.initialAdminID(r.Context())
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	mountFilter := "purpose = 'common' AND status <> 'deleted'"
+	if session.AccountID != initialAdminID {
+		mountFilter += " AND governance = 'normal'"
+	}
 
 	accountsByStatus, err := countGroupedBy(r, db, "SELECT status, COUNT(1) FROM accounts GROUP BY status")
 	if err != nil {
@@ -68,16 +79,16 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var commonMountCount int
-	if err := db.QueryRowContext(r.Context(), "SELECT COUNT(1) FROM mounts WHERE purpose = 'common' AND status <> 'deleted'").Scan(&commonMountCount); err != nil {
+	if err := db.QueryRowContext(r.Context(), "SELECT COUNT(1) FROM mounts WHERE "+mountFilter).Scan(&commonMountCount); err != nil {
 		writeDBError(w, r, err)
 		return
 	}
-	mountsByHealth, err := countGroupedBy(r, db, "SELECT status, COUNT(1) FROM mounts WHERE status <> 'deleted' GROUP BY status")
+	mountsByHealth, err := countGroupedBy(r, db, "SELECT status, COUNT(1) FROM mounts WHERE "+mountFilter+" GROUP BY status")
 	if err != nil {
 		writeDBError(w, r, err)
 		return
 	}
-	jobsByStatus, err := countGroupedBy(r, db, "SELECT status, COUNT(1) FROM jobs GROUP BY status")
+	jobsByStatus, err := s.countAdminJobs(r.Context(), session.AccountID)
 	if err != nil {
 		writeDBError(w, r, err)
 		return
@@ -90,7 +101,7 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 
 	risks := []string{}
 	var unavailableMounts int
-	if err := db.QueryRowContext(r.Context(), "SELECT COUNT(1) FROM mounts WHERE status = 'unavailable'").Scan(&unavailableMounts); err == nil && unavailableMounts > 0 {
+	if err := db.QueryRowContext(r.Context(), "SELECT COUNT(1) FROM mounts WHERE "+mountFilter+" AND status = 'unavailable'").Scan(&unavailableMounts); err == nil && unavailableMounts > 0 {
 		risks = append(risks, fmt.Sprintf("%d mount(s) require re-verification", unavailableMounts))
 	}
 	if latestBackup == nil {
@@ -106,6 +117,31 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 		"latestBackup":   latestBackup,
 		"risks":          risks,
 	})
+}
+
+func (s *Server) countAdminJobs(ctx context.Context, accountID string) (map[string]int, error) {
+	rows, err := s.sqlDB().QueryContext(ctx, `SELECT status, payload_json FROM jobs`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var status, payload string
+		if err := rows.Scan(&status, &payload); err != nil {
+			return nil, err
+		}
+		if mountID := indexJobMountID(payload); mountID != "" {
+			if _, err := s.mountAdmin.LoadMount(ctx, accountID, mountID); err != nil {
+				if errors.Is(err, mountadmin.ErrNotFound) {
+					continue
+				}
+				return nil, err
+			}
+		}
+		counts[status]++
+	}
+	return counts, rows.Err()
 }
 
 func countGroupedBy(r *http.Request, db *sql.DB, query string) (map[string]int, error) {

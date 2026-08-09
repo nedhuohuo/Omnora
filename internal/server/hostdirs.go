@@ -31,31 +31,11 @@ type hostDirectorySuggestions struct {
 }
 
 func (s *Server) storageRootDetails() []hostDirectoryRoot {
-	roots := make([]hostDirectoryRoot, 0, 2)
-	for _, configured := range []struct {
-		path string
-		kind string
-	}{
-		{path: s.cfg.Storage.ManagedDir, kind: "managed"},
-		{path: s.cfg.Storage.PredeclaredMountRoot, kind: "external"},
-	} {
-		root := configured.path
-		root = filepath.Clean(strings.TrimSpace(root))
-		if root == "" || root == "." || root == string(filepath.Separator) {
-			continue
-		}
-		if !filepath.IsAbs(root) {
-			continue
-		}
-		roots = append(roots, hostDirectoryRoot{Path: root, Kind: configured.kind})
+	root := filepath.Clean(strings.TrimSpace(s.cfg.Storage.PredeclaredMountRoot))
+	if root == "" || root == "." || root == string(filepath.Separator) || !filepath.IsAbs(root) {
+		return []hostDirectoryRoot{}
 	}
-	sort.Slice(roots, func(i, j int) bool {
-		if roots[i].Path == roots[j].Path {
-			return roots[i].Kind < roots[j].Kind
-		}
-		return roots[i].Path < roots[j].Path
-	})
-	return uniqueRootDetails(roots)
+	return []hostDirectoryRoot{{Path: root, Kind: "external"}}
 }
 
 func (s *Server) storageRoots() []string {

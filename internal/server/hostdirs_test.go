@@ -13,7 +13,6 @@ import (
 )
 
 func TestAdminHostDirectorySuggestionsStayInsideConfiguredRoots(t *testing.T) {
-	skipLegacySpaceRESTTest(t)
 	db, _ := newAPITestServer(t)
 	root := t.TempDir()
 	managed := filepath.Join(root, "managed")
@@ -72,20 +71,17 @@ func TestAdminHostDirectorySuggestionsStayInsideConfiguredRoots(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if len(payload.Roots) != 2 {
+		if len(payload.Roots) != 1 {
 			t.Fatalf("roots = %#v", payload.Roots)
 		}
-		if got := hostDirectoryRootKind(payload.RootDetails, managed); got != "managed" {
-			t.Fatalf("managed root kind = %q, want managed; details = %#v", got, payload.RootDetails)
+		if got := hostDirectoryRootKind(payload.RootDetails, managed); got != "" {
+			t.Fatalf("managed root kind = %q, want hidden; details = %#v", got, payload.RootDetails)
 		}
 		if got := hostDirectoryRootKind(payload.RootDetails, external); got != "external" {
 			t.Fatalf("external root kind = %q, want external; details = %#v", got, payload.RootDetails)
 		}
-		if !containsHostPath(payload.Entries, managed) || !containsHostPath(payload.Entries, external) {
+		if !containsHostPath(payload.Entries, external) || containsHostPath(payload.Entries, managed) {
 			t.Fatalf("entries = %#v", payload.Entries)
-		}
-		if got := hostDirectoryEntryKind(payload.Entries, managed); got != "managed" {
-			t.Fatalf("managed entry kind = %q, want managed; entries = %#v", got, payload.Entries)
 		}
 		if got := hostDirectoryEntryKind(payload.Entries, external); got != "external" {
 			t.Fatalf("external entry kind = %q, want external; entries = %#v", got, payload.Entries)
@@ -158,6 +154,45 @@ func hostDirectoryEntryKind(entries []hostDirectoryEntry, path string) string {
 		}
 	}
 	return ""
+}
+
+func TestAdminHostDirectorySuggestionsExcludeManagedPersonalRoot(t *testing.T) {
+	db, _ := newAPITestServer(t)
+	admin, _ := createAPITestAccounts(t, db)
+	workspace, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(workspace, ".managed-personal-root")
+	external := filepath.Join(workspace, ".external-common-root")
+	for _, root := range []string{managed, external} {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(root) })
+	}
+	handler := New(config.Config{
+		Storage:           config.StorageConfig{ManagedDir: managed, PredeclaredMountRoot: external},
+		Routes:            map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+		RouteEnvOverrides: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+	}, db)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/host-directories?path=/", nil)
+	req.AddCookie(issueAPITestSession(t, db, admin.ID))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload hostDirectorySuggestions
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if containsHostPath(payload.Entries, managed) || hostDirectoryRootKind(payload.RootDetails, managed) != "" {
+		t.Fatalf("managed personal root leaked: %#v", payload)
+	}
+	if hostDirectoryRootKind(payload.RootDetails, external) != "external" {
+		t.Fatalf("external root missing: %#v", payload.RootDetails)
+	}
 }
 
 func TestProbeMountWritableRejectsReadOnlyRoot(t *testing.T) {

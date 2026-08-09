@@ -32,6 +32,7 @@ import (
 	"omnora/internal/jobs"
 	"omnora/internal/memberfiles"
 	"omnora/internal/membershare"
+	"omnora/internal/mountadmin"
 	"omnora/internal/mountid"
 	"omnora/internal/ratelimit"
 	"omnora/internal/share"
@@ -703,13 +704,7 @@ ORDER BY sp.kind, sp.name, m.display_name, m.id
 }
 
 func (s *Server) listAdminHostDirectories(w http.ResponseWriter, r *http.Request) {
-	session, err := s.requireSession(r)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
-		return
-	}
-	if !s.isAdmin(r, session.AccountID) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "only system administrators can browse host directories")
+	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
 
@@ -1069,8 +1064,15 @@ LIMIT ?
 	}
 	items := []map[string]any{}
 	for _, entry := range entries {
-		spaceName, mountName := s.indexJobMountLabels(r, entry.mountID)
-		items = append(items, jobResponse(entry.job, entry.claimedAt, entry.claimedBy, entry.lastError, entry.completedAt, spaceName, mountName))
+		mount, err := s.mountAdmin.LoadMount(r.Context(), session.AccountID, entry.mountID)
+		if errors.Is(err, mountadmin.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		items = append(items, jobResponse(entry.job, entry.claimedAt, entry.claimedBy, entry.lastError, entry.completedAt, mount.DisplayName))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -1099,6 +1101,15 @@ func (s *Server) enqueueIndexJob(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_mount", "mountId is required")
 		return
 	}
+	visibleMount, err := s.mountAdmin.LoadMount(r.Context(), session.AccountID, req.MountID)
+	if errors.Is(err, mountadmin.ErrNotFound) {
+		httpx.WriteError(w, r, http.StatusNotFound, "mount_not_found", "mount was not found")
+		return
+	}
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	mount, err := s.loadCatalogMount(r, req.MountID)
 	if errors.Is(err, sql.ErrNoRows) {
 		httpx.WriteError(w, r, http.StatusNotFound, "mount_not_found", "mount was not found")
@@ -1108,7 +1119,7 @@ func (s *Server) enqueueIndexJob(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, r, err)
 		return
 	}
-	if mount.Status != catalog.MountStatusActive || !mount.IndexEnabled {
+	if mount.Status != catalog.MountStatusActive || !mount.IndexEnabled || visibleMount.Status != "active" || !visibleMount.IndexEnabled {
 		httpx.WriteError(w, r, http.StatusConflict, "mount_not_indexable", "mount must be active with indexing enabled")
 		return
 	}
@@ -1125,8 +1136,7 @@ func (s *Server) enqueueIndexJob(w http.ResponseWriter, r *http.Request) {
 	if !s.recordAuditMutation(w, r, "index_job_enqueue", "job", job.ID, "{}") {
 		return
 	}
-	spaceName, mountName := s.indexJobMountLabels(r, req.MountID)
-	httpx.WriteJSON(w, http.StatusCreated, jobResponse(job, "", "", "", "", spaceName, mountName))
+	httpx.WriteJSON(w, http.StatusCreated, jobResponse(job, "", "", "", "", visibleMount.DisplayName))
 }
 
 func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
@@ -1152,9 +1162,22 @@ func (s *Server) runIndexJob(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_job", "job payload is invalid")
 		return
 	}
+	visibleMount, err := s.mountAdmin.LoadMount(r.Context(), session.AccountID, payload.MountID)
+	if errors.Is(err, mountadmin.ErrNotFound) {
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "job was not found")
+		return
+	}
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	mount, err := s.loadCatalogMount(r, payload.MountID)
 	if err != nil {
 		writeDBError(w, r, err)
+		return
+	}
+	if mount.Status != catalog.MountStatusActive || !mount.IndexEnabled || visibleMount.Status != "active" || !visibleMount.IndexEnabled {
+		httpx.WriteError(w, r, http.StatusConflict, "mount_not_indexable", "mount must be active with indexing enabled")
 		return
 	}
 	if err := s.verifyLoadedMountIdentity(r, mountForListing{ID: mount.ID, Root: mount.Root, IdentityJSON: mount.IdentityJSON}); err != nil {
@@ -2259,13 +2282,12 @@ func aiTokenResponse(id, publicID, name, scopesJSON, createdAt, expiresAt, lastU
 	}
 }
 
-func jobResponse(job jobs.Job, claimedAt, claimedBy, lastError, completedAt, spaceName, mountName string) map[string]any {
+func jobResponse(job jobs.Job, claimedAt, claimedBy, lastError, completedAt, mountName string) map[string]any {
 	return map[string]any{
 		"id":          job.ID,
 		"kind":        job.Kind,
 		"priority":    job.Priority,
 		"status":      job.Status,
-		"spaceName":   spaceName,
 		"mountName":   mountName,
 		"payload":     json.RawMessage(job.PayloadJSON),
 		"checkpoint":  json.RawMessage(job.CheckpointJSON),
@@ -2288,23 +2310,6 @@ func indexJobMountID(payloadJSON string) string {
 		return ""
 	}
 	return strings.TrimSpace(payload.MountID)
-}
-
-func (s *Server) indexJobMountLabels(r *http.Request, mountID string) (string, string) {
-	if mountID == "" {
-		return "", ""
-	}
-	var spaceName, mountName string
-	err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT sp.name, m.display_name
-FROM mounts m
-JOIN spaces sp ON sp.id = m.space_id
-WHERE m.id = ?
-`, mountID).Scan(&spaceName, &mountName)
-	if err != nil {
-		return "", ""
-	}
-	return spaceName, mountName
 }
 
 func parseIntDefault(value string, fallback int) int {
