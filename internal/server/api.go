@@ -161,6 +161,8 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("POST /api/v1/account/totp/disable", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.disableAccountTOTP)))
 	s.mux.Handle("GET /api/v1/account/preferences", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.getAccountPreferences)))
 	s.mux.Handle("PUT /api/v1/account/preferences", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putAccountPreferences)))
+	s.mux.Handle("GET /api/v1/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listShares)))
+	s.mux.Handle("DELETE /api/v1/shares/{shareId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeShare)))
 	s.mux.Handle("GET /api/v1/share/current", s.gate(domain.RouteGroupShare, http.HandlerFunc(s.shareCurrent)))
 	s.mux.Handle("GET /api/v1/share/children", s.gate(domain.RouteGroupShare, http.HandlerFunc(s.shareChildren)))
 	s.mux.Handle("GET /api/v1/share/download", s.gate(domain.RouteGroupShare, http.HandlerFunc(s.shareDownload)))

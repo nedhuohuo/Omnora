@@ -45,7 +45,7 @@ import MemberStorageWorkspace from './MemberStorageWorkspace';
 import MemberContentNavigation from './MemberContentNavigation';
 import MarkdownPreview from './MarkdownPreview';
 import FileTypeIcon from './FileTypeIcon';
-import { applyThemePreference } from './theme';
+import { syncAuthenticatedTheme } from './themeSync';
 import { RecentReauthProvider } from './RecentReauthProvider';
 import { stateForSession } from './sessionFlow';
 import { formatDirectoryChildren, mountDeletePolicy, mountSupportsTrash, type MemberDirectoryEntry, type MemberMount, type MemberSearchResult, type MemberSpace, type TransferItem } from './types';
@@ -302,25 +302,17 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   }, [activeMountId, activeMountSupportsTrash, activeSpaceId]);
 
   useEffect(() => {
-    // Load the theme preference in parallel with session bootstrap so the
-    // saved theme applies as soon as its round-trip returns, not only after
-    // spaces finish loading.
-    void (async () => {
-      try {
-        const preferences = await getPreferences();
-        applyThemePreference(preferences.theme);
-      } catch {
-        // Preference storage may be unavailable; keep the current theme.
-      }
-    })();
     void (async () => {
       try {
         const session = await getSession();
         setIsAdmin(session.isAdmin === true);
         const nextState = stateForSession(session);
         setSessionState(nextState);
-        if (nextState === 'ready' && entry === 'admin') {
-          await loadSpaces();
+        if (nextState === 'ready') {
+          await syncAuthenticatedTheme(getPreferences);
+          if (entry === 'admin') {
+            await loadSpaces();
+          }
         }
       } catch {
         setSessionState('signed-out');
