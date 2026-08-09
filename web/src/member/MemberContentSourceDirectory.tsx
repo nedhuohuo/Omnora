@@ -12,16 +12,8 @@ export default function MemberContentSourceDirectory({ locale, sources, onOpen }
   const text = localeMessages[locale];
   return (
     <div className="member-page-flow member-content-source-directory">
-      <div className="member-heading"><div><h1>{text.myFiles}</h1><p>{text.contentSourcesDetail}</p></div></div>
-      <div className="member-space-grid">
-        <button className="member-space-card" type="button" onClick={() => onOpen({ source: 'personal', path: '.' }, sources.personal.label || text.myFiles, false)}>
-          <FileTypeIcon kind="dir" name={sources.personal.label || text.myFiles} className="member-file-icon dir" />
-          <strong>{sources.personal.label || text.myFiles}</strong>
-          <small>{text.personalFilesDetail}</small>
-        </button>
-      </div>
-      <div className="member-heading member-section-heading"><div><h2>{text.commonStorage}</h2><p>{text.commonStorageDetail}</p></div></div>
-      {sources.commonMounts.length === 0 ? <div className="member-empty">{text.noCommonStorage}</div> : (
+      <div className="member-heading"><div><h1>{text.teamFolders}</h1><p>{text.teamFoldersDetail}</p></div></div>
+      {sources.commonMounts.length === 0 ? <div className="member-empty">{text.noTeamFolders}</div> : (
         <div className="member-space-grid">
           {sources.commonMounts.map((mount) => {
             const readOnly = mount.permission === 'viewer' || mount.mode === 'read_only';
@@ -29,7 +21,7 @@ export default function MemberContentSourceDirectory({ locale, sources, onOpen }
               <button className="member-space-card" type="button" key={mount.mountId} onClick={() => onOpen({ source: 'common_mount', mountId: mount.mountId, path: '.' }, mount.displayName, readOnly)}>
                 <FileTypeIcon kind="dir" name={mount.displayName} className="member-file-icon dir" />
                 <strong>{mount.displayName}</strong>
-                <small>{readOnly ? text.readOnly : text.readWrite}</small>
+                {readOnly && <small>{text.readOnly}</small>}
               </button>
             );
           })}

@@ -16,13 +16,14 @@ const sources: MemberContentSourcesPayload = {
 describe('member content source directory', () => {
   it('uses file and collaboration navigation without space choices', () => {
     const html = renderToStaticMarkup(
-      <MemberContentNavigation locale="zh-CN" active="files" onSelect={() => undefined} />,
+      <MemberContentNavigation locale="zh-CN" active="personal" onSelect={() => undefined} />,
     );
 
-    expect(html).toContain('我的文件');
+    expect(html).toContain('个人空间');
+    expect(html).toContain('团队文件夹');
     expect(html).toContain('协作');
-    expect(html).not.toContain('个人空间');
-    expect(html).not.toContain('团队空间');
+    expect(html).not.toContain('我的文件');
+    expect(html).not.toContain('可读写');
   });
 
   it('shows one direct personal entry and authorized common mount cards', () => {
@@ -30,11 +31,10 @@ describe('member content source directory', () => {
       <MemberContentSourceDirectory locale="zh-CN" sources={sources} onOpen={() => undefined} />,
     );
 
-    expect(html).toContain('我的文件');
-    expect(html).toContain('共用存储');
+    expect(html).toContain('团队文件夹');
     expect(html).toContain('设计素材');
-    expect(html).not.toContain('个人空间');
-    expect(html).not.toContain('团队空间');
+    expect(html).not.toContain('我的文件');
+    expect(html).not.toContain('可读写');
     expect(html).not.toContain('common-1');
   });
 

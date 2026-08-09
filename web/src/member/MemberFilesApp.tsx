@@ -63,7 +63,7 @@ import {
 } from './spaceNavigation';
 import './member-files.css';
 
-type MemberTab = MemberSpaceTab | 'files' | 'collaborations' | 'trash' | 'shares' | 'tokens' | 'docs' | 'account';
+type MemberTab = MemberSpaceTab | 'personal' | 'team-folders' | 'collaborations' | 'trash' | 'shares' | 'tokens' | 'docs' | 'account';
 type AdminNavGroup = 'overview' | 'identity-space' | 'storage-search' | 'access-security' | 'backups';
 type AdminNavItem = { id: AdminTab; label: string };
 type AdminNavGroupItem = { id: AdminNavGroup; label: string; tabs: AdminNavItem[] };
@@ -152,7 +152,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const text = localeMessages[locale];
   const [sessionState, setSessionState] = useState<SessionState>('checking');
   const [isAdmin, setIsAdmin] = useState(false);
-  const [activeTab, setActiveTab] = useState<MemberTab | AdminTab>(entry === 'admin' ? 'overview' : 'files');
+  const [activeTab, setActiveTab] = useState<MemberTab | AdminTab>(entry === 'admin' ? 'overview' : 'personal');
   const [adminGroupTabs, setAdminGroupTabs] = useState<Record<AdminNavGroup, AdminTab>>(defaultAdminGroupTabs);
   const [loginForm, setLoginForm] = useState({ login: '', password: '', totpCode: '' });
   const [enrollmentSetup, setEnrollmentSetup] = useState<{ secret: string; otpauthUri?: string } | null>(null);
@@ -983,7 +983,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             ))}
           </nav>}
           {entry === 'member' && <nav aria-label="Member workspace">
-            <MemberContentNavigation locale={locale} active={activeTab === 'files' || activeTab === 'collaborations' ? activeTab : null} onSelect={setActiveTab} />
+            <MemberContentNavigation locale={locale} active={activeTab === 'personal' || activeTab === 'team-folders' || activeTab === 'collaborations' ? activeTab : null} onSelect={setActiveTab} />
             {activeMountSupportsTrash && <button className={`member-nav ${activeTab === 'trash' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('trash')}>{text.recycleBin}</button>}
             <button className={`member-nav ${activeTab === 'shares' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('shares')}>{text.navShares}</button>
             <button className={`member-nav ${activeTab === 'tokens' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('tokens')}>{text.navTokens}</button>
@@ -1010,7 +1010,8 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
               ))}
             </div>
           )}
-          {activeTab === 'files' ? <MemberStorageWorkspace locale={locale} view="files" />
+          {activeTab === 'personal' ? <MemberStorageWorkspace locale={locale} view="personal" />
+          : activeTab === 'team-folders' ? <MemberStorageWorkspace locale={locale} view="team-folders" />
           : activeTab === 'collaborations' ? <MemberStorageWorkspace locale={locale} view="collaborations" />
           : showingSpaceDirectory && activeCategory ? <MemberSpaceDirectory category={activeCategory} locale={locale} spaces={spaces} error={error} onOpen={selectSpace} />
           : showingSpaceFiles && activeSpace && activeCategory ? <div className="member-page-flow">

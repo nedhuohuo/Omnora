@@ -737,6 +737,55 @@ export function listMemberDirectoryChildren(locator: MemberContentLocator, signa
   return requestJson<DirectoryChildrenPayload>(`/api/v1/member/files/children?${params.toString()}`, { signal });
 }
 
+export type MemberMutationLocator = Extract<MemberContentLocator, { source: 'personal' | 'common_mount' }>;
+
+function memberLocatorPayload(locator: MemberMutationLocator) {
+  return locator.source === 'common_mount'
+    ? { source: locator.source, mountId: locator.mountId, path: locator.path }
+    : { source: locator.source, path: locator.path };
+}
+
+export function createMemberDirectory(locator: MemberMutationLocator, name: string, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/directories', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorPayload(locator), parentPath: locator.path, name }), signal,
+  });
+}
+
+export function renameMemberObject(locator: MemberMutationLocator, toName: string, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/rename', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorPayload(locator), toName }), signal,
+  });
+}
+
+export function copyMemberObject(source: MemberMutationLocator, destination: MemberMutationLocator, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/copy', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorPayload(source), destination: memberLocatorPayload(destination) }), signal,
+  });
+}
+
+export function moveMemberObject(source: MemberMutationLocator, destination: MemberMutationLocator, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/move', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorPayload(source), destination: memberLocatorPayload(destination) }), signal,
+  });
+}
+
+export function deleteMemberObject(locator: MemberMutationLocator, permanent = false, signal?: AbortSignal) {
+  const params = new URLSearchParams(memberLocatorPayload(locator) as Record<string, string>);
+  if (permanent) params.set('permanent', 'true');
+  return requestJson<void>(`/api/v1/member/files/object?${params.toString()}`, { method: 'DELETE', signal });
+}
+
+export function createMemberUpload(locator: MemberMutationLocator, fileName: string, size: number, signal?: AbortSignal) {
+  return requestJson<UploadSessionPayload>('/api/v1/member/uploads', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorPayload(locator), parentPath: locator.path, fileName, size }), signal,
+  });
+}
+
+export function memberDownloadURL(locator: MemberMutationLocator) {
+  const params = new URLSearchParams(memberLocatorPayload(locator) as Record<string, string>);
+  return `/api/v1/member/files/download?${params.toString()}`;
+}
+
 export function listMemberCollaborations(direction: 'incoming' | 'outgoing', signal?: AbortSignal) {
   const params = new URLSearchParams({ direction });
   return requestJson<MemberCollaborationsPayload>(`/api/v1/member/collaborations?${params.toString()}`, { signal });
