@@ -35,10 +35,15 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("open database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	root := filepath.Join(t.TempDir(), "external")
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	workspace, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("resolve workspace: %v", err)
+	}
+	root, err := os.MkdirTemp(workspace, ".mountadmin-external-")
+	if err != nil {
 		t.Fatalf("create external root: %v", err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	accounts := []account{
 		{ID: "admin-initial", Email: "initial@example.test"},
 		{ID: "admin-ordinary", Email: "ordinary@example.test"},
@@ -127,6 +132,97 @@ func TestListMountsDoesNotReturnPersonalDefault(t *testing.T) {
 		if item.ID == "personal-default" || item.Governance == domain.MountGovernanceSystem {
 			t.Fatalf("personal default leaked: %#v", item)
 		}
+	}
+}
+
+func TestCreateMountAllowsZeroGrantsWithoutImplicitAdminAccess(t *testing.T) {
+	fixture := newFixture(t)
+	root := filepath.Join(fixture.root, "photos")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("create mount root: %v", err)
+	}
+
+	created, err := fixture.service.CreateMount(context.Background(), fixture.ordinaryAdmin.ID, mountadmin.CreateRequest{
+		ID: "mnt-photos", DisplayName: "Photos", RootPath: root,
+		Governance:   domain.MountGovernanceNormal,
+		Mode:         domain.MountModeReadOnly,
+		IndexEnabled: true,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.GrantCount != 0 {
+		t.Fatalf("grant count = %d, want 0", created.GrantCount)
+	}
+	var grants int
+	if err := fixture.db.SQL().QueryRow(`SELECT COUNT(*) FROM mount_grants WHERE mount_id = 'mnt-photos'`).Scan(&grants); err != nil {
+		t.Fatal(err)
+	}
+	if grants != 0 {
+		t.Fatalf("grant count in database = %d, want 0", grants)
+	}
+}
+
+func TestCreateMountStoresExplicitViewerAndEditorGrants(t *testing.T) {
+	fixture := newFixture(t)
+	root := filepath.Join(fixture.root, "shared")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("create mount root: %v", err)
+	}
+
+	created, err := fixture.service.CreateMount(context.Background(), fixture.initialAdmin.ID, mountadmin.CreateRequest{
+		ID: "mnt-shared", DisplayName: "Shared", RootPath: root,
+		Governance: domain.MountGovernanceRestricted,
+		Mode:       domain.MountModeReadOnly,
+		Grants: []mountadmin.GrantInput{
+			{AccountID: fixture.member.ID, Permission: domain.ContentPermissionViewer},
+			{AccountID: fixture.ordinaryAdmin.ID, Permission: domain.ContentPermissionEditor},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.GrantCount != 2 {
+		t.Fatalf("grant count = %d, want 2", created.GrantCount)
+	}
+	grants, err := fixture.service.ListGrants(context.Background(), fixture.initialAdmin.ID, "mnt-shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 2 {
+		t.Fatalf("grants = %#v", grants)
+	}
+	permissions := map[string]domain.ContentPermission{}
+	for _, grant := range grants {
+		permissions[grant.AccountID] = grant.Permission
+	}
+	if permissions[fixture.member.ID] != domain.ContentPermissionViewer || permissions[fixture.ordinaryAdmin.ID] != domain.ContentPermissionEditor {
+		t.Fatalf("grant permissions = %#v", permissions)
+	}
+}
+
+func TestOrdinaryAdminCannotCreateRestrictedMount(t *testing.T) {
+	fixture := newFixture(t)
+	root := filepath.Join(fixture.root, "secret")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("create mount root: %v", err)
+	}
+	_, err := fixture.service.CreateMount(context.Background(), fixture.ordinaryAdmin.ID, mountadmin.CreateRequest{
+		ID: "mnt-secret", DisplayName: "Secret", RootPath: root,
+		Governance: domain.MountGovernanceRestricted,
+		Mode:       domain.MountModeReadOnly,
+	}, nil)
+	if !errors.Is(err, mountadmin.ErrRestrictedGovernance) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestGrantMutationsOnlyAcceptViewerOrEditor(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.insertMount(t, "normal", "Normal", domain.MountGovernanceNormal)
+	_, err := fixture.service.PutGrant(context.Background(), fixture.ordinaryAdmin.ID, "normal", fixture.member.ID, domain.ContentPermission("manager"), nil)
+	if !errors.Is(err, mountadmin.ErrInvalidInput) {
+		t.Fatalf("manager grant error = %v", err)
 	}
 }
 
