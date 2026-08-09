@@ -117,13 +117,9 @@ VALUES ('member', 'member@example.com', 'Member', 'member', 'active', 'hash')
 `); err != nil {
 		t.Fatalf("insert member account: %v", err)
 	}
-	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO spaces(id, kind, name, owner_account_id) VALUES ('space-1', 'shared', 'Space', 'admin')`); err != nil {
-		t.Fatalf("insert space: %v", err)
-	}
-	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO space_members(space_id, account_id, permission) VALUES ('space-1', 'admin', 'manager')`); err != nil {
-		t.Fatalf("insert member: %v", err)
-	}
-	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status) VALUES ('mount-1', 'space-1', 'Docs', '/tmp/docs', 'external', 'read_write', 'active')`); err != nil {
+	if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, status)
+VALUES ('mount-1', 'Docs', '/tmp/docs', 'common', 'external', 'normal', 'read_write', 'active')`); err != nil {
 		t.Fatalf("insert mount: %v", err)
 	}
 	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO identity_sessions(id, account_id, token_hash, created_at, expires_at, credential_generation) VALUES ('ses-1', 'admin', 'hash-1', '2026-08-01T00:00:00Z', '2099-01-01T00:00:00Z', 1)`); err != nil {
@@ -135,13 +131,13 @@ VALUES ('member', 'member@example.com', 'Member', 'member', 'active', 'hash')
 	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, expires_at, credential_generation) VALUES ('ait-1', 'ait-public', 'hash-3', 'admin', 'test', '[]', '2099-01-01T00:00:00Z', 1)`); err != nil {
 		t.Fatalf("insert ai token: %v", err)
 	}
-	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO shares(id, public_id, secret_hash, creator_account_id, space_id, mount_id, relative_path, expires_at, credential_generation) VALUES ('share-1', 'share-public', 'hash-4', 'admin', 'space-1', 'mount-1', 'file.txt', '2099-01-01T00:00:00Z', 1)`); err != nil {
+	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO shares(id, public_id, secret_hash, creator_account_id, mount_id, relative_path, expires_at, credential_generation) VALUES ('share-1', 'share-public', 'hash-4', 'admin', 'mount-1', 'file.txt', '2099-01-01T00:00:00Z', 1)`); err != nil {
 		t.Fatalf("insert share: %v", err)
 	}
 	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO share_sessions(id, share_id, session_hash, generation, expires_at, credential_generation) VALUES ('share-session-1', 'share-1', 'share-session-hash', 1, '2099-01-01T00:00:00Z', 1)`); err != nil {
 		t.Fatalf("insert share session: %v", err)
 	}
-	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO upload_sessions(id, account_id, space_id, mount_id, target_relative_path, declared_size, part_size, temp_dir, expires_at, credential_generation) VALUES ('upload-1', 'admin', 'space-1', 'mount-1', 'upload.bin', 1, 1, '/tmp/upload', '2099-01-01T00:00:00Z', 1)`); err != nil {
+	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO upload_sessions(id, account_id, mount_id, target_relative_path, declared_size, part_size, temp_dir, expires_at, credential_generation) VALUES ('upload-1', 'admin', 'mount-1', 'upload.bin', 1, 1, '/tmp/upload', '2099-01-01T00:00:00Z', 1)`); err != nil {
 		t.Fatalf("insert upload session: %v", err)
 	}
 	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO jobs(id, kind, status) VALUES ('job-1', 'index', 'running')`); err != nil {

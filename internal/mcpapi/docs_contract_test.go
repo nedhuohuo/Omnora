@@ -103,3 +103,74 @@ func TestDocumentationMatchesMCPContract(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenAPIUsesAccountMountTokenContract(t *testing.T) {
+	openapi := readContractDoc(t, docsRoot(t), "openapi/omnora.v1.yaml")
+
+	for _, path := range []string{
+		"  /member/content-sources:",
+		"  /member/files/children:",
+	} {
+		if !strings.Contains(openapi, path) {
+			t.Errorf("OpenAPI is missing member content path %q", path)
+		}
+	}
+
+	tokenSchemas := contractSection(t, openapi, "    AiToken:\n", "    Job:\n")
+	if !strings.Contains(tokenSchemas, `"mounts:read"`) {
+		t.Error("AI Token scopes are missing mounts:read")
+	}
+	for _, obsolete := range []string{`"spaces:read"`, "spaceId:", "DirectoryBoundary"} {
+		if strings.Contains(tokenSchemas, obsolete) {
+			t.Errorf("AI Token schemas still contain obsolete Space contract %q", obsolete)
+		}
+	}
+	for _, source := range []string{"all_account_content", "personal", "common_mount"} {
+		if !strings.Contains(tokenSchemas, "const: "+source) {
+			t.Errorf("AI Token boundary union is missing source %q", source)
+		}
+	}
+	if strings.Contains(openapi, "\n    DirectoryBoundary:\n") {
+		t.Error("OpenAPI still defines the obsolete DirectoryBoundary schema")
+	}
+}
+
+func TestOpenAPIRemovesLegacySpaceBusinessContract(t *testing.T) {
+	root := docsRoot(t)
+	for _, name := range []string{
+		"openapi/omnora.v1.yaml",
+		"internal/server/openapi_assets/omnora.v1.yaml",
+	} {
+		body := readContractDoc(t, root, name)
+		for _, obsolete := range []string{
+			"  /spaces",
+			"  /admin/spaces",
+			"spaceId",
+			"space_id",
+			"SpaceId",
+			"\n    Space:\n",
+			"#/components/schemas/Space",
+			"#/components/parameters/SpaceId",
+		} {
+			if strings.Contains(body, obsolete) {
+				t.Errorf("%s still exposes obsolete Space business contract %q", name, obsolete)
+			}
+		}
+		if strings.Contains(strings.ToLower(body), "space") {
+			t.Errorf("%s still contains obsolete Space terminology", name)
+		}
+	}
+}
+
+func contractSection(t *testing.T, body, start, end string) string {
+	t.Helper()
+	startIndex := strings.Index(body, start)
+	if startIndex < 0 {
+		t.Fatalf("contract section start %q is missing", start)
+	}
+	endIndex := strings.Index(body[startIndex+len(start):], end)
+	if endIndex < 0 {
+		t.Fatalf("contract section end %q is missing", end)
+	}
+	return body[startIndex : startIndex+len(start)+endIndex]
+}

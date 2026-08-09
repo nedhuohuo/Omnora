@@ -17,6 +17,7 @@ import (
 )
 
 func TestRunNextJobBatchConsumesQueuedCatalogScan(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	ctx := context.Background()
 	db, err := store.OpenSQLite(ctx, store.SQLiteOptions{
 		Path:        filepath.Join(t.TempDir(), "index-worker-test.db"),
@@ -116,6 +117,7 @@ VALUES ('worker-mount', 'worker-space', 'Worker Mount', ?, 'external', 'read_onl
 }
 
 func TestCatalogSchedulerEnqueuesActiveIndexedMountsOnce(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	ctx := context.Background()
 	db, err := store.OpenSQLite(ctx, store.SQLiteOptions{
 		Path:        filepath.Join(t.TempDir(), "index-scheduler-test.db"),

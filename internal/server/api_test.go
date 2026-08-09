@@ -237,6 +237,7 @@ SELECT id FROM accounts WHERE email = 'admin@example.test'
 }
 
 func TestAdminSpaceAndMountListingsRequireAdminAndReturnGlobalData(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)
 	ctx := context.Background()
@@ -313,6 +314,7 @@ VALUES
 }
 
 func TestEnqueueIndexJobRejectsNonIndexableMounts(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	ctx := context.Background()
@@ -357,6 +359,7 @@ VALUES
 }
 
 func TestIndexJobResumesFromCheckpointWithoutIncreasingAttempts(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	ctx := context.Background()
@@ -504,7 +507,9 @@ func newAPITestServer(t *testing.T) (*store.DB, http.Handler) {
 	if _, err := db.SQL().Exec(`UPDATE recovery_control SET ready = 1 WHERE id = 1`); err != nil {
 		t.Fatalf("mark recovery control ready: %v", err)
 	}
+	managedDir := apiTestManagedDir(t, db)
 	return db, New(config.Config{
+		Storage:           config.StorageConfig{ManagedDir: managedDir},
 		Routes:            map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
 		RouteEnvOverrides: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
 	}, db)
@@ -513,7 +518,7 @@ func newAPITestServer(t *testing.T) (*store.DB, http.Handler) {
 func createAPITestAccounts(t *testing.T, db *store.DB) (identity.Account, identity.Account) {
 	t.Helper()
 	ctx := context.Background()
-	svc := identity.New(db.SQL(), identity.Options{})
+	svc := identity.New(db.SQL(), identity.Options{ManagedDir: apiTestManagedDir(t, db)})
 	secret, err := svc.PrepareInitialization(ctx, time.Hour)
 	if err != nil {
 		t.Fatalf("prepare initialization: %v", err)
@@ -537,6 +542,24 @@ func createAPITestAccounts(t *testing.T, db *store.DB) (identity.Account, identi
 		t.Fatalf("create member: %v", err)
 	}
 	return initialized.Account, member.Account
+}
+
+func apiTestManagedDir(t *testing.T, db *store.DB) string {
+	t.Helper()
+	var sequence int
+	var name, databasePath string
+	if err := db.SQL().QueryRow(`PRAGMA database_list`).Scan(&sequence, &name, &databasePath); err != nil {
+		t.Fatal(err)
+	}
+	realDatabasePath, err := filepath.EvalSymlinks(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedDir := filepath.Join(filepath.Dir(realDatabasePath), "managed-test")
+	if err := os.MkdirAll(managedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return managedDir
 }
 
 func issueAPITestSession(t *testing.T, db *store.DB, accountID string) *http.Cookie {

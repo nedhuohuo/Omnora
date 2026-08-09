@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"omnora/internal/aitoken"
+	"omnora/internal/contentref"
 	"omnora/internal/store"
 )
 
@@ -36,23 +37,19 @@ VALUES ('acct-confirm', 'confirm@example.test', 'Confirm', 'member', 'active')
 		t.Fatalf("insert account: %v", err)
 	}
 	if _, err := db.Exec(`
-INSERT INTO spaces(id, kind, name, owner_account_id, status)
-VALUES ('space-confirm', 'shared', 'Confirm', 'acct-confirm', 'active')
+INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, status, mount_identity_json)
+VALUES ('mount-confirm', 'Confirm', '/tmp/confirm', 'common', 'external', 'normal', 'read_write', 'active', '{}');
+INSERT INTO mount_grants(mount_id, account_id, permission)
+VALUES ('mount-confirm', 'acct-confirm', 'editor')
 `); err != nil {
-		t.Fatalf("insert space: %v", err)
-	}
-	if _, err := db.Exec(`
-INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status)
-VALUES ('mount-confirm', 'space-confirm', 'Confirm', '/tmp/confirm', 'managed', 'read_write', 'active')
-`); err != nil {
-		t.Fatalf("insert mount: %v", err)
+		t.Fatalf("insert mount grant: %v", err)
 	}
 	issued, err := aitoken.NewService(db).Create(context.Background(), aitoken.CreateRequest{
 		AccountID: "acct-confirm",
 		Name:      "confirmation test",
 		Scopes:    []aitoken.Scope{aitoken.ScopeFilesPurge},
 		Boundaries: []aitoken.DirectoryBoundary{{
-			SpaceID:      "space-confirm",
+			Source:       contentref.SourceCommonMount,
 			MountID:      "mount-confirm",
 			RelativePath: ".",
 		}},

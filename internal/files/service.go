@@ -236,6 +236,12 @@ func fingerprintFileInfo(info os.FileInfo) string {
 	return fmt.Sprintf("sha256:%x", digest.Sum(nil))
 }
 
+// Fingerprint exposes the opaque identity format used by authorization and
+// upload publication without exposing host paths or file contents.
+func Fingerprint(info os.FileInfo) string {
+	return fingerprintFileInfo(info)
+}
+
 func (Service) CreateDirectory(mount Mount, parentPath, name string) (string, error) {
 	parent, err := storage.CleanRelativePath(parentPath)
 	if err != nil {

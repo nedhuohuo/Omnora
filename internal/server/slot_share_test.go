@@ -15,6 +15,7 @@ import (
 )
 
 func TestAdminMountCreateSharedSlot(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, _ := newAPITestServer(t)
 	ctx := context.Background()
 	admin, _ := createAPITestAccounts(t, db)

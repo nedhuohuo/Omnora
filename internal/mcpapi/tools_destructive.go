@@ -13,6 +13,7 @@ import (
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
 	"omnora/internal/confirmation"
+	"omnora/internal/files"
 	"omnora/internal/memberfiles"
 	"omnora/internal/membershare"
 	"omnora/internal/storage"
@@ -35,7 +36,7 @@ func RegisterHighRiskTools(server *mcp.Server, deps ToolDependencies) {
 		}
 		preview := func() (confirmation.Preview, error) {
 			sourcePath, destinationPath := safeRelativePath(in.Source.Path), safeRelativePath(in.Destination.Path)
-			if sourcePath == "<invalid>" || destinationPath == "<invalid>" || (in.Source.SpaceID == in.Destination.SpaceID && in.Source.MountID == in.Destination.MountID && (sourcePath == destinationPath || strings.HasPrefix(destinationPath, sourcePath+"/"))) {
+			if sourcePath == "<invalid>" || destinationPath == "<invalid>" || (in.Source.Source == in.Destination.Source && in.Source.MountID == in.Destination.MountID && (sourcePath == destinationPath || strings.HasPrefix(destinationPath, sourcePath+"/"))) {
 				return confirmation.Preview{}, memberfiles.ErrMutationInvalidPath
 			}
 			entry, err := deps.MemberFiles.Preview(ctx, ps.Subject, in.Source.locator(), aitoken.ScopeFilesWrite)
@@ -58,7 +59,7 @@ func RegisterHighRiskTools(server *mcp.Server, deps ToolDependencies) {
 			return toolFailure[memberfiles.MutationResult](req, ErrConfirmationInvalid)
 		}
 		return mutate(ctx, deps, req, specs[0].Name, ps.Principal, in.Source.locator(), func() (memberfiles.MutationResult, error) {
-			return deps.MemberFiles.Move(ctx, ps.Subject, in.Source.locator(), in.Destination.locator())
+			return deps.MemberFiles.MoveSecure(ctx, ps.Subject, in.Source.locator(), in.Destination.locator(), nil)
 		})
 	})
 	addTool(server, specs[1], func(ctx context.Context, req *mcp.CallToolRequest, in TrashInput) (*mcp.CallToolResult, ToolOutput[memberfiles.TrashResult], error) {
@@ -87,7 +88,9 @@ func RegisterHighRiskTools(server *mcp.Server, deps ToolDependencies) {
 		if !proceed {
 			return toolFailure[memberfiles.TrashResult](req, ErrConfirmationInvalid)
 		}
-		return mutateAny(ctx, deps, req, specs[1].Name, ps.Principal, in.locator(), func() (memberfiles.TrashResult, error) { return deps.MemberFiles.Trash(ctx, ps.Subject, in.locator()) })
+		return mutateAny(ctx, deps, req, specs[1].Name, ps.Principal, in.locator(), func() (memberfiles.TrashResult, error) {
+			return deps.MemberFiles.TrashSecure(ctx, ps.Subject, in.locator(), nil)
+		})
 	})
 	addTool(server, specs[2], func(ctx context.Context, req *mcp.CallToolRequest, in TrashPurgeInput) (*mcp.CallToolResult, ToolOutput[memberfiles.MutationResult], error) {
 		ps, err := deps.subject(req)
@@ -119,7 +122,7 @@ func RegisterHighRiskTools(server *mcp.Server, deps ToolDependencies) {
 			return toolFailure[memberfiles.MutationResult](req, ErrConfirmationInvalid)
 		}
 		return mutate(ctx, deps, req, specs[2].Name, ps.Principal, in.locator(), func() (memberfiles.MutationResult, error) {
-			return deps.MemberFiles.PurgeTrash(ctx, ps.Subject, in.locator(), in.TrashID)
+			return deps.MemberFiles.PurgeTrashSecure(ctx, ps.Subject, in.locator(), in.TrashID, nil)
 		})
 	})
 	addTool(server, specs[3], func(ctx context.Context, req *mcp.CallToolRequest, in LocatorInput) (*mcp.CallToolResult, ToolOutput[memberfiles.MutationResult], error) {
@@ -149,7 +152,7 @@ func RegisterHighRiskTools(server *mcp.Server, deps ToolDependencies) {
 			return toolFailure[memberfiles.MutationResult](req, ErrConfirmationInvalid)
 		}
 		return mutate(ctx, deps, req, specs[3].Name, ps.Principal, in.locator(), func() (memberfiles.MutationResult, error) {
-			return deps.MemberFiles.EmptyTrash(ctx, ps.Subject, in.locator())
+			return deps.MemberFiles.EmptyTrashSecure(ctx, ps.Subject, in.locator(), nil)
 		})
 	})
 	addTool(server, specs[4], func(ctx context.Context, req *mcp.CallToolRequest, in DeletePermanentInput) (*mcp.CallToolResult, ToolOutput[memberfiles.MutationResult], error) {
@@ -179,7 +182,7 @@ func RegisterHighRiskTools(server *mcp.Server, deps ToolDependencies) {
 			return toolFailure[memberfiles.MutationResult](req, ErrConfirmationInvalid)
 		}
 		return mutate(ctx, deps, req, specs[4].Name, ps.Principal, in.locator(), func() (memberfiles.MutationResult, error) {
-			return deps.MemberFiles.DeletePermanently(ctx, ps.Subject, in.locator())
+			return deps.MemberFiles.DeletePermanentlySecure(ctx, ps.Subject, in.locator(), nil)
 		})
 	})
 	addTool(server, specs[5], func(ctx context.Context, req *mcp.CallToolRequest, in ShareCreateInput) (*mcp.CallToolResult, ToolOutput[membershare.IssuedShare], error) {
@@ -243,6 +246,67 @@ func RegisterHighRiskTools(server *mcp.Server, deps ToolDependencies) {
 			}
 			return map[string]any{"shareId": in.ShareID, "revoked": true}, nil
 		})
+	})
+	addTool(server, specs[7], func(ctx context.Context, req *mcp.CallToolRequest, in FileUpdateInput) (*mcp.CallToolResult, ToolOutput[UploadTicketOutput], error) {
+		ps, err := deps.subject(req)
+		if err != nil {
+			return toolFailure[UploadTicketOutput](req, err)
+		}
+		if err := requireHighRiskDeps(deps, false); err != nil || deps.TransferTickets == nil {
+			if err == nil {
+				err = errors.New("upload services are unavailable")
+			}
+			return toolFailure[UploadTicketOutput](req, err)
+		}
+		var expectedFingerprint string
+		preview := func() (confirmation.Preview, error) {
+			entry, previewErr := deps.MemberFiles.Preview(ctx, ps.Subject, in.locator(), aitoken.ScopeUploadsCreate)
+			if previewErr != nil {
+				return confirmation.Preview{}, previewErr
+			}
+			if entry.Kind != files.EntryKindFile {
+				return confirmation.Preview{}, files.ErrNotFile
+			}
+			expectedFingerprint = entry.ObjectFingerprint
+			cleanPath := safeRelativePath(in.Path)
+			return impactFor(fmt.Sprintf("Replace content of %s", cleanPath), 1, entry.Size,
+				map[string]any{"path": cleanPath, "expectedSize": in.ExpectedSize}, entry.ObjectFingerprint), nil
+		}
+		proceed, pending, err := deps.requireConfirmation(ctx, req, ps.Principal, specs[7].Name, preview)
+		if pending != nil {
+			return pending, ToolOutput[UploadTicketOutput]{}, nil
+		}
+		if err != nil {
+			return toolFailure[UploadTicketOutput](req, err)
+		}
+		if !proceed {
+			return toolFailure[UploadTicketOutput](req, ErrConfirmationInvalid)
+		}
+		intent, err := beginAudit(ctx, deps, req, specs[7].Name, ps.Principal, in.locator())
+		if err != nil {
+			return toolFailure[UploadTicketOutput](req, err)
+		}
+		upload, err := deps.MemberFiles.PrepareUpload(ctx, ps.Subject, memberfiles.UploadRequest{
+			Locator: in.locator(), ExpectedSize: in.ExpectedSize, Checksum: in.Checksum,
+			Overwrite: true, ExpectedObjectFingerprint: expectedFingerprint,
+		})
+		if err != nil {
+			_ = finishAudit(ctx, deps, req, intent, "failed", ps.Principal, in.locator(), err)
+			return toolFailure[UploadTicketOutput](req, err)
+		}
+		issued, err := deps.TransferTickets.IssueUpload(ctx, ps.Principal, upload.ID, in.locator(), upload.ExpectedSize)
+		if err != nil {
+			_ = deps.MemberFiles.CancelUpload(ctx, ps.Subject, upload.ID)
+			_ = finishAudit(ctx, deps, req, intent, "failed", ps.Principal, in.locator(), err)
+			return toolFailure[UploadTicketOutput](req, err)
+		}
+		out := UploadTicketOutput{ID: upload.ID, TargetPath: upload.TargetPath, ExpectedSize: upload.ExpectedSize,
+			Checksum: upload.Checksum, PartSize: upload.PartSize, URLTemplate: issued.URL + "/parts/{partNumber}",
+			Headers: map[string]string{"Authorization": "Bearer " + issued.BearerToken}, ExpiresAt: issued.ExpiresAt}
+		if err := finishAudit(ctx, deps, req, intent, "succeeded", ps.Principal, in.locator(), nil); err != nil {
+			return toolFailure[UploadTicketOutput](req, err)
+		}
+		return nil, ToolOutput[UploadTicketOutput]{Data: out}, nil
 	})
 }
 

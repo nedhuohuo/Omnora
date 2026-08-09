@@ -13,6 +13,7 @@ import (
 
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
+	"omnora/internal/contentref"
 	"omnora/internal/mountid"
 	"omnora/internal/store"
 )
@@ -20,7 +21,6 @@ import (
 type ticketFixture struct {
 	db        *sql.DB
 	root      string
-	spaceID   string
 	mountID   string
 	account   string
 	principal aitoken.Principal
@@ -44,6 +44,10 @@ func newTicketFixture(t *testing.T) ticketFixture {
 	if err != nil {
 		t.Fatalf("Abs(root) error = %v", err)
 	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(root) error = %v", err)
+	}
 	identity, err := mountid.Capture(root)
 	if err != nil {
 		t.Fatalf("Capture() error = %v", err)
@@ -56,12 +60,10 @@ func newTicketFixture(t *testing.T) ticketFixture {
 	if _, err := db.Exec(`
 INSERT INTO accounts(id, email, display_name, role, status)
 VALUES ('acct-ticket', 'ticket@example.test', 'Ticket', 'member', 'active');
-INSERT INTO spaces(id, kind, name, owner_account_id, status)
-VALUES ('space-ticket', 'shared', 'Ticket space', 'acct-ticket', 'active');
-INSERT INTO space_members(space_id, account_id, permission)
-VALUES ('space-ticket', 'acct-ticket', 'editor');
-INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status, mount_identity_json)
-VALUES ('mount-ticket', 'space-ticket', 'Files', ?, 'managed', 'read_write', 'active', ?);
+INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, status, mount_identity_json)
+VALUES ('mount-ticket', 'Files', ?, 'common', 'external', 'normal', 'read_write', 'active', ?);
+INSERT INTO mount_grants(mount_id, account_id, permission)
+VALUES ('mount-ticket', 'acct-ticket', 'editor');
 `, root, string(identityJSON)); err != nil {
 		t.Fatalf("insert fixture: %v", err)
 	}
@@ -74,7 +76,7 @@ VALUES ('mount-ticket', 'space-ticket', 'Files', ?, 'managed', 'read_write', 'ac
 			aitoken.ScopeFilesDownloadTicket,
 			aitoken.ScopeUploadsCreate,
 		},
-		Boundaries: []aitoken.DirectoryBoundary{{SpaceID: "space-ticket", MountID: "mount-ticket", RelativePath: "."}},
+		Boundaries: []aitoken.DirectoryBoundary{{Source: contentref.SourceCommonMount, MountID: "mount-ticket", RelativePath: "."}},
 		ExpiresAt:  now.Add(time.Hour),
 	})
 	if err != nil {
@@ -89,7 +91,7 @@ VALUES ('mount-ticket', 'space-ticket', 'Files', ?, 'managed', 'read_write', 'ac
 		ExpiresAt:  issued.Token.ExpiresAt,
 	}
 	return ticketFixture{
-		db: db, root: root, spaceID: "space-ticket", mountID: "mount-ticket", account: "acct-ticket",
+		db: db, root: root, mountID: "mount-ticket", account: "acct-ticket",
 		principal: principal, bearer: issued.BearerToken, clock: &now,
 	}
 }
@@ -104,15 +106,15 @@ func (f ticketFixture) service(t *testing.T, extra ...Option) *Service {
 }
 
 func (f ticketFixture) locator(path string) access.Locator {
-	return access.Locator{SpaceID: f.spaceID, MountID: f.mountID, Path: path}
+	return access.Locator{Source: contentref.SourceCommonMount, MountID: f.mountID, Path: path}
 }
 
 func (f ticketFixture) issueUploadSession(t *testing.T, id, target string, expires time.Time) {
 	t.Helper()
 	_, err := f.db.Exec(`
-INSERT INTO upload_sessions(id, account_id, space_id, mount_id, target_relative_path, declared_size, part_size, temp_dir, expires_at)
-VALUES (?, ?, ?, ?, ?, 100, 32, ?, ?)
-`, id, f.account, f.spaceID, f.mountID, target, filepath.Join(f.root, ".omnora", "tmp"), expires.UTC().Format(time.RFC3339Nano))
+INSERT INTO upload_sessions(id, account_id, mount_id, target_relative_path, declared_size, part_size, temp_dir, expires_at)
+VALUES (?, ?, ?, ?, 100, 32, ?, ?)
+`, id, f.account, f.mountID, target, filepath.Join(f.root, ".omnora", "tmp"), expires.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		t.Fatalf("insert upload session: %v", err)
 	}
@@ -343,7 +345,7 @@ func TestVerifyFailsClosedForInactiveAccountBoundaryAndMountDrift(t *testing.T) 
 		if err != nil {
 			t.Fatalf("IssueDownload() error = %v", err)
 		}
-		if _, err := f.db.Exec(`DELETE FROM space_members WHERE space_id = ? AND account_id = ?`, f.spaceID, f.account); err != nil {
+		if _, err := f.db.Exec(`DELETE FROM mount_grants WHERE mount_id = ? AND account_id = ?`, f.mountID, f.account); err != nil {
 			t.Fatalf("delete ACL: %v", err)
 		}
 		if _, err := s.Verify(context.Background(), ticket.BearerToken, OperationDownload); !errors.Is(err, ErrUnauthorized) {
@@ -438,27 +440,30 @@ func TestIssueUploadRejectsOwnerStatusAndLocatorMismatches(t *testing.T) {
 		}
 	})
 
-	t.Run("space mismatch", func(t *testing.T) {
-		f := newTicketFixture(t)
-		if _, err := f.db.Exec(`INSERT INTO spaces(id, kind, name, owner_account_id, status) VALUES ('space-other', 'shared', 'Other space', ?, 'active')`, f.account); err != nil {
-			t.Fatalf("insert other space: %v", err)
-		}
-		f.issueUploadSession(t, "upload-space", "space.bin", (*f.clock).Add(time.Hour))
-		if _, err := f.db.Exec(`UPDATE upload_sessions SET space_id = 'space-other' WHERE id = 'upload-space'`); err != nil {
-			t.Fatalf("change upload space: %v", err)
-		}
-		if _, err := f.service(t).IssueUpload(context.Background(), f.principal, "upload-space", f.locator("space.bin"), 10); !errors.Is(err, ErrUploadInvalid) {
-			t.Fatalf("IssueUpload(space mismatch) error = %v, want %v", err, ErrUploadInvalid)
-		}
-	})
-
 	t.Run("mount mismatch", func(t *testing.T) {
 		f := newTicketFixture(t)
-		var identity string
-		if err := f.db.QueryRow(`SELECT mount_identity_json FROM mounts WHERE id = ?`, f.mountID).Scan(&identity); err != nil {
-			t.Fatalf("read mount identity: %v", err)
+		otherRoot, err := os.MkdirTemp(".", ".ticket-other-")
+		if err != nil {
+			t.Fatal(err)
 		}
-		if _, err := f.db.Exec(`INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status, mount_identity_json) VALUES ('mount-other', ?, 'Other', ?, 'managed', 'read_write', 'active', ?)`, f.spaceID, f.root, identity); err != nil {
+		t.Cleanup(func() { _ = os.RemoveAll(otherRoot) })
+		otherRoot, err = filepath.Abs(otherRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		otherRoot, err = filepath.EvalSymlinks(otherRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity, err := mountid.Capture(otherRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.db.Exec(`INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, status, mount_identity_json) VALUES ('mount-other', 'Other', ?, 'common', 'external', 'normal', 'read_write', 'active', ?)`, otherRoot, string(encoded)); err != nil {
 			t.Fatalf("insert other mount: %v", err)
 		}
 		f.issueUploadSession(t, "upload-mount", "mount.bin", (*f.clock).Add(time.Hour))
@@ -590,7 +595,7 @@ func TestVerifyRejectsUploadClosureAndExpiredTicket(t *testing.T) {
 	freshTokens := aitoken.NewService(f.db, aitoken.WithClock(func() time.Time { return *f.clock }))
 	issued, err := freshTokens.Create(context.Background(), aitoken.CreateRequest{
 		AccountID: f.account, Name: "expiry", Scopes: []aitoken.Scope{aitoken.ScopeFilesDownloadTicket},
-		Boundaries: []aitoken.DirectoryBoundary{{SpaceID: f.spaceID, MountID: f.mountID, RelativePath: "."}}, ExpiresAt: (*f.clock).Add(time.Hour),
+		Boundaries: []aitoken.DirectoryBoundary{{Source: contentref.SourceCommonMount, MountID: f.mountID, RelativePath: "."}}, ExpiresAt: (*f.clock).Add(time.Hour),
 	})
 	if err != nil {
 		t.Fatalf("Create(expiry token) error = %v", err)

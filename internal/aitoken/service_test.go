@@ -4,396 +4,258 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"omnora/internal/contentref"
+
 	_ "modernc.org/sqlite"
 )
 
-const coreSchema = `
+const targetCoreSchema = `
+PRAGMA foreign_keys = ON;
 CREATE TABLE accounts (
 	id TEXT PRIMARY KEY,
 	email TEXT NOT NULL UNIQUE,
 	display_name TEXT NOT NULL,
 	role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
-	status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'deleted')),
+	status TEXT NOT NULL CHECK (status IN ('active', 'disabled', 'deleted')),
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
-CREATE TABLE spaces (
-	id TEXT PRIMARY KEY,
-	kind TEXT NOT NULL CHECK (kind IN ('personal', 'shared')),
-	name TEXT NOT NULL,
-	owner_account_id TEXT REFERENCES accounts(id),
-	status TEXT NOT NULL DEFAULT 'active'
-);
-
 CREATE TABLE mounts (
 	id TEXT PRIMARY KEY,
-	space_id TEXT NOT NULL REFERENCES spaces(id),
-	display_name TEXT NOT NULL,
-	root_path TEXT NOT NULL,
-	kind TEXT NOT NULL,
-	mode TEXT NOT NULL,
-	status TEXT NOT NULL
+	display_name TEXT NOT NULL UNIQUE,
+	root_path TEXT NOT NULL UNIQUE,
+	purpose TEXT NOT NULL CHECK (purpose IN ('personal_default', 'common')),
+	storage_kind TEXT NOT NULL CHECK (storage_kind IN ('managed', 'external')),
+	governance TEXT NOT NULL CHECK (governance IN ('system', 'normal', 'restricted')),
+	mode TEXT NOT NULL CHECK (mode IN ('read_only', 'read_write')),
+	index_enabled INTEGER NOT NULL DEFAULT 0,
+	status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'disabled', 'unavailable', 'deleted')),
+	mount_identity_json TEXT,
+	canonical_root_path TEXT,
+	identity_key TEXT,
+	mount_source_key TEXT,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
+CREATE TABLE personal_directories (
+	account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE RESTRICT,
+	relative_path TEXT NOT NULL UNIQUE,
+	state TEXT NOT NULL CHECK (state IN ('ready', 'retained')),
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE mount_grants (
+	mount_id TEXT NOT NULL REFERENCES mounts(id) ON DELETE CASCADE,
+	account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+	permission TEXT NOT NULL CHECK (permission IN ('viewer', 'editor')),
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (mount_id, account_id)
+);
 CREATE TABLE system_state (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL,
 	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
 INSERT INTO system_state(key, value) VALUES ('credential_generation', '7');
 `
 
-func TestCreateHashesSecretAndVerifyBearerReturnsPrincipal(t *testing.T) {
+func TestAllowlistedScopesReplacesLegacySpaceScope(t *testing.T) {
+	expected := []Scope{
+		ScopeMountsRead,
+		ScopeFilesList,
+		ScopeFilesMetadata,
+		ScopeFilesText,
+		ScopeFilesDownloadTicket,
+		ScopeSearchRead,
+		ScopeUploadsCreate,
+		ScopeFilesWrite,
+		ScopeFilesTrash,
+		ScopeTrashRead,
+		ScopeFilesRestore,
+		ScopeFilesPurge,
+		ScopeSharesRead,
+		ScopeSharesCreate,
+		ScopeSharesRevoke,
+	}
+	if got := AllowlistedScopes(); !reflect.DeepEqual(got, expected) {
+		t.Fatalf("AllowlistedScopes() = %v, want %v", got, expected)
+	}
+	if _, err := ValidateScopes([]Scope{Scope("spaces:read")}); !errors.Is(err, ErrInvalidScope) {
+		t.Fatalf("legacy spaces:read error = %v, want ErrInvalidScope", err)
+	}
+	if got, err := ValidateScopes(expected); err != nil || !reflect.DeepEqual(got, expected) {
+		t.Fatalf("ValidateScopes(expected) = %v, %v", got, err)
+	}
+	for _, scopes := range [][]Scope{nil, {}, {ScopeFilesList, ScopeFilesList}, {Scope("admin:delete")}} {
+		if _, err := ValidateScopes(scopes); !errors.Is(err, ErrInvalidScope) {
+			t.Fatalf("ValidateScopes(%v) error = %v, want ErrInvalidScope", scopes, err)
+		}
+	}
+}
+
+func TestCreateStoresAndReloadsAccountMountBoundaries(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
-	insertActiveAccountSpaceMount(t, db)
-	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	insertActiveAccountModel(t, db)
+	now := testNow()
 	service := NewService(db, WithClock(func() time.Time { return now }))
 
 	issued, err := service.Create(ctx, CreateRequest{
 		AccountID: "acct_1",
-		Name:      "Local editor MCP",
-		Scopes:    []Scope{ScopeSpacesRead, ScopeFilesList, ScopeFilesMetadata},
-		Boundaries: []DirectoryBoundary{{
-			SpaceID:      "space_1",
-			MountID:      "mount_1",
-			RelativePath: "docs/./notes",
-		}},
+		Name:      "Account MCP",
+		Scopes:    []Scope{ScopeMountsRead, ScopeFilesList},
+		Boundaries: []DirectoryBoundary{
+			{Source: contentref.SourcePersonal, RelativePath: "docs/./notes"},
+			{Source: contentref.SourceCommonMount, MountID: "common_1", RelativePath: "."},
+			{Source: SourceAllAccountContent, RelativePath: "."},
+		},
 		ExpiresAt: now.Add(time.Hour),
 	})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 	if issued.Secret == "" || issued.BearerToken != issued.Token.PublicID+"."+issued.Secret {
-		t.Fatalf("issued token did not include one-time bearer material: %#v", issued)
+		t.Fatalf("issued token missing one-time bearer material: %#v", issued)
 	}
 	if issued.Token.SecretHash == issued.Secret || !strings.HasPrefix(issued.Token.SecretHash, "sha256:") {
 		t.Fatalf("SecretHash = %q, want hash only", issued.Token.SecretHash)
 	}
-	if issued.Token.Boundaries[0].RelativePath != "docs/notes" {
-		t.Fatalf("boundary path = %q, want normalized docs/notes", issued.Token.Boundaries[0].RelativePath)
-	}
-
 	var storedHash string
-	if err := db.QueryRowContext(ctx, "SELECT secret_hash FROM ai_tokens WHERE public_id = ?", issued.Token.PublicID).Scan(&storedHash); err != nil {
-		t.Fatalf("query secret_hash: %v", err)
+	if err := db.QueryRow(`SELECT secret_hash FROM ai_tokens WHERE id = ?`, issued.Token.ID).Scan(&storedHash); err != nil {
+		t.Fatal(err)
 	}
 	if storedHash == issued.Secret || !secretMatches(issued.Secret, storedHash) {
-		t.Fatal("stored secret hash does not verify returned secret")
+		t.Fatal("stored secret hash does not verify the one-time secret")
+	}
+	wantBoundaries := []DirectoryBoundary{
+		{Source: contentref.SourcePersonal, RelativePath: "docs/notes"},
+		{Source: contentref.SourceCommonMount, MountID: "common_1", RelativePath: ""},
+		{Source: SourceAllAccountContent, RelativePath: ""},
+	}
+	if !reflect.DeepEqual(issued.Token.Boundaries, wantBoundaries) {
+		t.Fatalf("issued boundaries = %#v, want %#v", issued.Token.Boundaries, wantBoundaries)
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT source, COALESCE(mount_id, ''), relative_path FROM ai_token_boundaries WHERE token_id = ? ORDER BY id`, issued.Token.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var stored []DirectoryBoundary
+	for rows.Next() {
+		var boundary DirectoryBoundary
+		if err := rows.Scan(&boundary.Source, &boundary.MountID, &boundary.RelativePath); err != nil {
+			t.Fatal(err)
+		}
+		stored = append(stored, boundary)
+	}
+	if !reflect.DeepEqual(stored, wantBoundaries) {
+		t.Fatalf("stored boundaries = %#v, want %#v", stored, wantBoundaries)
 	}
 
 	principal, err := service.VerifyBearer(ctx, "Bearer "+issued.BearerToken)
 	if err != nil {
 		t.Fatalf("VerifyBearer() error = %v", err)
 	}
-	if principal.AccountID != "acct_1" || principal.TokenID != issued.Token.ID || !principal.HasScope(ScopeFilesList) {
-		t.Fatalf("principal metadata mismatch: %#v", principal)
-	}
-	if len(principal.Boundaries) != 1 || principal.Boundaries[0].RelativePath != "docs/notes" {
-		t.Fatalf("principal boundaries = %#v, want normalized boundary", principal.Boundaries)
-	}
-
-	var lastUsedAt string
-	if err := db.QueryRowContext(ctx, "SELECT last_used_at FROM ai_tokens WHERE id = ?", issued.Token.ID).Scan(&lastUsedAt); err != nil {
-		t.Fatalf("query last_used_at: %v", err)
-	}
-	if lastUsedAt != formatTime(now) {
-		t.Fatalf("last_used_at = %q, want %q", lastUsedAt, formatTime(now))
+	if principal.AccountID != "acct_1" || !principal.HasScope(ScopeMountsRead) || !reflect.DeepEqual(principal.Boundaries, wantBoundaries) {
+		t.Fatalf("principal = %#v", principal)
 	}
 }
 
-func TestAITokenCredentialGenerationIsStoredAndEnforced(t *testing.T) {
+func TestCreateValidatesBoundaryAuthorizationAtIssueTime(t *testing.T) {
 	ctx := context.Background()
-	db := newTestDB(t)
-	insertActiveAccountSpaceMount(t, db)
-	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
-	service := NewService(db, WithClock(func() time.Time { return now }))
-
-	issued, err := service.Create(ctx, CreateRequest{
-		AccountID: "acct_1",
-		Name:      "epoch test",
-		Scopes:    []Scope{ScopeSpacesRead},
-		Boundaries: []DirectoryBoundary{{
-			SpaceID: "space_1", MountID: "mount_1", RelativePath: ".",
-		}},
-		ExpiresAt: now.Add(time.Hour),
-	})
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-
-	var generation int64
-	if err := db.QueryRowContext(ctx, "SELECT credential_generation FROM ai_tokens WHERE id = ?", issued.Token.ID).Scan(&generation); err != nil {
-		t.Fatalf("query credential_generation: %v", err)
-	}
-	if generation != 7 {
-		t.Fatalf("credential_generation = %d, want 7", generation)
-	}
-
-	if _, err := db.ExecContext(ctx, `
-UPDATE system_state SET value = '8', updated_at = CURRENT_TIMESTAMP
-WHERE key = 'credential_generation'
-`); err != nil {
-		t.Fatalf("bump credential generation: %v", err)
-	}
-	if _, err := service.VerifyBearer(ctx, "Bearer "+issued.BearerToken); !errors.Is(err, ErrInvalidToken) {
-		t.Fatalf("VerifyBearer() after generation bump error = %v, want ErrInvalidToken", err)
-	}
-}
-
-func TestCreateWithoutExpiryNeverExpires(t *testing.T) {
-	ctx := context.Background()
-	db := newTestDB(t)
-	insertActiveAccountSpaceMount(t, db)
-	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
-	service := NewService(db, WithClock(func() time.Time { return now }))
-
-	issued, err := service.Create(ctx, CreateRequest{
-		AccountID: "acct_1",
-		Name:      "never-expiring MCP",
-		Scopes:    []Scope{ScopeSpacesRead},
-		Boundaries: []DirectoryBoundary{{
-			SpaceID: "space_1", MountID: "mount_1", RelativePath: ".",
-		}},
-	})
-	if err != nil {
-		t.Fatalf("Create() without expiry error = %v", err)
-	}
-	if !issued.Token.ExpiresAt.IsZero() {
-		t.Fatalf("issued token ExpiresAt = %v, want zero value", issued.Token.ExpiresAt)
-	}
-	var storedExpiry string
-	if err := db.QueryRowContext(ctx, "SELECT expires_at FROM ai_tokens WHERE id = ?", issued.Token.ID).Scan(&storedExpiry); err != nil {
-		t.Fatalf("query expires_at: %v", err)
-	}
-	if storedExpiry != "" {
-		t.Fatalf("stored expires_at = %q, want empty string", storedExpiry)
-	}
-
-	// The token must remain valid well beyond the original creation time.
-	farFuture := NewService(db, WithClock(func() time.Time { return now.Add(100 * 365 * 24 * time.Hour) }))
-	principal, err := farFuture.VerifyBearer(ctx, issued.BearerToken)
-	if err != nil {
-		t.Fatalf("VerifyBearer() far in the future error = %v, want success", err)
-	}
-	if !principal.ExpiresAt.IsZero() {
-		t.Fatalf("principal ExpiresAt = %v, want zero value", principal.ExpiresAt)
-	}
-	if _, err := farFuture.RefreshPrincipal(ctx, issued.Token.ID); err != nil {
-		t.Fatalf("RefreshPrincipal() far in the future error = %v, want success", err)
-	}
-}
-
-func TestValidateScopesRejectsUnknownDuplicateAndEmpty(t *testing.T) {
-	for _, scopes := range [][]Scope{
-		nil,
-		{},
-		{ScopeFilesList, ScopeFilesList},
-		{Scope("admin:delete")},
-	} {
-		if _, err := ValidateScopes(scopes); !errors.Is(err, ErrInvalidScope) {
-			t.Fatalf("ValidateScopes(%v) error = %v, want ErrInvalidScope", scopes, err)
+	now := testNow()
+	request := func(boundary DirectoryBoundary) CreateRequest {
+		return CreateRequest{
+			AccountID: "acct_1", Name: "authorization test", Scopes: []Scope{ScopeFilesList},
+			Boundaries: []DirectoryBoundary{boundary}, ExpiresAt: now.Add(time.Hour),
 		}
 	}
-	if got, err := ValidateScopes([]Scope{ScopeSearchRead, ScopeUploadsCreate}); err != nil || len(got) != 2 {
-		t.Fatalf("ValidateScopes(valid) = %v, %v", got, err)
-	}
-	expected := []Scope{
-		"spaces:read",
-		"files:list",
-		"files:metadata",
-		"files:text",
-		"files:download_ticket",
-		"search:read",
-		"uploads:create",
-		"files:write",
-		"files:trash",
-		"trash:read",
-		"files:restore",
-		"files:purge",
-		"shares:read",
-		"shares:create",
-		"shares:revoke",
-	}
-	if got := AllowlistedScopes(); !reflect.DeepEqual(got, expected) {
-		t.Fatalf("AllowlistedScopes() = %v, want %v", got, expected)
-	}
-	if got, err := ValidateScopes(expected); err != nil || !reflect.DeepEqual(got, expected) {
-		t.Fatalf("ValidateScopes(expected) = %v, %v; want %v", got, err, expected)
-	}
-}
-
-func TestRefreshPrincipalReloadsCurrentTokenAndRejectsInactiveStates(t *testing.T) {
-	ctx := context.Background()
-	db := newTestDB(t)
-	insertActiveAccountSpaceMount(t, db)
-	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
-	service := NewService(db, WithClock(func() time.Time { return now }))
-	issued, err := service.Create(ctx, CreateRequest{
-		AccountID: "acct_1",
-		Name:      "transfer client",
-		Scopes:    []Scope{ScopeFilesWrite},
-		Boundaries: []DirectoryBoundary{{
-			SpaceID: "space_1", MountID: "mount_1", RelativePath: "docs",
-		}},
-		ExpiresAt: now.Add(time.Hour),
-	})
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE ai_tokens SET scopes = ? WHERE id = ?`, `["files:trash"]`, issued.Token.ID); err != nil {
-		t.Fatalf("update token scopes: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM ai_token_boundaries WHERE token_id = ?`, issued.Token.ID); err != nil {
-		t.Fatalf("replace token boundaries: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO ai_token_boundaries(token_id, space_id, mount_id, relative_path)
-VALUES (?, 'space_1', 'mount_1', 'refreshed')
-`, issued.Token.ID); err != nil {
-		t.Fatalf("insert refreshed token boundary: %v", err)
-	}
-	principal, err := service.RefreshPrincipal(ctx, issued.Token.ID)
-	if err != nil {
-		t.Fatalf("RefreshPrincipal() error = %v", err)
-	}
-	if principal.TokenID != issued.Token.ID || !principal.HasScope(ScopeFilesTrash) || principal.HasScope(ScopeFilesWrite) {
-		t.Fatalf("refreshed principal = %#v", principal)
-	}
-	if len(principal.Boundaries) != 1 || principal.Boundaries[0].SpaceID != "space_1" ||
-		principal.Boundaries[0].MountID != "mount_1" || principal.Boundaries[0].RelativePath != "refreshed" {
-		t.Fatalf("refreshed principal boundaries = %#v", principal.Boundaries)
-	}
-
-	for _, tc := range []struct {
-		name  string
-		stmt  string
-		args  []any
-		clock time.Time
-	}{
-		{name: "inactive account", stmt: `UPDATE accounts SET status = 'disabled' WHERE id = 'acct_1'`, clock: now},
-		{name: "revoked token", stmt: `UPDATE ai_tokens SET revoked_at = ? WHERE id = ?`, args: []any{formatTime(now), issued.Token.ID}, clock: now},
-		{name: "expired token", stmt: `UPDATE ai_tokens SET expires_at = ? WHERE id = ?`, args: []any{formatTime(now), issued.Token.ID}, clock: now},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			testDB := cloneTokenDB(t, db)
-			if tc.name == "inactive account" {
-				if _, err := testDB.ExecContext(ctx, tc.stmt, tc.args...); err != nil {
-					t.Fatalf("setup: %v", err)
-				}
-			} else {
-				if _, err := testDB.ExecContext(ctx, `UPDATE accounts SET status = 'active' WHERE id = 'acct_1'`); err != nil {
-					t.Fatalf("activate account: %v", err)
-				}
-				if _, err := testDB.ExecContext(ctx, tc.stmt, tc.args...); err != nil {
-					t.Fatalf("setup: %v", err)
-				}
-			}
-			refreshService := NewService(testDB, WithClock(func() time.Time { return tc.clock }))
-			if _, err := refreshService.RefreshPrincipal(ctx, issued.Token.ID); !errors.Is(err, ErrInvalidToken) {
-				t.Fatalf("RefreshPrincipal() error = %v, want ErrInvalidToken", err)
-			}
-		})
-	}
-}
-
-func TestVerifyBearerRejectsInvalidCredentialStates(t *testing.T) {
-	ctx := context.Background()
-	db := newTestDB(t)
-	insertActiveAccountSpaceMount(t, db)
-	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
-	service := NewService(db, WithClock(func() time.Time { return now }))
-	issued, err := service.Create(ctx, CreateRequest{
-		AccountID: "acct_1",
-		Name:      "REST client",
-		Scopes:    []Scope{ScopeFilesText},
-		Boundaries: []DirectoryBoundary{{
-			SpaceID: "space_1",
-			MountID: "mount_1",
-		}},
-		ExpiresAt: now.Add(time.Minute),
-	})
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-
-	for _, tc := range []struct {
-		name  string
-		setup func(t *testing.T, db *sql.DB)
-		token string
+	tests := []struct {
+		name     string
+		boundary DirectoryBoundary
+		setup    func(*testing.T, *sql.DB)
 	}{
 		{
-			name:  "wrong secret",
-			token: issued.Token.PublicID + ".wrong",
+			name: "personal directory not ready", boundary: DirectoryBoundary{Source: contentref.SourcePersonal},
+			setup: func(t *testing.T, db *sql.DB) {
+				execTest(t, db, `UPDATE personal_directories SET state = 'retained' WHERE account_id = 'acct_1'`)
+			},
 		},
 		{
-			name: "revoked",
+			name: "default mount inactive", boundary: DirectoryBoundary{Source: contentref.SourcePersonal},
 			setup: func(t *testing.T, db *sql.DB) {
-				t.Helper()
-				if _, err := db.ExecContext(ctx, "UPDATE ai_tokens SET revoked_at = ? WHERE id = ?", formatTime(now), issued.Token.ID); err != nil {
-					t.Fatalf("revoke token: %v", err)
-				}
+				execTest(t, db, `UPDATE mounts SET status = 'disabled' WHERE id = 'personal-default'`)
 			},
-			token: issued.BearerToken,
 		},
 		{
-			name: "account disabled",
+			name: "common mount not granted", boundary: DirectoryBoundary{Source: contentref.SourceCommonMount, MountID: "common_1"},
 			setup: func(t *testing.T, db *sql.DB) {
-				t.Helper()
-				if _, err := db.ExecContext(ctx, "UPDATE accounts SET status = 'disabled' WHERE id = 'acct_1'"); err != nil {
-					t.Fatalf("disable account: %v", err)
-				}
+				execTest(t, db, `DELETE FROM mount_grants WHERE mount_id = 'common_1' AND account_id = 'acct_1'`)
 			},
-			token: issued.BearerToken,
 		},
-	} {
+		{
+			name: "common mount inactive", boundary: DirectoryBoundary{Source: contentref.SourceCommonMount, MountID: "common_1"},
+			setup: func(t *testing.T, db *sql.DB) {
+				execTest(t, db, `UPDATE mounts SET status = 'disabled' WHERE id = 'common_1'`)
+			},
+		},
+		{
+			name: "common mount is not external", boundary: DirectoryBoundary{Source: contentref.SourceCommonMount, MountID: "common_1"},
+			setup: func(t *testing.T, db *sql.DB) {
+				execTest(t, db, `UPDATE mounts SET storage_kind = 'managed' WHERE id = 'common_1'`)
+			},
+		},
+	}
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			testDB := cloneTokenDB(t, db)
-			testService := NewService(testDB, WithClock(func() time.Time { return now }))
-			if tc.setup != nil {
-				tc.setup(t, testDB)
-			}
-			_, err := testService.VerifyBearer(ctx, tc.token)
-			if !errors.Is(err, ErrInvalidToken) {
-				t.Fatalf("VerifyBearer() error = %v, want ErrInvalidToken", err)
+			db := newTestDB(t)
+			insertActiveAccountModel(t, db)
+			tc.setup(t, db)
+			_, err := NewService(db, WithClock(func() time.Time { return now })).Create(ctx, request(tc.boundary))
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("Create() error = %v, want ErrInvalidInput", err)
 			}
 		})
 	}
 
-	expiredService := NewService(db, WithClock(func() time.Time { return now.Add(2 * time.Minute) }))
-	_, err = expiredService.VerifyBearer(ctx, issued.BearerToken)
-	if !errors.Is(err, ErrInvalidToken) {
-		t.Fatalf("VerifyBearer() expired error = %v, want ErrInvalidToken", err)
+	db := newTestDB(t)
+	insertActiveAccountOnly(t, db)
+	if _, err := NewService(db, WithClock(func() time.Time { return now })).Create(ctx, request(DirectoryBoundary{Source: SourceAllAccountContent})); err != nil {
+		t.Fatalf("all_account_content should require only an active account: %v", err)
 	}
 }
 
-func TestCreateRejectsUnsafeBoundaries(t *testing.T) {
+func TestCreateRejectsUnsafeOrUnsupportedAutomationBoundaries(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
-	insertActiveAccountSpaceMount(t, db)
-	service := NewService(db, WithClock(func() time.Time {
-		return time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
-	}))
+	insertActiveAccountModel(t, db)
+	service := NewService(db, WithClock(testNow))
 
-	for _, boundary := range []DirectoryBoundary{
-		{SpaceID: "space_1", MountID: "mount_1", RelativePath: "../escape"},
-		{SpaceID: "space_1", MountID: "mount_1", RelativePath: "/absolute"},
-		{SpaceID: "space_1", MountID: "mount_1", RelativePath: ".omnora/private"},
-		{SpaceID: "", MountID: "mount_1", RelativePath: "docs"},
-	} {
+	boundaries := []DirectoryBoundary{
+		{Source: contentref.SourceCollaboration, RelativePath: "docs"},
+		{Source: contentref.SourcePersonal, MountID: "common_1"},
+		{Source: contentref.SourceCommonMount},
+		{Source: SourceAllAccountContent, MountID: "common_1"},
+		{Source: SourceAllAccountContent, RelativePath: "docs"},
+		{Source: contentref.SourcePersonal, RelativePath: "/absolute"},
+		{Source: contentref.SourcePersonal, RelativePath: `docs\notes`},
+		{Source: contentref.SourcePersonal, RelativePath: "../escape"},
+		{Source: contentref.SourcePersonal, RelativePath: "docs/../escape"},
+		{Source: contentref.SourcePersonal, RelativePath: ".omnora/private"},
+		{Source: contentref.SourcePersonal, RelativePath: "docs/.omnora/private"},
+	}
+	for _, boundary := range boundaries {
 		_, err := service.Create(ctx, CreateRequest{
-			AccountID:  "acct_1",
-			Name:       "bad boundary",
-			Scopes:     []Scope{ScopeFilesList},
-			Boundaries: []DirectoryBoundary{boundary},
-			ExpiresAt:  time.Date(2026, 8, 3, 13, 0, 0, 0, time.UTC),
+			AccountID: "acct_1", Name: "bad boundary", Scopes: []Scope{ScopeFilesList},
+			Boundaries: []DirectoryBoundary{boundary}, ExpiresAt: testNow().Add(time.Hour),
 		})
 		if !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("Create(%#v) error = %v, want ErrInvalidInput", boundary, err)
@@ -401,74 +263,336 @@ func TestCreateRejectsUnsafeBoundaries(t *testing.T) {
 	}
 }
 
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())+"?mode=memory&cache=shared")
+func TestRefreshPrincipalDoesNotFreezeCommonMountGrant(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	insertActiveAccountModel(t, db)
+	now := testNow()
+	service := NewService(db, WithClock(func() time.Time { return now }))
+	issued, err := service.Create(ctx, CreateRequest{
+		AccountID: "acct_1", Name: "dynamic authorization", Scopes: []Scope{ScopeFilesList},
+		Boundaries: []DirectoryBoundary{{Source: contentref.SourceCommonMount, MountID: "common_1"}},
+		ExpiresAt:  now.Add(time.Hour),
+	})
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatal(err)
 	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Fatalf("close sqlite: %v", err)
+	execTest(t, db, `DELETE FROM mount_grants WHERE mount_id = 'common_1' AND account_id = 'acct_1'`)
+	principal, err := service.RefreshPrincipal(ctx, issued.Token.ID)
+	if err != nil {
+		t.Fatalf("RefreshPrincipal() after grant removal error = %v", err)
+	}
+	if !reflect.DeepEqual(principal.Boundaries, issued.Token.Boundaries) {
+		t.Fatalf("refreshed boundaries = %#v, want %#v", principal.Boundaries, issued.Token.Boundaries)
+	}
+}
+
+func TestVerifyAndRefreshRejectTamperedOrMissingStoredBoundaries(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		path *string
+	}{
+		{name: "parent component", path: stringPointer("../escape")},
+		{name: "reserved metadata", path: stringPointer(".omnora/private")},
+		{name: "non canonical", path: stringPointer("docs/./notes")},
+		{name: "missing boundary", path: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			insertActiveAccountModel(t, db)
+			service, issued := issuePersonalToken(t, db, testNow())
+			if tc.path == nil {
+				execTest(t, db, `DELETE FROM ai_token_boundaries WHERE token_id = ?`, issued.Token.ID)
+			} else {
+				execTest(t, db, `UPDATE ai_token_boundaries SET relative_path = ? WHERE token_id = ?`, *tc.path, issued.Token.ID)
+			}
+
+			if _, err := service.VerifyBearer(ctx, issued.BearerToken); !errors.Is(err, ErrInvalidToken) {
+				t.Fatalf("VerifyBearer() error = %v, want ErrInvalidToken", err)
+			}
+			if _, err := service.RefreshPrincipal(ctx, issued.Token.ID); !errors.Is(err, ErrInvalidToken) {
+				t.Fatalf("RefreshPrincipal() error = %v, want ErrInvalidToken", err)
+			}
+		})
+	}
+}
+
+func TestCredentialGenerationExpiryAndInactiveAccountRemainEnforced(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	insertActiveAccountModel(t, db)
+	now := testNow()
+	service := NewService(db, WithClock(func() time.Time { return now }))
+	issued, err := service.Create(ctx, CreateRequest{
+		AccountID: "acct_1", Name: "credential state", Scopes: []Scope{ScopeFilesText},
+		Boundaries: []DirectoryBoundary{{Source: contentref.SourcePersonal}}, ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generation int64
+	if err := db.QueryRow(`SELECT credential_generation FROM ai_tokens WHERE id = ?`, issued.Token.ID).Scan(&generation); err != nil || generation != 7 {
+		t.Fatalf("credential_generation = %d, error = %v", generation, err)
+	}
+	execTest(t, db, `UPDATE system_state SET value = '8' WHERE key = 'credential_generation'`)
+	if _, err := service.VerifyBearer(ctx, issued.BearerToken); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("generation bump error = %v, want ErrInvalidToken", err)
+	}
+
+	db2 := newTestDB(t)
+	insertActiveAccountModel(t, db2)
+	service2 := NewService(db2, WithClock(func() time.Time { return now }))
+	issued2, err := service2.Create(ctx, CreateRequest{
+		AccountID: "acct_1", Name: "expiration", Scopes: []Scope{ScopeFilesText},
+		Boundaries: []DirectoryBoundary{{Source: contentref.SourcePersonal}}, ExpiresAt: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredService := NewService(db2, WithClock(func() time.Time { return now.Add(2 * time.Minute) }))
+	if _, err := expiredService.VerifyBearer(ctx, issued2.BearerToken); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expired error = %v, want ErrInvalidToken", err)
+	}
+	if _, err := expiredService.RefreshPrincipal(ctx, issued2.Token.ID); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expired refresh error = %v, want ErrInvalidToken", err)
+	}
+	execTest(t, db2, `UPDATE accounts SET status = 'disabled' WHERE id = 'acct_1'`)
+	if _, err := service2.RefreshPrincipal(ctx, issued2.Token.ID); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("inactive account refresh error = %v, want ErrInvalidToken", err)
+	}
+}
+
+func TestVerifyBearerSecurityAndUsageRegressions(t *testing.T) {
+	ctx := context.Background()
+	now := testNow()
+
+	t.Run("wrong secret", func(t *testing.T) {
+		db := newTestDB(t)
+		insertActiveAccountModel(t, db)
+		service, issued := issuePersonalToken(t, db, now)
+		if _, err := service.VerifyBearer(ctx, issued.Token.PublicID+".wrong"); !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("VerifyBearer() error = %v, want ErrInvalidToken", err)
 		}
 	})
-	if _, err := db.Exec(coreSchema); err != nil {
-		t.Fatalf("install core schema: %v", err)
+
+	t.Run("revoked", func(t *testing.T) {
+		db := newTestDB(t)
+		insertActiveAccountModel(t, db)
+		service, issued := issuePersonalToken(t, db, now)
+		if err := service.Revoke(ctx, issued.Token.ID); err != nil {
+			t.Fatalf("Revoke() error = %v", err)
+		}
+		if _, err := service.VerifyBearer(ctx, issued.BearerToken); !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("VerifyBearer() error = %v, want ErrInvalidToken", err)
+		}
+		if _, err := service.RefreshPrincipal(ctx, issued.Token.ID); !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("RefreshPrincipal() error = %v, want ErrInvalidToken", err)
+		}
+	})
+
+	t.Run("inactive account", func(t *testing.T) {
+		db := newTestDB(t)
+		insertActiveAccountModel(t, db)
+		service, issued := issuePersonalToken(t, db, now)
+		execTest(t, db, `UPDATE accounts SET status = 'disabled' WHERE id = 'acct_1'`)
+		if _, err := service.VerifyBearer(ctx, issued.BearerToken); !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("VerifyBearer() error = %v, want ErrInvalidToken", err)
+		}
+	})
+
+	t.Run("malformed bearer", func(t *testing.T) {
+		db := newTestDB(t)
+		service := NewService(db, WithClock(func() time.Time { return now }))
+		for _, bearer := range []string{"", "Bearer", "Bearer public", "public.", ".secret", "public.secret.extra", "public. secret", "public\n.secret"} {
+			if _, err := service.VerifyBearer(ctx, bearer); !errors.Is(err, ErrInvalidToken) {
+				t.Fatalf("VerifyBearer(%q) error = %v, want ErrInvalidToken", bearer, err)
+			}
+		}
+	})
+
+	t.Run("last used at", func(t *testing.T) {
+		db := newTestDB(t)
+		insertActiveAccountModel(t, db)
+		service, issued := issuePersonalToken(t, db, now)
+		if _, err := service.VerifyBearer(ctx, "Bearer "+issued.BearerToken); err != nil {
+			t.Fatalf("VerifyBearer() error = %v", err)
+		}
+		var lastUsedAt string
+		if err := db.QueryRow(`SELECT last_used_at FROM ai_tokens WHERE id = ?`, issued.Token.ID).Scan(&lastUsedAt); err != nil {
+			t.Fatal(err)
+		}
+		if lastUsedAt != formatTime(now) {
+			t.Fatalf("last_used_at = %q, want %q", lastUsedAt, formatTime(now))
+		}
+	})
+}
+
+func TestCreateSecureRollsBackTokenAndAuditTogether(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	insertActiveAccountModel(t, db)
+	execTest(t, db, `CREATE TABLE audit_probe(event TEXT NOT NULL)`)
+	service := NewService(db, WithClock(testNow))
+	auditErr := errors.New("audit unavailable")
+	_, err := service.CreateSecure(ctx, CreateRequest{
+		AccountID: "acct_1", Name: "atomic create", Scopes: []Scope{ScopeFilesList},
+		Boundaries: []DirectoryBoundary{{Source: contentref.SourcePersonal}}, ExpiresAt: testNow().Add(time.Hour),
+	}, func(ctx context.Context, tx *sql.Tx, token Token) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO audit_probe(event) VALUES (?)`, token.ID); err != nil {
+			return err
+		}
+		return auditErr
+	})
+	if !errors.Is(err, auditErr) {
+		t.Fatalf("CreateSecure() error = %v, want audit error", err)
+	}
+	assertRowCount(t, db, "ai_tokens", 0)
+	assertRowCount(t, db, "ai_token_boundaries", 0)
+	assertRowCount(t, db, "audit_probe", 0)
+}
+
+func TestRevokeSecureRollsBackRevocationAndAuditTogether(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	insertActiveAccountModel(t, db)
+	execTest(t, db, `CREATE TABLE audit_probe(event TEXT NOT NULL)`)
+	service, issued := issuePersonalToken(t, db, testNow())
+	auditErr := errors.New("audit unavailable")
+	err := service.RevokeSecure(ctx, issued.Token.ID, func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO audit_probe(event) VALUES ('revoke')`); err != nil {
+			return err
+		}
+		return auditErr
+	})
+	if !errors.Is(err, auditErr) {
+		t.Fatalf("RevokeSecure() error = %v, want audit error", err)
+	}
+	var revokedAt sql.NullString
+	if err := db.QueryRow(`SELECT revoked_at FROM ai_tokens WHERE id = ?`, issued.Token.ID).Scan(&revokedAt); err != nil {
+		t.Fatal(err)
+	}
+	if revokedAt.Valid {
+		t.Fatalf("revoked_at = %q, want NULL after rollback", revokedAt.String)
+	}
+	assertRowCount(t, db, "audit_probe", 0)
+	if _, err := service.VerifyBearer(ctx, issued.BearerToken); err != nil {
+		t.Fatalf("token should remain valid after audit rollback: %v", err)
+	}
+}
+
+func TestRefreshPrincipalReloadsCurrentScopesAndBoundaries(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	insertActiveAccountModel(t, db)
+	service, issued := issuePersonalToken(t, db, testNow())
+	execTest(t, db, `UPDATE ai_tokens SET scopes = '["files:trash"]' WHERE id = ?`, issued.Token.ID)
+	execTest(t, db, `DELETE FROM ai_token_boundaries WHERE token_id = ?`, issued.Token.ID)
+	execTest(t, db, `INSERT INTO ai_token_boundaries(token_id, source, mount_id, relative_path) VALUES (?, 'common_mount', 'common_1', 'refreshed')`, issued.Token.ID)
+
+	principal, err := service.RefreshPrincipal(ctx, issued.Token.ID)
+	if err != nil {
+		t.Fatalf("RefreshPrincipal() error = %v", err)
+	}
+	if !principal.HasScope(ScopeFilesTrash) || principal.HasScope(ScopeFilesList) {
+		t.Fatalf("refreshed scopes = %v", principal.Scopes)
+	}
+	want := []DirectoryBoundary{{Source: contentref.SourceCommonMount, MountID: "common_1", RelativePath: "refreshed"}}
+	if !reflect.DeepEqual(principal.Boundaries, want) {
+		t.Fatalf("refreshed boundaries = %#v, want %#v", principal.Boundaries, want)
+	}
+}
+
+func TestCreateWithoutExpiryNeverExpires(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	insertActiveAccountModel(t, db)
+	now := testNow()
+	issued, err := NewService(db, WithClock(func() time.Time { return now })).Create(ctx, CreateRequest{
+		AccountID: "acct_1", Name: "never expires", Scopes: []Scope{ScopeFilesList},
+		Boundaries: []DirectoryBoundary{{Source: contentref.SourcePersonal}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !issued.Token.ExpiresAt.IsZero() {
+		t.Fatalf("ExpiresAt = %v, want zero", issued.Token.ExpiresAt)
+	}
+	farFuture := NewService(db, WithClock(func() time.Time { return now.Add(100 * 365 * 24 * time.Hour) }))
+	if _, err := farFuture.VerifyBearer(ctx, issued.BearerToken); err != nil {
+		t.Fatalf("VerifyBearer() far in future error = %v", err)
+	}
+	if _, err := farFuture.RefreshPrincipal(ctx, issued.Token.ID); err != nil {
+		t.Fatalf("RefreshPrincipal() far in future error = %v", err)
+	}
+}
+
+func newTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "aitoken.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(targetCoreSchema); err != nil {
+		t.Fatalf("install target core schema: %v", err)
 	}
 	if err := InstallSchema(context.Background(), db); err != nil {
 		t.Fatalf("InstallSchema() error = %v", err)
 	}
-	if _, err := db.Exec(`ALTER TABLE ai_tokens ADD COLUMN credential_generation INTEGER`); err != nil {
-		t.Fatalf("install credential generation column: %v", err)
-	}
 	return db
 }
 
-func insertActiveAccountSpaceMount(t *testing.T, db *sql.DB) {
+func insertActiveAccountOnly(t *testing.T, db *sql.DB) {
 	t.Helper()
-	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO accounts(id, email, display_name, role, status)
-VALUES ('acct_1', 'ada@example.test', 'Ada', 'member', 'active')
-`); err != nil {
-		t.Fatalf("insert account: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO spaces(id, kind, name, owner_account_id, status)
-VALUES ('space_1', 'personal', 'Ada Space', 'acct_1', 'active')
-`); err != nil {
-		t.Fatalf("insert space: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status)
-VALUES ('mount_1', 'space_1', 'Home', '/tmp/omnora', 'managed', 'read_only', 'active')
-`); err != nil {
-		t.Fatalf("insert mount: %v", err)
+	execTest(t, db, `INSERT INTO accounts(id, email, display_name, role, status) VALUES ('acct_1', 'ada@example.test', 'Ada', 'member', 'active')`)
+}
+
+func insertActiveAccountModel(t *testing.T, db *sql.DB) {
+	t.Helper()
+	insertActiveAccountOnly(t, db)
+	execTest(t, db, `INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, status) VALUES ('personal-default', 'Personal Files', 'personal', 'personal_default', 'managed', 'system', 'read_write', 'active')`)
+	execTest(t, db, `INSERT INTO personal_directories(account_id, relative_path, state) VALUES ('acct_1', 'acct_1', 'ready')`)
+	execTest(t, db, `INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, status) VALUES ('common_1', 'Shared Docs', '/srv/shared', 'common', 'external', 'normal', 'read_write', 'active')`)
+	execTest(t, db, `INSERT INTO mount_grants(mount_id, account_id, permission) VALUES ('common_1', 'acct_1', 'editor')`)
+}
+
+func execTest(t *testing.T, db *sql.DB, statement string, args ...any) {
+	t.Helper()
+	if _, err := db.Exec(statement, args...); err != nil {
+		t.Fatalf("exec %q: %v", statement, err)
 	}
 }
 
-func cloneTokenDB(t *testing.T, source *sql.DB) *sql.DB {
+func assertRowCount(t *testing.T, db *sql.DB, table string, want int) {
 	t.Helper()
-	db := newTestDB(t)
-	insertActiveAccountSpaceMount(t, db)
-	var secretHash, scopes, createdAt, expiresAt string
-	var credentialGeneration int64
-	var id, publicID, accountID, name string
-	if err := source.QueryRow("SELECT id, public_id, secret_hash, account_id, name, scopes, credential_generation, created_at, expires_at FROM ai_tokens LIMIT 1").Scan(&id, &publicID, &secretHash, &accountID, &name, &scopes, &credentialGeneration, &createdAt, &expiresAt); err != nil {
-		t.Fatalf("read source token: %v", err)
+	var got int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM ` + table).Scan(&got); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := db.Exec(`
-INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, credential_generation, created_at, expires_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, id, publicID, secretHash, accountID, name, scopes, credentialGeneration, createdAt, expiresAt, createdAt); err != nil {
-		t.Fatalf("copy token: %v", err)
+	if got != want {
+		t.Fatalf("%s row count = %d, want %d", table, got, want)
 	}
-	if _, err := db.Exec(`
-INSERT INTO ai_token_boundaries(token_id, space_id, mount_id, relative_path)
-VALUES (?, 'space_1', 'mount_1', '')
-`, id); err != nil {
-		t.Fatalf("copy boundary: %v", err)
+}
+
+func testNow() time.Time {
+	return time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+}
+
+func stringPointer(value string) *string {
+	return &value
+}
+
+func issuePersonalToken(t *testing.T, db *sql.DB, now time.Time) (*Service, IssuedToken) {
+	t.Helper()
+	service := NewService(db, WithClock(func() time.Time { return now }))
+	issued, err := service.Create(context.Background(), CreateRequest{
+		AccountID: "acct_1", Name: "security regression", Scopes: []Scope{ScopeFilesList},
+		Boundaries: []DirectoryBoundary{{Source: contentref.SourcePersonal}}, ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
 	}
-	return db
+	return service, issued
 }

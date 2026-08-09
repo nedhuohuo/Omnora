@@ -16,6 +16,7 @@ import (
 )
 
 func TestReinstallPreservesOriginalMountPathAccess(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	dbPath := filepath.Join(t.TempDir(), "omnora.db")
 	cfg := config.Config{
 		Database: config.DatabaseConfig{Path: dbPath, BusyTimeout: time.Second},

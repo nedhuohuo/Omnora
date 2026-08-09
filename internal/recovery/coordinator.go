@@ -362,9 +362,13 @@ WHERE status = 'active'
 `, formatTime(now)); err != nil {
 		return RestoreRequest{}, err
 	}
+	storageKindColumn, err := recoveryMountStorageKindColumn(ctx, tx)
+	if err != nil {
+		return RestoreRequest{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE mounts SET status = 'disabled', updated_at = ?
-WHERE kind = 'external' AND status <> 'deleted'
+WHERE `+storageKindColumn+` = 'external' AND status <> 'deleted'
 `, formatTime(now)); err != nil {
 		return RestoreRequest{}, err
 	}
@@ -425,6 +429,19 @@ WHERE id = 1 AND request_id = ? AND state = 'restoring'
 	request.State = StateFinalizeRequired
 	request.ReasonCode = "credentials_revoked"
 	return request, nil
+}
+
+func recoveryMountStorageKindColumn(ctx context.Context, tx *sql.Tx) (string, error) {
+	for _, column := range []string{"storage_kind", "kind"} {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('mounts') WHERE name = ?`, column).Scan(&count); err != nil {
+			return "", err
+		}
+		if count == 1 {
+			return column, nil
+		}
+	}
+	return "", errors.New("recovery: mount storage-kind column is missing")
 }
 
 // MarkNormalPendingBootstrap completes offline cleanup without declaring the

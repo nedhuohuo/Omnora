@@ -3,12 +3,14 @@ package aitoken
 import (
 	"errors"
 	"time"
+
+	"omnora/internal/contentref"
 )
 
 type Scope string
 
 const (
-	ScopeSpacesRead          Scope = "spaces:read"
+	ScopeMountsRead          Scope = "mounts:read"
 	ScopeFilesList           Scope = "files:list"
 	ScopeFilesMetadata       Scope = "files:metadata"
 	ScopeFilesText           Scope = "files:text"
@@ -25,6 +27,8 @@ const (
 	ScopeSharesRevoke        Scope = "shares:revoke"
 )
 
+const SourceAllAccountContent contentref.Source = "all_account_content"
+
 var (
 	ErrInvalidInput = errors.New("aitoken: invalid input")
 	ErrInvalidScope = errors.New("aitoken: invalid scope")
@@ -32,7 +36,7 @@ var (
 )
 
 type DirectoryBoundary struct {
-	SpaceID      string
+	Source       contentref.Source
 	MountID      string
 	RelativePath string
 }

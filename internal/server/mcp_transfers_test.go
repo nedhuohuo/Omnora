@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,8 +15,10 @@ import (
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
 	"omnora/internal/config"
+	"omnora/internal/contentref"
 	"omnora/internal/domain"
 	"omnora/internal/memberfiles"
+	"omnora/internal/mountid"
 	"omnora/internal/store"
 	"omnora/internal/transfer"
 	"omnora/internal/transferticket"
@@ -86,7 +89,7 @@ func TestMCPDownloadTicketLiveChecksAndRange(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("0123456789"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	locator := access.Locator{SpaceID: "mcp-transfer-space", MountID: "mcp-transfer-mount", Path: "notes.txt"}
+	locator := access.Locator{Source: contentref.SourceCommonMount, MountID: "mcp-transfer-mount", Path: "notes.txt"}
 	ticket, err := srv.transferTickets.IssueDownload(context.Background(), principal, locator, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +198,7 @@ func TestMCPDownloadTicketLiveChecksAndRange(t *testing.T) {
 
 func TestMCPUploadTicketBudgetRetryAndClose(t *testing.T) {
 	srv, db, principal, _ := newMCPTransferFixture(t)
-	locator := access.Locator{SpaceID: "mcp-transfer-space", MountID: "mcp-transfer-mount", Path: "upload.txt"}
+	locator := access.Locator{Source: contentref.SourceCommonMount, MountID: "mcp-transfer-mount", Path: "upload.txt"}
 	upload, err := srv.memberFiles.PrepareUpload(context.Background(), access.Subject{AccountID: principal.AccountID, Principal: &principal}, memberfiles.UploadRequest{Locator: locator, ExpectedSize: 5})
 	if err != nil {
 		t.Fatal(err)
@@ -259,11 +262,11 @@ func TestMCPDownloadACLDegradeReturnsForbidden(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "acl.txt"), []byte("acl"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ticket, err := srv.transferTickets.IssueDownload(context.Background(), principal, access.Locator{SpaceID: "mcp-transfer-space", MountID: "mcp-transfer-mount", Path: "acl.txt"}, 3)
+	ticket, err := srv.transferTickets.IssueDownload(context.Background(), principal, access.Locator{Source: contentref.SourceCommonMount, MountID: "mcp-transfer-mount", Path: "acl.txt"}, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL().Exec(`DELETE FROM space_members WHERE space_id = 'mcp-transfer-space' AND account_id = ?`, principal.AccountID); err != nil {
+	if _, err := db.SQL().Exec(`DELETE FROM mount_grants WHERE mount_id = 'mcp-transfer-mount' AND account_id = ?`, principal.AccountID); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, ticket.URL, nil)
@@ -287,13 +290,42 @@ func newMCPTransferFixture(t *testing.T) (*Server, *store.DB, aitoken.Principal,
 		t.Fatal(err)
 	}
 	admin, _ := createAPITestAccounts(t, db)
-	root := createTestMount(t, db, "mcp-transfer-space", "mcp-transfer-mount", admin.ID, "read_write", "external")
+	root, err := os.MkdirTemp(".", ".mcp-transfer-mount-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	root, err = filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := mountid.Capture(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityJSON, err := json.Marshal(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().Exec(`
+INSERT INTO mounts(id,display_name,root_path,purpose,storage_kind,governance,mode,index_enabled,share_enabled,status,mount_identity_json)
+VALUES ('mcp-transfer-mount','MCP Transfer',?,'common','external','normal','read_write',1,1,'active',?)
+`, root, string(identityJSON)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO mount_grants(mount_id,account_id,permission) VALUES ('mcp-transfer-mount',?,'editor')`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.SQL().Exec(`UPDATE route_groups SET enabled = 1 WHERE name = 'mcp'`); err != nil {
 		t.Fatal(err)
 	}
 	issued, err := aitoken.NewService(db.SQL()).Create(context.Background(), aitoken.CreateRequest{
 		AccountID: admin.ID, Name: "mcp-transfer", Scopes: []aitoken.Scope{aitoken.ScopeFilesDownloadTicket, aitoken.ScopeUploadsCreate},
-		Boundaries: []aitoken.DirectoryBoundary{{SpaceID: "mcp-transfer-space", MountID: "mcp-transfer-mount", RelativePath: "."}}, ExpiresAt: time.Now().Add(time.Hour),
+		Boundaries: []aitoken.DirectoryBoundary{{Source: contentref.SourceCommonMount, MountID: "mcp-transfer-mount", RelativePath: "."}}, ExpiresAt: time.Now().Add(time.Hour),
 	})
 	if err != nil {
 		t.Fatal(err)

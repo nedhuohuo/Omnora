@@ -20,7 +20,9 @@ import (
 
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
+	"omnora/internal/contentref"
 	"omnora/internal/domain"
+	"omnora/internal/storage"
 )
 
 const (
@@ -126,7 +128,7 @@ func (s *Service) IssueDownload(ctx context.Context, principal aitoken.Principal
 		Subject:            access.Subject{AccountID: fresh.AccountID, Principal: &fresh},
 		Scope:              aitoken.ScopeFilesDownloadTicket,
 		Locator:            locator,
-		RequiredPermission: domain.SpacePermissionViewer,
+		RequiredPermission: domain.ContentPermissionViewer,
 	})
 	if err != nil {
 		return IssuedTicket{}, errors.Join(ErrUnauthorized, err)
@@ -181,7 +183,7 @@ func (s *Service) IssueUpload(ctx context.Context, principal aitoken.Principal, 
 		Subject:            access.Subject{AccountID: fresh.AccountID, Principal: &fresh},
 		Scope:              aitoken.ScopeUploadsCreate,
 		Locator:            locator,
-		RequiredPermission: domain.SpacePermissionEditor,
+		RequiredPermission: domain.ContentPermissionEditor,
 		Write:              true,
 	})
 	if err != nil {
@@ -195,7 +197,7 @@ func (s *Service) IssueUpload(ctx context.Context, principal aitoken.Principal, 
 		return IssuedTicket{}, err
 	}
 	now := s.now().UTC()
-	if upload.accountID != fresh.AccountID || upload.spaceID != mount.SpaceID || upload.mountID != mount.ID || upload.targetPath != mount.RelativePath {
+	if upload.accountID != fresh.AccountID || upload.mountID != mount.ID || upload.targetPath != mount.StorageRelativePath {
 		return IssuedTicket{}, ErrUploadInvalid
 	}
 	if upload.status != string(StatusActive) {
@@ -250,6 +252,10 @@ func (s *Service) Verify(ctx context.Context, bearer string, expected Operation)
 		_, _ = s.db.ExecContext(ctx, `UPDATE mcp_transfer_tickets SET status = 'expired', closed_at = ? WHERE id = ? AND status = 'active'`, formatTime(now), record.id)
 		return VerifiedTicket{}, ErrTicketExpired
 	}
+	record.locator, err = s.locatorForStoredTarget(ctx, record.accountID, record.locator.MountID, record.locator.Path)
+	if err != nil {
+		return VerifiedTicket{}, ErrTicketInvalid
+	}
 
 	principal, err := s.tokens.RefreshPrincipal(ctx, record.tokenID)
 	if err != nil || principal.AccountID != record.accountID {
@@ -259,10 +265,10 @@ func (s *Service) Verify(ctx context.Context, bearer string, expected Operation)
 		Subject:            access.Subject{AccountID: principal.AccountID, Principal: &principal},
 		Scope:              record.requiredScope,
 		Locator:            record.locator,
-		RequiredPermission: domain.SpacePermissionViewer,
+		RequiredPermission: domain.ContentPermissionViewer,
 	}
 	if record.operation == OperationUpload {
-		check.RequiredPermission = domain.SpacePermissionEditor
+		check.RequiredPermission = domain.ContentPermissionEditor
 		check.Write = true
 	}
 	mount, err := s.guard.Authorize(ctx, check)
@@ -291,7 +297,7 @@ func (s *Service) Verify(ctx context.Context, bearer string, expected Operation)
 			}
 			return VerifiedTicket{}, uploadErr
 		}
-		if upload.accountID != record.accountID || upload.spaceID != mount.SpaceID || upload.mountID != mount.ID || upload.targetPath != mount.RelativePath {
+		if upload.accountID != record.accountID || upload.mountID != mount.ID || upload.targetPath != mount.StorageRelativePath {
 			return VerifiedTicket{}, ErrUploadInvalid
 		}
 		if upload.status != string(StatusActive) {
@@ -450,7 +456,6 @@ type ticketRecord struct {
 
 type uploadRecord struct {
 	accountID  string
-	spaceID    string
 	mountID    string
 	targetPath string
 	status     string
@@ -477,12 +482,12 @@ func (s *Service) insert(ctx context.Context, principal aitoken.Principal, mount
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO mcp_transfer_tickets(
     id, public_id, secret_hash, account_id, ai_token_id, operation,
-    required_scope, space_id, mount_id, relative_path, object_fingerprint,
+    required_scope, mount_id, relative_path, object_fingerprint,
     upload_id, max_bytes, consumed_bytes, status, created_at, expires_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, 0, 'active', ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, 0, 'active', ?, ?)
 `, id, publicID, hashSecret(secret), principal.AccountID, principal.TokenID,
-		string(operation), string(scope), mount.SpaceID, mount.ID, mount.RelativePath,
+		string(operation), string(scope), mount.ID, mount.StorageRelativePath,
 		objectFingerprint, uploadID, maxBytes, formatTime(now), formatTime(expiresAt))
 	if err != nil {
 		return IssuedTicket{}, err
@@ -498,7 +503,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, 0, 'active', ?, ?)
 		TicketURL:         url,
 		Operation:         operation,
 		RequiredScope:     scope,
-		Locator:           access.Locator{SpaceID: mount.SpaceID, MountID: mount.ID, Path: mount.RelativePath},
+		Locator:           access.Locator{Source: mount.Source, MountID: visibleMountID(mount), Path: mount.RelativePath},
 		ObjectFingerprint: objectFingerprint,
 		MaxBytes:          maxBytes,
 		ExpiresAt:         expiresAt,
@@ -509,8 +514,10 @@ func (s *Service) validate(maxBytes int64, principal aitoken.Principal, locator 
 	if s == nil || s.db == nil || s.tokens == nil || s.guard == nil {
 		return ErrInvalidInput
 	}
-	if maxBytes < 0 || strings.TrimSpace(principal.AccountID) == "" || strings.TrimSpace(principal.TokenID) == "" ||
-		strings.TrimSpace(locator.SpaceID) == "" || strings.TrimSpace(locator.MountID) == "" {
+	if maxBytes < 0 || strings.TrimSpace(principal.AccountID) == "" || strings.TrimSpace(principal.TokenID) == "" {
+		return ErrInvalidInput
+	}
+	if _, err := contentref.NormalizeForAutomation(locator); err != nil {
 		return ErrInvalidInput
 	}
 	return nil
@@ -522,11 +529,11 @@ func (s *Service) load(ctx context.Context, publicID string) (ticketRecord, erro
 	var uploadID sql.NullString
 	err := s.db.QueryRowContext(ctx, `
 SELECT id, public_id, secret_hash, account_id, ai_token_id, operation,
-       required_scope, space_id, mount_id, relative_path, object_fingerprint,
+       required_scope, mount_id, relative_path, object_fingerprint,
        upload_id, max_bytes, consumed_bytes, status, created_at, expires_at, closed_at
 FROM mcp_transfer_tickets WHERE public_id = ?
 `, publicID).Scan(&item.id, &item.publicID, &item.secretHash, &item.accountID, &item.tokenID,
-		&operation, &scope, &item.locator.SpaceID, &item.locator.MountID, &pathValue,
+		&operation, &scope, &item.locator.MountID, &pathValue,
 		&item.objectFingerprint, &uploadID, &item.maxBytes, &item.consumedBytes, &status,
 		&createdAt, &expiresAt, &item.closedAt)
 	if err != nil {
@@ -554,11 +561,11 @@ func (s *Service) loadByID(ctx context.Context, id string) (ticketRecord, error)
 	var item ticketRecord
 	err := s.db.QueryRowContext(ctx, `
 SELECT id, public_id, secret_hash, account_id, ai_token_id, operation,
-       required_scope, space_id, mount_id, relative_path, object_fingerprint,
+       required_scope, mount_id, relative_path, object_fingerprint,
        upload_id, max_bytes, consumed_bytes, status, created_at, expires_at, closed_at
 FROM mcp_transfer_tickets WHERE id = ? OR public_id = ?
 `, id, id).Scan(&item.id, &publicID, &item.secretHash, &item.accountID, &item.tokenID,
-		&operation, &scope, &item.locator.SpaceID, &item.locator.MountID, &pathValue,
+		&operation, &scope, &item.locator.MountID, &pathValue,
 		&item.objectFingerprint, &uploadID, &item.maxBytes, &item.consumedBytes, &status,
 		&createdAt, &expiresAt, &item.closedAt)
 	if err != nil {
@@ -585,9 +592,9 @@ func (s *Service) loadUpload(ctx context.Context, uploadID string) (uploadRecord
 	var item uploadRecord
 	var expiresAt string
 	err := s.db.QueryRowContext(ctx, `
-SELECT account_id, space_id, mount_id, target_relative_path, status, expires_at
+SELECT account_id, mount_id, target_relative_path, status, expires_at
 FROM upload_sessions WHERE id = ?
-`, uploadID).Scan(&item.accountID, &item.spaceID, &item.mountID, &item.targetPath, &item.status, &expiresAt)
+`, uploadID).Scan(&item.accountID, &item.mountID, &item.targetPath, &item.status, &expiresAt)
 	if err != nil {
 		return uploadRecord{}, err
 	}
@@ -652,13 +659,46 @@ func fingerprintObject(mount access.AuthorizedMount) (string, error) {
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat != nil {
 		sys = fmt.Sprintf("%d:%d", stat.Dev, stat.Ino)
 	}
-	raw := fmt.Sprintf("omnora-object-v1|%s|%s|%s|%s|%o|%d|%d|%s|%s", mount.SpaceID, mount.ID, mount.RelativePath,
+	raw := fmt.Sprintf("omnora-object-v2|%s|%s|%s|%o|%d|%d|%s|%s", mount.ID, mount.StorageRelativePath,
 		info.Mode().Type(), info.Mode().Perm(), info.Size(), info.ModTime().UTC().UnixNano(), sys, info.Mode().String())
 	return hashBytes([]byte(raw)), nil
 }
 
 func missingFingerprint(mount access.AuthorizedMount) string {
-	return hashBytes([]byte("omnora-object-missing-v1|" + mount.SpaceID + "|" + mount.ID + "|" + mount.RelativePath))
+	return hashBytes([]byte("omnora-object-missing-v2|" + mount.ID + "|" + mount.StorageRelativePath))
+}
+
+func visibleMountID(mount access.AuthorizedMount) string {
+	if mount.Source == contentref.SourcePersonal {
+		return ""
+	}
+	return mount.ID
+}
+
+func (s *Service) locatorForStoredTarget(ctx context.Context, accountID, mountID, storagePath string) (access.Locator, error) {
+	var purpose domain.MountPurpose
+	if err := s.db.QueryRowContext(ctx, `SELECT purpose FROM mounts WHERE id = ? AND status = 'active'`, mountID).Scan(&purpose); err != nil {
+		return access.Locator{}, err
+	}
+	cleaned, err := storage.CleanRelativePath(storagePath)
+	if err != nil {
+		return access.Locator{}, err
+	}
+	switch purpose {
+	case domain.MountPurposePersonalDefault:
+		if cleaned == accountID {
+			cleaned = "."
+		} else if strings.HasPrefix(cleaned, accountID+"/") {
+			cleaned = strings.TrimPrefix(cleaned, accountID+"/")
+		} else {
+			return access.Locator{}, ErrTicketInvalid
+		}
+		return access.Locator{Source: contentref.SourcePersonal, Path: cleaned}, nil
+	case domain.MountPurposeCommon:
+		return access.Locator{Source: contentref.SourceCommonMount, MountID: mountID, Path: cleaned}, nil
+	default:
+		return access.Locator{}, ErrTicketInvalid
+	}
 }
 
 func parseBearer(value string) (string, string, error) {

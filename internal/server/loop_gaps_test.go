@@ -16,6 +16,7 @@ import (
 
 // TestTrashPurgeAndEmptyEndpoints exercises the permanent-cleanup HTTP surface.
 func TestTrashPurgeAndEmptyEndpoints(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	root := createTestMount(t, db, "space-trash2", "mount-trash2", admin.ID, "read_write", "managed")
@@ -100,6 +101,7 @@ func TestTrashPurgeAndEmptyEndpoints(t *testing.T) {
 // TestDeleteRevokesChildShares verifies that deleting a directory invalidates
 // shares pointing at anything beneath it, not just the exact path.
 func TestDeleteRevokesChildShares(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newShareAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	root := createTestMount(t, db, "space-del", "mount-del", admin.ID, "read_write", "managed")
@@ -129,6 +131,7 @@ func TestDeleteRevokesChildShares(t *testing.T) {
 // TestCrossMountMoveRevokesChildShares verifies that a cross-mount move of a
 // directory invalidates shares beneath it on the source mount.
 func TestCrossMountMoveRevokesChildShares(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newShareAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	srcRoot := createTestMount(t, db, "space-src", "mount-src", admin.ID, "read_write", "managed")

@@ -39,6 +39,7 @@ func newShareAPITestServer(t *testing.T) (*store.DB, http.Handler) {
 }
 
 func TestSharePortalChildrenAfterExchange(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newShareAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	root := createTestSpaceAndMount(t, db, "space-1", "mount-1", admin.ID, "read_write")
@@ -130,6 +131,7 @@ func TestSharePortalChildrenAfterExchange(t *testing.T) {
 }
 
 func TestShareCurrentIncludesTargetMetadata(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newShareAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	root := createTestSpaceAndMount(t, db, "space-meta", "mount-meta", admin.ID, "read_write")

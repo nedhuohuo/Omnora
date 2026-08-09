@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"omnora/internal/identity"
+	"omnora/internal/totp"
 )
 
 func TestChangeAccountPassword(t *testing.T) {
@@ -73,5 +75,69 @@ func TestAdminCanDisableOwnTOTP(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin disable TOTP status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestChangeAccountPasswordRejectsInvalidTOTPInSameRequest(t *testing.T) {
+	db, handler := newTOTPTestServer(t)
+	admin, _ := createAPITestAccounts(t, db)
+	cookie := issueAPITestSession(t, db, admin.ID)
+
+	setupReq := httptest.NewRequest(http.MethodPost, "/api/v1/account/totp/setup", bytes.NewReader([]byte(`{}`)))
+	setupReq.Header.Set("Content-Type", "application/json")
+	setupReq.AddCookie(cookie)
+	setupRec := httptest.NewRecorder()
+	handler.ServeHTTP(setupRec, setupReq)
+	if setupRec.Code != http.StatusCreated {
+		t.Fatalf("TOTP setup status = %d, body = %s", setupRec.Code, setupRec.Body.String())
+	}
+	var setup struct {
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(setupRec.Body.Bytes(), &setup); err != nil {
+		t.Fatalf("decode TOTP setup: %v", err)
+	}
+	code, err := totp.GenerateCode(setup.Secret, time.Now().UTC(), totp.Config{})
+	if err != nil {
+		t.Fatalf("generate TOTP code: %v", err)
+	}
+	confirmBody, err := json.Marshal(map[string]string{"code": code})
+	if err != nil {
+		t.Fatalf("marshal TOTP confirmation: %v", err)
+	}
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/v1/account/totp/confirm", bytes.NewReader(confirmBody))
+	confirmReq.Header.Set("Content-Type", "application/json")
+	confirmReq.AddCookie(cookie)
+	confirmRec := httptest.NewRecorder()
+	handler.ServeHTTP(confirmRec, confirmReq)
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("TOTP confirmation status = %d, body = %s", confirmRec.Code, confirmRec.Body.String())
+	}
+	var rotatedCookie *http.Cookie
+	for _, responseCookie := range confirmRec.Result().Cookies() {
+		if responseCookie.Name == sessionCookieName {
+			rotatedCookie = responseCookie
+			break
+		}
+	}
+	if rotatedCookie == nil {
+		t.Fatalf("TOTP confirmation did not rotate the session: %#v", confirmRec.Result().Cookies())
+	}
+
+	body, err := json.Marshal(map[string]string{
+		"currentPassword": apiTestPassword,
+		"newPassword":     "NewCorrectHorse2!",
+		"totpCode":        "invalid",
+	})
+	if err != nil {
+		t.Fatalf("marshal password change: %v", err)
+	}
+	changeReq := httptest.NewRequest(http.MethodPatch, "/api/v1/account/password", bytes.NewReader(body))
+	changeReq.Header.Set("Content-Type", "application/json")
+	changeReq.AddCookie(rotatedCookie)
+	changeRec := httptest.NewRecorder()
+	handler.ServeHTTP(changeRec, changeReq)
+	if changeRec.Code != http.StatusUnauthorized {
+		t.Fatalf("password change with invalid TOTP status = %d, want %d, body = %s", changeRec.Code, http.StatusUnauthorized, changeRec.Body.String())
 	}
 }

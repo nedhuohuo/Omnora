@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestMCPRawProtocolLegacyLifecycleAndFormCatalogue(t *testing.T) {
+func TestMCPRawProtocolLifecycleAndFormCatalogue(t *testing.T) {
 	fixture := newMCPProtocolFixture(t)
 	initialize := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"protocol-test","version":"1"}}}`)
 	response := mcpRawRequest(fixture, http.MethodPost, "/mcp", initialize, "", "", nil)
@@ -46,10 +46,13 @@ func TestMCPRawProtocolLegacyLifecycleAndFormCatalogue(t *testing.T) {
 	if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil {
 		t.Fatalf("decode legacy tools/list: %v", err)
 	}
-	if len(listed.Result.Tools) != 17 {
-		t.Fatalf("no-form tools/list count = %d, want 17 ordinary tools", len(listed.Result.Tools))
+	if len(listed.Result.Tools) != 16 {
+		t.Fatalf("no-form tools/list count = %d, want 16 ordinary tools", len(listed.Result.Tools))
 	}
 	for _, tool := range listed.Result.Tools {
+		if tool.Name == "spaces.list" {
+			t.Fatal("tools/list exposed removed spaces.list tool")
+		}
 		if tool.Name == "shares.create" || tool.Name == "files.move" {
 			t.Fatalf("high-risk tool %q was exposed without form elicitation", tool.Name)
 		}

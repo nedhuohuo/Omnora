@@ -60,6 +60,7 @@ func (s *Server) changeAccountPassword(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CurrentPassword string `json:"currentPassword"`
 		NewPassword     string `json:"newPassword"`
+		TOTPCode        string `json:"totpCode"`
 		RevokeTokens    bool   `json:"revokeTokens"`
 		RevokeShares    bool   `json:"revokeShares"`
 	}
@@ -75,6 +76,18 @@ func (s *Server) changeAccountPassword(w http.ResponseWriter, r *http.Request) {
 	if err != nil || !svc.VerifyPassword(req.CurrentPassword, material.PasswordHash) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
 		return
+	}
+	if material.TOTPRequired {
+		secret, decryptErr := s.decryptTOTPSecret(material.TOTPSecretCiphertext)
+		if decryptErr != nil || secret == "" || !totp.Verify(secret, strings.TrimSpace(req.TOTPCode), time.Now().UTC()) {
+			decision := s.recordCredentialFailure(r, ratelimit.ScopeTOTP, session.AccountID)
+			if !decision.Allowed {
+				writeRateLimited(w, r, decision)
+				return
+			}
+			httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
+			return
+		}
 	}
 	newHash, err := svc.HashPassword(req.NewPassword)
 	if err != nil {

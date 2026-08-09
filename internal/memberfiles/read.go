@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path"
 	"strings"
 	"unicode/utf8"
 
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
 	"omnora/internal/catalog"
+	"omnora/internal/contentref"
 	"omnora/internal/domain"
 	"omnora/internal/files"
 	"omnora/internal/storage"
@@ -50,12 +52,9 @@ func (s *Service) Metadata(ctx context.Context, subject access.Subject, locator 
 // without requiring the separate files:metadata capability.
 func (s *Service) Preview(ctx context.Context, subject access.Subject, locator access.Locator, scope aitoken.Scope) (files.Entry, error) {
 	write := scope == aitoken.ScopeFilesWrite || scope == aitoken.ScopeFilesTrash || scope == aitoken.ScopeFilesPurge
-	permission := domain.SpacePermissionViewer
-	if scope == aitoken.ScopeSharesCreate {
-		permission = domain.SpacePermissionManager
-	}
+	permission := domain.ContentPermissionViewer
 	if write {
-		permission = domain.SpacePermissionEditor
+		permission = domain.ContentPermissionEditor
 	}
 	mount, err := s.guard.Authorize(ctx, access.CheckRequest{Subject: subject, Scope: scope, Locator: locator, RequiredPermission: permission, Write: write})
 	if err != nil {
@@ -75,11 +74,14 @@ func (s *Service) Search(ctx context.Context, subject access.Subject, req Search
 	if err != nil {
 		return SearchResult{}, err
 	}
-	req.SpaceID = strings.TrimSpace(req.SpaceID)
-	if req.SpaceID == "" {
+	req.MountID = strings.TrimSpace(req.MountID)
+	if req.Source == contentref.SourcePersonal && req.MountID != "" ||
+		req.Source == contentref.SourceCommonMount && req.MountID == "" ||
+		req.Source == aitoken.SourceAllAccountContent && req.MountID != "" ||
+		req.Source != contentref.SourcePersonal && req.Source != contentref.SourceCommonMount && req.Source != aitoken.SourceAllAccountContent {
 		return SearchResult{}, ErrInvalidInput
 	}
-	records, err := s.visibleMounts(ctx, subject, req.SpaceID, aitoken.ScopeSearchRead)
+	records, err := s.visibleMounts(ctx, subject, aitoken.ScopeSearchRead, req.Source, req.MountID)
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -89,18 +91,23 @@ func (s *Service) Search(ctx context.Context, subject access.Subject, req Search
 
 	boundaries := make([]catalog.SearchBoundary, 0)
 	authorized := make(map[string][]string, len(records))
+	sources := make(map[string]contentref.Source, len(records))
 	for _, record := range records {
 		for _, boundary := range record.boundaries {
-			relative := boundary
-			if relative == "." {
-				relative = ""
+			clientRelative := boundary
+			if clientRelative == "." {
+				clientRelative = ""
 			}
-			boundaries = append(boundaries, catalog.SearchBoundary{MountID: record.mount.ID, RelativePath: relative})
-			authorized[record.mount.ID] = append(authorized[record.mount.ID], relative)
+			storageRelative := clientRelative
+			if record.source == contentref.SourcePersonal {
+				storageRelative = path.Join(subject.AccountID, clientRelative)
+			}
+			boundaries = append(boundaries, catalog.SearchBoundary{MountID: record.authorized.ID, RelativePath: storageRelative})
+			authorized[record.authorized.ID] = append(authorized[record.authorized.ID], storageRelative)
+			sources[record.authorized.ID] = record.source
 		}
 	}
 	result, err := s.catalog.Search(ctx, catalog.SearchOptions{
-		SpaceID:    req.SpaceID,
 		Query:      req.Query,
 		Limit:      req.Limit,
 		Cursor:     req.Cursor,
@@ -113,8 +120,22 @@ func (s *Service) Search(ctx context.Context, subject access.Subject, req Search
 	items := make([]catalog.SearchItem, 0, len(result.Items))
 	for _, item := range result.Items {
 		cleaned, cleanErr := cleanCatalogPath(item.RelativePath)
-		if cleanErr != nil || item.SpaceID != req.SpaceID || !pathInBoundaries(item.MountID, cleaned, authorized) {
+		source, ok := sources[item.MountID]
+		if cleanErr != nil || !ok || item.Source != source || !pathInBoundaries(item.MountID, cleaned, authorized) {
 			continue
+		}
+		if source == contentref.SourcePersonal {
+			prefix := subject.AccountID + "/"
+			if cleaned == subject.AccountID {
+				cleaned = "."
+			} else if strings.HasPrefix(cleaned, prefix) {
+				cleaned = strings.TrimPrefix(cleaned, prefix)
+			} else {
+				continue
+			}
+			// The default personal mount is an internal storage coordinate, not
+			// part of the public personal-content locator.
+			item.MountID = ""
 		}
 		item.RelativePath = cleaned
 		items = append(items, item)
@@ -234,14 +255,11 @@ func (s *Service) authorizeRead(ctx context.Context, subject access.Subject, loc
 	if err := s.validate(subject); err != nil {
 		return access.AuthorizedMount{}, err
 	}
-	if strings.TrimSpace(locator.SpaceID) == "" || strings.TrimSpace(locator.MountID) == "" {
-		return access.AuthorizedMount{}, ErrInvalidInput
-	}
 	mount, err := s.guard.Authorize(ctx, access.CheckRequest{
 		Subject:            subject,
 		Scope:              scope,
 		Locator:            locator,
-		RequiredPermission: domain.SpacePermissionViewer,
+		RequiredPermission: domain.ContentPermissionViewer,
 	})
 	if err != nil {
 		return access.AuthorizedMount{}, err
@@ -250,7 +268,11 @@ func (s *Service) authorizeRead(ctx context.Context, subject access.Subject, loc
 }
 
 func toFilesMount(mount access.AuthorizedMount) files.Mount {
-	return files.Mount{Root: mount.Root, Mode: mount.Mode, Kind: mount.Kind}
+	kind := "external"
+	if mount.StorageKind == domain.StorageKindManaged {
+		kind = "managed"
+	}
+	return files.Mount{Root: mount.Root, Mode: mount.Mode, Kind: kind}
 }
 
 func pathInBoundaries(mountID, relativePath string, boundaries map[string][]string) bool {

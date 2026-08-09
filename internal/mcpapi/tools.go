@@ -46,21 +46,7 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 	if server == nil {
 		return
 	}
-	addTool(server, OrdinaryToolSpecs()[0], func(ctx context.Context, req *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, ToolOutput[[]memberfiles.Space], error) {
-		ps, err := deps.subject(req)
-		if err != nil {
-			return toolFailure[[]memberfiles.Space](req, err)
-		}
-		if deps.MemberFiles == nil {
-			return toolFailure[[]memberfiles.Space](req, errors.New("member files service is unavailable"))
-		}
-		items, err := deps.MemberFiles.ListSpaces(ctx, ps.Subject)
-		if err != nil {
-			return toolFailure[[]memberfiles.Space](req, err)
-		}
-		return nil, ToolOutput[[]memberfiles.Space]{Data: items}, nil
-	})
-	addTool(server, OrdinaryToolSpecs()[1], func(ctx context.Context, req *mcp.CallToolRequest, in SpaceListInput) (*mcp.CallToolResult, ToolOutput[[]memberfiles.Mount], error) {
+	addTool(server, OrdinaryToolSpecs()[0], func(ctx context.Context, req *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, ToolOutput[[]memberfiles.Mount], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[[]memberfiles.Mount](req, err)
@@ -68,13 +54,13 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 		if deps.MemberFiles == nil {
 			return toolFailure[[]memberfiles.Mount](req, errors.New("member files service is unavailable"))
 		}
-		items, err := deps.MemberFiles.ListMounts(ctx, ps.Subject, in.SpaceID)
+		items, err := deps.MemberFiles.ListMounts(ctx, ps.Subject)
 		if err != nil {
 			return toolFailure[[]memberfiles.Mount](req, err)
 		}
 		return nil, ToolOutput[[]memberfiles.Mount]{Data: items}, nil
 	})
-	addTool(server, OrdinaryToolSpecs()[2], func(ctx context.Context, req *mcp.CallToolRequest, in LocatorInput) (*mcp.CallToolResult, ToolOutput[files.DirectoryListing], error) {
+	addTool(server, OrdinaryToolSpecs()[1], func(ctx context.Context, req *mcp.CallToolRequest, in LocatorInput) (*mcp.CallToolResult, ToolOutput[files.DirectoryListing], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[files.DirectoryListing](req, err)
@@ -88,7 +74,7 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 		}
 		return nil, ToolOutput[files.DirectoryListing]{Data: item}, nil
 	})
-	addTool(server, OrdinaryToolSpecs()[3], func(ctx context.Context, req *mcp.CallToolRequest, in LocatorInput) (*mcp.CallToolResult, ToolOutput[files.Entry], error) {
+	addTool(server, OrdinaryToolSpecs()[2], func(ctx context.Context, req *mcp.CallToolRequest, in LocatorInput) (*mcp.CallToolResult, ToolOutput[files.Entry], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[files.Entry](req, err)
@@ -102,7 +88,7 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 		}
 		return nil, ToolOutput[files.Entry]{Data: item}, nil
 	})
-	addTool(server, OrdinaryToolSpecs()[4], func(ctx context.Context, req *mcp.CallToolRequest, in SearchInput) (*mcp.CallToolResult, ToolOutput[memberfiles.SearchResult], error) {
+	addTool(server, OrdinaryToolSpecs()[3], func(ctx context.Context, req *mcp.CallToolRequest, in SearchInput) (*mcp.CallToolResult, ToolOutput[memberfiles.SearchResult], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[memberfiles.SearchResult](req, err)
@@ -110,13 +96,13 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 		if deps.MemberFiles == nil {
 			return toolFailure[memberfiles.SearchResult](req, errors.New("member files service is unavailable"))
 		}
-		item, err := deps.MemberFiles.Search(ctx, ps.Subject, memberfiles.SearchRequest{SpaceID: in.SpaceID, Query: in.Query, Limit: in.Limit, Cursor: in.Cursor})
+		item, err := deps.MemberFiles.Search(ctx, ps.Subject, memberfiles.SearchRequest{Source: in.Source, MountID: in.MountID, Query: in.Query, Limit: in.Limit, Cursor: in.Cursor})
 		if err != nil {
 			return toolFailure[memberfiles.SearchResult](req, err)
 		}
 		return nil, ToolOutput[memberfiles.SearchResult]{Data: item}, nil
 	})
-	addTool(server, OrdinaryToolSpecs()[5], func(ctx context.Context, req *mcp.CallToolRequest, in TextInput) (*mcp.CallToolResult, ToolOutput[memberfiles.TextResult], error) {
+	addTool(server, OrdinaryToolSpecs()[4], func(ctx context.Context, req *mcp.CallToolRequest, in TextInput) (*mcp.CallToolResult, ToolOutput[memberfiles.TextResult], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[memberfiles.TextResult](req, err)
@@ -137,7 +123,7 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 		}
 		return nil, ToolOutput[memberfiles.TextResult]{Data: item}, nil
 	})
-	addTool(server, OrdinaryToolSpecs()[6], func(ctx context.Context, req *mcp.CallToolRequest, in LocatorInput) (*mcp.CallToolResult, ToolOutput[DownloadTicketOutput], error) {
+	addTool(server, OrdinaryToolSpecs()[5], func(ctx context.Context, req *mcp.CallToolRequest, in LocatorInput) (*mcp.CallToolResult, ToolOutput[DownloadTicketOutput], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[DownloadTicketOutput](req, err)
@@ -160,7 +146,7 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 		}
 		return nil, ToolOutput[DownloadTicketOutput]{Data: out}, nil
 	})
-	addTool(server, OrdinaryToolSpecs()[7], func(ctx context.Context, req *mcp.CallToolRequest, in DirectoryInput) (*mcp.CallToolResult, ToolOutput[memberfiles.MutationResult], error) {
+	addTool(server, OrdinaryToolSpecs()[6], func(ctx context.Context, req *mcp.CallToolRequest, in DirectoryInput) (*mcp.CallToolResult, ToolOutput[memberfiles.MutationResult], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[memberfiles.MutationResult](req, err)
@@ -172,7 +158,7 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 			return deps.MemberFiles.CreateDirectory(ctx, ps.Subject, in.locator(), in.Name)
 		})
 	})
-	addTool(server, OrdinaryToolSpecs()[8], func(ctx context.Context, req *mcp.CallToolRequest, in UploadPrepareInput) (*mcp.CallToolResult, ToolOutput[UploadTicketOutput], error) {
+	addTool(server, OrdinaryToolSpecs()[7], func(ctx context.Context, req *mcp.CallToolRequest, in UploadPrepareInput) (*mcp.CallToolResult, ToolOutput[UploadTicketOutput], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[UploadTicketOutput](req, err)
@@ -201,10 +187,10 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 		}
 		return nil, ToolOutput[UploadTicketOutput]{Data: out}, nil
 	})
-	addTool(server, OrdinaryToolSpecs()[9], uploadStatusHandler(deps))
-	addTool(server, OrdinaryToolSpecs()[10], uploadCompleteHandler(deps))
-	addTool(server, OrdinaryToolSpecs()[11], uploadCancelHandler(deps))
-	addTool(server, OrdinaryToolSpecs()[12], func(ctx context.Context, req *mcp.CallToolRequest, in RenameInput) (*mcp.CallToolResult, ToolOutput[memberfiles.MutationResult], error) {
+	addTool(server, OrdinaryToolSpecs()[8], uploadStatusHandler(deps))
+	addTool(server, OrdinaryToolSpecs()[9], uploadCompleteHandler(deps))
+	addTool(server, OrdinaryToolSpecs()[10], uploadCancelHandler(deps))
+	addTool(server, OrdinaryToolSpecs()[11], func(ctx context.Context, req *mcp.CallToolRequest, in RenameInput) (*mcp.CallToolResult, ToolOutput[memberfiles.MutationResult], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[memberfiles.MutationResult](req, err)
@@ -213,10 +199,10 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 			return toolFailure[memberfiles.MutationResult](req, errors.New("member files service is unavailable"))
 		}
 		return mutate(ctx, deps, req, "files.rename", ps.Principal, in.locator(), func() (memberfiles.MutationResult, error) {
-			return deps.MemberFiles.Rename(ctx, ps.Subject, in.locator(), in.Destination)
+			return deps.MemberFiles.RenameSecure(ctx, ps.Subject, in.locator(), in.Destination, nil)
 		})
 	})
-	addTool(server, OrdinaryToolSpecs()[13], func(ctx context.Context, req *mcp.CallToolRequest, in CopyInput) (*mcp.CallToolResult, ToolOutput[memberfiles.MutationResult], error) {
+	addTool(server, OrdinaryToolSpecs()[12], func(ctx context.Context, req *mcp.CallToolRequest, in CopyInput) (*mcp.CallToolResult, ToolOutput[memberfiles.MutationResult], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[memberfiles.MutationResult](req, err)
@@ -228,7 +214,7 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 			return deps.MemberFiles.Copy(ctx, ps.Subject, in.Source.locator(), in.Destination.locator())
 		})
 	})
-	addTool(server, OrdinaryToolSpecs()[14], func(ctx context.Context, req *mcp.CallToolRequest, in LocatorInput) (*mcp.CallToolResult, ToolOutput[memberfiles.TrashListResult], error) {
+	addTool(server, OrdinaryToolSpecs()[13], func(ctx context.Context, req *mcp.CallToolRequest, in LocatorInput) (*mcp.CallToolResult, ToolOutput[memberfiles.TrashListResult], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[memberfiles.TrashListResult](req, err)
@@ -242,7 +228,7 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 		}
 		return nil, ToolOutput[memberfiles.TrashListResult]{Data: item}, nil
 	})
-	addTool(server, OrdinaryToolSpecs()[15], func(ctx context.Context, req *mcp.CallToolRequest, in RestoreInput) (*mcp.CallToolResult, ToolOutput[memberfiles.MutationResult], error) {
+	addTool(server, OrdinaryToolSpecs()[14], func(ctx context.Context, req *mcp.CallToolRequest, in RestoreInput) (*mcp.CallToolResult, ToolOutput[memberfiles.MutationResult], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[memberfiles.MutationResult](req, err)
@@ -254,7 +240,7 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 			return deps.MemberFiles.RestoreTrash(ctx, ps.Subject, in.locator(), in.TrashID)
 		})
 	})
-	addTool(server, OrdinaryToolSpecs()[16], func(ctx context.Context, req *mcp.CallToolRequest, in ShareListInput) (*mcp.CallToolResult, ToolOutput[[]membershare.Share], error) {
+	addTool(server, OrdinaryToolSpecs()[15], func(ctx context.Context, req *mcp.CallToolRequest, in ShareListInput) (*mcp.CallToolResult, ToolOutput[[]membershare.Share], error) {
 		ps, err := deps.subject(req)
 		if err != nil {
 			return toolFailure[[]membershare.Share](req, err)
@@ -262,13 +248,14 @@ func RegisterOrdinaryTools(server *mcp.Server, deps ToolDependencies) {
 		if deps.MemberShares == nil {
 			return toolFailure[[]membershare.Share](req, errors.New("member share service is unavailable"))
 		}
-		items, err := deps.MemberShares.List(ctx, ps.Subject, membershare.ListFilter{SpaceID: in.SpaceID, Limit: in.Limit})
+		items, err := deps.MemberShares.List(ctx, ps.Subject, membershare.ListFilter{Limit: in.Limit})
 		if err != nil {
 			return toolFailure[[]membershare.Share](req, err)
 		}
 		return nil, ToolOutput[[]membershare.Share]{Data: items}, nil
 	})
 	server.AddReceivingMiddleware(scopeFilterMiddleware())
+	server.AddReceivingMiddleware(rejectLegacyArgumentsMiddleware())
 	server.AddReceivingMiddleware(cachePrivateMiddleware())
 }
 
@@ -397,6 +384,8 @@ func safeErrorMessage(code string) string {
 		return "The transfer ticket or upload session has expired."
 	case "upload_conflict":
 		return "The upload session conflicts with the current resource state."
+	case "cross_mount_incomplete":
+		return "The move reached a partial state; the published destination is preserved for recovery."
 	case "invalid_input":
 		return "The request contains invalid input."
 	case "client_capability_required":
@@ -462,6 +451,8 @@ func stableErrorCode(err error) (string, bool) {
 		return "conflict", true
 	case errors.Is(err, memberfiles.ErrUploadExpired):
 		return "ticket_expired", false
+	case errors.Is(err, files.ErrCrossMountIncomplete):
+		return "cross_mount_incomplete", true
 	case errors.Is(err, membershare.ErrNotFound), errors.Is(err, memberfiles.ErrUploadNotFound):
 		return "not_found", false
 	case errors.Is(err, os.ErrNotExist):
@@ -519,8 +510,14 @@ func auditEvent(ctx context.Context, req *mcp.CallToolRequest, tool, result stri
 		}
 		traceID = headerValue(req.Extra.Header, "X-Trace-ID")
 	}
-	metadata, _ := json.Marshal(map[string]any{"spaceId": locator.SpaceID, "mountId": locator.MountID, "path": locator.Path})
-	return audit.MCPEvent{AccountID: principal.AccountID, CredentialPublicID: principal.PublicID, ToolName: tool, Result: result, RequestID: requestID, TraceID: traceID, TargetType: "member_file", TargetID: locator.SpaceID + "/" + locator.MountID + "/" + locator.Path, MetadataJSON: string(metadata)}
+	metadata := map[string]any{"source": locator.Source, "path": locator.Path}
+	targetID := string(locator.Source) + ":" + locator.Path
+	if locator.MountID != "" {
+		metadata["mountId"] = locator.MountID
+		targetID = string(locator.Source) + ":" + locator.MountID + ":" + locator.Path
+	}
+	metadataJSON, _ := json.Marshal(metadata)
+	return audit.MCPEvent{AccountID: principal.AccountID, CredentialPublicID: principal.PublicID, ToolName: tool, Result: result, RequestID: requestID, TraceID: traceID, TargetType: "member_file", TargetID: targetID, MetadataJSON: string(metadataJSON)}
 }
 
 func headerValue(headers http.Header, name string) string {
@@ -543,6 +540,53 @@ func auditLocator(locator access.Locator) access.Locator {
 		locator.Path = cleaned
 	}
 	return locator
+}
+
+func rejectLegacyArgumentsMiddleware() mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == methodToolsCall {
+				call, ok := req.(*mcp.CallToolRequest)
+				if ok && call.Params != nil {
+					raw, err := json.Marshal(call.Params.Arguments)
+					if err != nil || containsForbiddenMCPField(raw) {
+						return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "invalid MCP locator"}
+					}
+				}
+			}
+			return next(ctx, method, req)
+		}
+	}
+}
+
+func containsForbiddenMCPField(raw []byte) bool {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return len(raw) != 0
+	}
+	forbidden := map[string]bool{
+		"spaceId": true, "space_id": true, "accountId": true,
+		"defaultMountId": true, "collaborationId": true,
+	}
+	var walk func(any) bool
+	walk = func(current any) bool {
+		switch typed := current.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				if forbidden[key] || walk(child) {
+					return true
+				}
+			}
+		case []any:
+			for _, child := range typed {
+				if walk(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(value)
 }
 
 func scopeFilterMiddleware() mcp.Middleware {

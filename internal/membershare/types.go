@@ -6,34 +6,32 @@ import (
 	"time"
 
 	"omnora/internal/access"
+	"omnora/internal/contentref"
 )
 
-// Share is the member-safe representation of a share. It deliberately has no
-// secret, fragment, password hash, or other capability material.
+// Share is safe for member and MCP output. Personal targets deliberately omit
+// both the protected default-mount ID and the account storage prefix.
 type Share struct {
-	ID                 string     `json:"id"`
-	PublicID           string     `json:"publicId"`
-	SpaceID            string     `json:"spaceId"`
-	SpaceName          string     `json:"spaceName,omitempty"`
-	MountID            string     `json:"mountId"`
-	MountName          string     `json:"mountName,omitempty"`
-	RelativePath       string     `json:"relativePath"`
-	CreatorAccountID   string     `json:"creatorAccountId,omitempty"`
-	CreatorEmail       string     `json:"creatorEmail,omitempty"`
-	CreatorDisplayName string     `json:"creatorDisplayName,omitempty"`
-	AllowPreview       bool       `json:"allowPreview"`
-	AllowDownload      bool       `json:"allowDownload"`
-	MaxVisits          *int64     `json:"maxVisits,omitempty"`
-	UsedVisits         int64      `json:"usedVisits"`
-	MaxDownloads       *int64     `json:"maxDownloads,omitempty"`
-	UsedDownloads      int64      `json:"usedDownloads"`
-	ExpiresAt          time.Time  `json:"expiresAt"`
-	RevokedAt          *time.Time `json:"revokedAt,omitempty"`
-	Status             string     `json:"status"`
+	ID                 string            `json:"id"`
+	PublicID           string            `json:"publicId"`
+	Source             contentref.Source `json:"source"`
+	MountID            string            `json:"mountId,omitempty"`
+	MountName          string            `json:"mountName,omitempty"`
+	RelativePath       string            `json:"relativePath"`
+	CreatorAccountID   string            `json:"creatorAccountId,omitempty"`
+	CreatorEmail       string            `json:"creatorEmail,omitempty"`
+	CreatorDisplayName string            `json:"creatorDisplayName,omitempty"`
+	AllowPreview       bool              `json:"allowPreview"`
+	AllowDownload      bool              `json:"allowDownload"`
+	MaxVisits          *int64            `json:"maxVisits,omitempty"`
+	UsedVisits         int64             `json:"usedVisits"`
+	MaxDownloads       *int64            `json:"maxDownloads,omitempty"`
+	UsedDownloads      int64             `json:"usedDownloads"`
+	ExpiresAt          time.Time         `json:"expiresAt"`
+	RevokedAt          *time.Time        `json:"revokedAt,omitempty"`
+	Status             string            `json:"status"`
 }
 
-// IssuedShare contains the only response that may carry a newly-created
-// share capability. Secret and fragment values are never part of Share/List.
 type IssuedShare struct {
 	Share
 	Secret   string `json:"secret"`
@@ -41,14 +39,11 @@ type IssuedShare struct {
 	URL      string `json:"url"`
 }
 
-// ListFilter controls authenticated member share listing.
 type ListFilter struct {
-	SpaceID string
+	MountID string
 	Limit   int
 }
 
-// CreateRequest describes one share target and its public-link options. A nil
-// preview/download flag uses the safe product default (enabled).
 type CreateRequest struct {
 	Locator       access.Locator
 	Password      string

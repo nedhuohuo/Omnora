@@ -15,6 +15,7 @@ import (
 )
 
 func TestDownloadFileHTTPRangeSemantics(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	root := createTestMount(t, db, "space-range", "mount-range", admin.ID, "read_write", "external")
@@ -61,6 +62,7 @@ func TestDownloadFileHTTPRangeSemantics(t *testing.T) {
 }
 
 func TestUploadHTTPResumeCompleteAndPermissionRevocation(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	root := createTestMount(t, db, "space-upload", "mount-upload", admin.ID, "read_write", "external")

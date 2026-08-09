@@ -89,7 +89,10 @@ func transferTargetLabel(ticket transferticket.VerifiedTicket) string {
 	if err != nil {
 		relative = "<invalid>"
 	}
-	return strings.Join([]string{ticket.Locator.SpaceID, ticket.Locator.MountID, relative}, "/")
+	if ticket.Locator.Source == "personal" {
+		return strings.Join([]string{"personal", relative}, "/")
+	}
+	return strings.Join([]string{string(ticket.Locator.Source), ticket.Locator.MountID, relative}, "/")
 }
 
 func safeTransferRangeLabel(value string) string {

@@ -24,6 +24,7 @@ import (
 	"omnora/internal/httpx"
 	"omnora/internal/memberfiles"
 	"omnora/internal/membershare"
+	"omnora/internal/personalstorage"
 	"omnora/internal/ratelimit"
 	"omnora/internal/store"
 	"omnora/internal/transferticket"
@@ -44,6 +45,7 @@ type Server struct {
 	authLimiter       *ratelimit.Limiter
 	memberFiles       *memberfiles.Service
 	memberShares      *membershare.Service
+	personalStorage   *personalstorage.Service
 	routesMu          sync.RWMutex
 	listeners         *ListenerManager
 	shutdownOnce      sync.Once
@@ -87,7 +89,16 @@ func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 		s.transferTickets = transferticket.NewService(db.SQL(), s.tokens, s.guard)
 		s.auditRecorder = audit.NewRecorder(db.SQL())
 		s.memberShares = membershare.NewService(db.SQL(), s.guard, membershare.WithAITokenService(s.tokens))
+		s.personalStorage = personalstorage.New(db.SQL(), cfg.Storage.ManagedDir)
+		if strings.TrimSpace(cfg.Storage.ManagedDir) != "" {
+			if _, err := s.personalStorage.EnsureDefaultMount(context.Background()); err != nil {
+				s.startupErr = err
+			}
+		}
 		fileOpsCoordinator := fileops.NewCoordinator(db.SQL(), fileops.WithShareInvalidator(s.memberShares))
+		if err := fileops.NewJournal(db.SQL()).QuarantineUnfinished(context.Background()); err != nil {
+			s.startupErr = err
+		}
 		s.memberFiles = memberfiles.NewService(db.SQL(), s.guard, catalog.NewService(db.SQL()), memberfiles.WithAITokenService(s.tokens), memberfiles.WithShareInvalidator(s.memberShares), memberfiles.WithFileOpsCoordinator(fileOpsCoordinator))
 	}
 	s.authLimiter = ratelimit.New(ratelimit.Options{})

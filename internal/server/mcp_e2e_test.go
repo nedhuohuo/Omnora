@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"omnora/internal/aitoken"
 	"omnora/internal/config"
+	"omnora/internal/contentref"
 	"omnora/internal/domain"
 	"omnora/internal/store"
 )
@@ -53,11 +55,21 @@ func TestMCPStreamableClientNegotiatesModernProtocolAndTypedRead(t *testing.T) {
 	if !containsMCPTool(tools.Tools, "shares.create") || !containsMCPTool(tools.Tools, "files.read_text") {
 		t.Fatalf("tools/list did not include ordinary and form-gated tools")
 	}
+	if containsMCPTool(tools.Tools, "spaces.list") {
+		t.Fatal("tools/list exposed removed spaces.list tool")
+	}
+	encodedTools, err := json.Marshal(tools.Tools)
+	if err != nil {
+		t.Fatalf("encode tools/list response: %v", err)
+	}
+	if bytes.Contains(encodedTools, []byte(`"spaceId"`)) || bytes.Contains(encodedTools, []byte(`"space_id"`)) {
+		t.Fatal("tools/list exposed removed Space boundary fields")
+	}
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name: "files.read_text",
 		Arguments: map[string]any{
-			"spaceId": "mcp-protocol-space",
+			"source":  "common_mount",
 			"mountId": "mcp-protocol-mount",
 			"path":    "hello.txt",
 		},
@@ -110,7 +122,7 @@ func TestMCPStreamableClientAutomaticallyRetriesHighRiskElicitation(t *testing.T
 	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
 		Name: "shares.create",
 		Arguments: map[string]any{
-			"spaceId":       "mcp-protocol-space",
+			"source":        "common_mount",
 			"mountId":       "mcp-protocol-mount",
 			"path":          "hello.txt",
 			"allowPreview":  true,
@@ -127,7 +139,7 @@ func TestMCPStreamableClientAutomaticallyRetriesHighRiskElicitation(t *testing.T
 		t.Fatalf("elicitation handler calls = %d, want one", called)
 	}
 	var shareCount int
-	if err := fixture.db.SQL().QueryRow(`SELECT COUNT(1) FROM shares WHERE space_id = 'mcp-protocol-space'`).Scan(&shareCount); err != nil {
+	if err := fixture.db.SQL().QueryRow(`SELECT COUNT(1) FROM shares WHERE mount_id = 'mcp-protocol-mount'`).Scan(&shareCount); err != nil {
 		t.Fatalf("count created shares: %v", err)
 	}
 	if shareCount != 1 {
@@ -171,7 +183,7 @@ func newMCPProtocolFixture(t *testing.T) *mcpProtocolFixture {
 		t.Fatalf("mark recovery ready: %v", err)
 	}
 	admin, _ := createAPITestAccounts(t, db)
-	root := createTestMount(t, db, "mcp-protocol-space", "mcp-protocol-mount", admin.ID, "read_write", "external")
+	root := createTestSpaceAndMount(t, db, "", "mcp-protocol-mount", admin.ID, "read_write")
 	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello from MCP\n"), 0o600); err != nil {
 		t.Fatalf("write MCP fixture file: %v", err)
 	}
@@ -180,7 +192,7 @@ func newMCPProtocolFixture(t *testing.T) *mcpProtocolFixture {
 		Name:      "mcp-protocol-test",
 		Scopes:    aitoken.AllowlistedScopes(),
 		Boundaries: []aitoken.DirectoryBoundary{{
-			SpaceID: "mcp-protocol-space", MountID: "mcp-protocol-mount", RelativePath: ".",
+			Source: contentref.SourceCommonMount, MountID: "mcp-protocol-mount", RelativePath: ".",
 		}},
 		ExpiresAt: time.Now().UTC().Add(time.Hour),
 	})

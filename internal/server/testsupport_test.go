@@ -11,8 +11,13 @@ import (
 	"omnora/internal/store"
 )
 
-// createTestSpaceAndMount creates a shared space with ownerAccountID as
-// manager, plus an active mount rooted at a fresh temp directory whose
+func skipLegacySpaceRESTTest(t *testing.T) {
+	t.Helper()
+	t.Skip("legacy Space REST/admin routes and Space tables were removed; MCP focused coverage is authoritative")
+}
+
+// createTestSpaceAndMount creates an active common mount with an editor grant
+// for ownerAccountID, rooted at a fresh temp directory whose
 // identity has already been captured and stored so verifyLoadedMountIdentity
 // succeeds immediately.
 //
@@ -22,6 +27,7 @@ import (
 // component.
 func createTestSpaceAndMount(t *testing.T, db *store.DB, spaceID, mountID, ownerAccountID, mode string) string {
 	t.Helper()
+	_ = spaceID
 	ctx := context.Background()
 	workspace, err := filepath.Abs(".")
 	if err != nil {
@@ -41,22 +47,16 @@ func createTestSpaceAndMount(t *testing.T, db *store.DB, spaceID, mountID, owner
 		t.Fatalf("marshal mount identity: %v", err)
 	}
 	if _, err := db.SQL().ExecContext(ctx, `
-INSERT INTO spaces(id, kind, name, owner_account_id, status)
-VALUES (?, 'shared', 'Test Space', ?, 'active')
-`, spaceID, ownerAccountID); err != nil {
-		t.Fatalf("insert space: %v", err)
-	}
-	if _, err := db.SQL().ExecContext(ctx, `
-INSERT INTO space_members(space_id, account_id, permission)
-VALUES (?, ?, 'manager')
-`, spaceID, ownerAccountID); err != nil {
-		t.Fatalf("insert space member: %v", err)
-	}
-	if _, err := db.SQL().ExecContext(ctx, `
-INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, index_enabled, status, mount_identity_json)
-VALUES (?, ?, 'Docs', ?, 'external', ?, 0, 'active', ?)
-`, mountID, spaceID, root, mode, string(identityJSON)); err != nil {
+INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, index_enabled, status, mount_identity_json)
+VALUES (?, ?, ?, 'common', 'external', 'normal', ?, 0, 'active', ?)
+`, mountID, "Docs "+mountID, root, mode, string(identityJSON)); err != nil {
 		t.Fatalf("insert mount: %v", err)
+	}
+	if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO mount_grants(mount_id, account_id, permission)
+VALUES (?, ?, 'editor')
+`, mountID, ownerAccountID); err != nil {
+		t.Fatalf("insert mount grant: %v", err)
 	}
 	return root
 }

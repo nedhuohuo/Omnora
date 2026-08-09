@@ -83,6 +83,7 @@ func TestCreateAndRestoreBackup(t *testing.T) {
 }
 
 func TestManagedSoftDeleteAndTrashRestore(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	root := createTestMount(t, db, "space-trash", "mount-trash", admin.ID, "read_write", "managed")

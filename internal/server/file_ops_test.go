@@ -12,6 +12,7 @@ import (
 )
 
 func TestRenameFileObject(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	root := createTestSpaceAndMount(t, db, "space-1", "mount-1", admin.ID, "read_write")
@@ -84,6 +85,7 @@ func TestRenameFileObject(t *testing.T) {
 }
 
 func TestCrossMountSameMountKeepsRESTConflict(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)
 	root := createTestSpaceAndMount(t, db, "space-copy", "mount-copy", admin.ID, "read_write")

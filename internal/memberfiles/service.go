@@ -10,10 +10,10 @@ import (
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
 	"omnora/internal/catalog"
+	"omnora/internal/contentref"
 	"omnora/internal/domain"
-	"omnora/internal/files"
 	"omnora/internal/fileops"
-	"omnora/internal/storage"
+	"omnora/internal/files"
 )
 
 var (
@@ -21,8 +21,6 @@ var (
 	ErrUnauthorized = errors.New("member files: unauthorized")
 )
 
-// Service composes live access checks with low-level file and catalog
-// services. It never accepts or returns a host filesystem path.
 type Service struct {
 	db      *sql.DB
 	guard   *access.Guard
@@ -34,16 +32,8 @@ type Service struct {
 	fileOps *fileops.Coordinator
 }
 
-// NewService constructs a shared member file service. The catalog service is
-// passed in explicitly so REST and MCP adapters use the same implementation.
 func NewService(db *sql.DB, guard *access.Guard, catalog catalog.Service, opts ...Option) *Service {
-	s := &Service{
-		db:      db,
-		guard:   guard,
-		catalog: catalog,
-		files:   files.NewService(),
-		now:     time.Now,
-	}
+	s := &Service{db: db, guard: guard, catalog: catalog, files: files.NewService(), now: time.Now}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(s)
@@ -52,18 +42,10 @@ func NewService(db *sql.DB, guard *access.Guard, catalog catalog.Service, opts .
 	return s
 }
 
-// WithFileOpsCoordinator wires the durable operation journal used by the
-// *Secure mutation methods (RenameSecure, MoveSecure, TrashSecure,
-// DeletePermanentlySecure, RestoreTrashSecure). Without it, those methods
-// fall back to the legacy best-effort behavior of their non-Secure
-// counterparts.
 func WithFileOpsCoordinator(coordinator *fileops.Coordinator) Option {
 	return func(s *Service) { s.fileOps = coordinator }
 }
 
-// WithAITokenService injects the process-wide token validator used for live
-// scope/boundary refreshes. Tests and standalone callers may omit it; the
-// service then falls back to a local validator for compatibility.
 func WithAITokenService(tokens *aitoken.Service) Option {
 	return func(s *Service) {
 		if tokens != nil {
@@ -72,112 +54,30 @@ func WithAITokenService(tokens *aitoken.Service) Option {
 	}
 }
 
-// ListSpaces returns active spaces that are visible to the account and, for a
-// token subject, represented by at least one current token boundary. Mount
-// roots are intentionally not part of the result.
-func (s *Service) ListSpaces(ctx context.Context, subject access.Subject) ([]Space, error) {
+// ListMounts returns only currently granted common mounts. The protected
+// personal-default mount is addressed as source=personal and is never listed.
+func (s *Service) ListMounts(ctx context.Context, subject access.Subject) ([]Mount, error) {
 	if err := s.validate(subject); err != nil {
 		return nil, err
 	}
-	// Unlike mount listing, a space can be visible before it has an active
-	// mount. Refresh token subjects here because this method has no locator on
-	// which AccessGuard could otherwise perform the token check.
-	if subject.Principal != nil {
-		tokens := s.tokens
-		if tokens == nil {
-			tokens = aitoken.NewService(s.db)
-		}
-		fresh, err := tokens.RefreshPrincipal(ctx, subject.Principal.TokenID)
-		if err != nil || fresh.AccountID != subject.AccountID || !fresh.HasScope(aitoken.ScopeSpacesRead) {
-			if err != nil {
-				return nil, err
-			}
-			return nil, access.ErrForbidden
-		}
-		subject.Principal = &fresh
+	if err := s.requireActiveCollectionAccount(ctx, subject.AccountID); err != nil {
+		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `
-SELECT sp.id, sp.kind, sp.name
-FROM spaces sp
-JOIN space_members sm ON sm.space_id = sp.id AND sm.account_id = ?
-JOIN accounts a ON a.id = sm.account_id AND a.status = 'active'
-WHERE sp.status = 'active'
-ORDER BY sp.kind, sp.name, sp.id
-`, subject.AccountID)
+	subject, err := s.requireTokenScope(ctx, subject, aitoken.ScopeMountsRead)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	spaces := make([]Space, 0)
-	for rows.Next() {
-		var space Space
-		if err := rows.Scan(&space.ID, &space.Kind, &space.Name); err != nil {
-			return nil, err
-		}
-		spaces = append(spaces, space)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	visible := spaces[:0]
-	for _, space := range spaces {
-		// AccessGuard remains the source of truth for live ACL membership.
-		if !s.guard.HasSpacePermission(ctx, subject.AccountID, space.ID, domain.SpacePermissionViewer) {
-			continue
-		}
-		if subject.Principal != nil {
-			// A persisted boundary alone is not sufficient: the mount may have
-			// been disabled, become unavailable, drifted in identity, or no
-			// longer belong to this space. visibleMounts replays the complete
-			// live Guard path for every current boundary.
-			records, err := s.visibleMounts(ctx, subject, space.ID, aitoken.ScopeSpacesRead)
-			if err != nil {
-				return nil, err
-			}
-			if len(records) == 0 {
-				continue
-			}
-		}
-		visible = append(visible, space)
-	}
-	return visible, nil
-}
-
-// ListMounts returns active mounts visible in one active space. The result
-// contains only member-safe metadata and never exposes Root.
-func (s *Service) ListMounts(ctx context.Context, subject access.Subject, spaceID string) ([]Mount, error) {
-	if err := s.validate(subject); err != nil {
-		return nil, err
-	}
-	subject, err := s.requireTokenScope(ctx, subject, aitoken.ScopeSpacesRead)
-	if err != nil {
-		return nil, err
-	}
-	spaceID = strings.TrimSpace(spaceID)
-	if spaceID == "" {
-		return nil, ErrInvalidInput
-	}
-	records, err := s.visibleMounts(ctx, subject, spaceID, aitoken.ScopeSpacesRead)
+	records, err := s.visibleMounts(ctx, subject, aitoken.ScopeMountsRead, contentref.SourceCommonMount, "")
 	if err != nil {
 		return nil, err
 	}
 	mounts := make([]Mount, 0, len(records))
-	seen := make(map[string]struct{}, len(records))
 	for _, record := range records {
-		if _, ok := seen[record.mount.ID]; ok {
-			continue
-		}
-		seen[record.mount.ID] = struct{}{}
 		mounts = append(mounts, record.mount)
 	}
 	return mounts, nil
 }
 
-// validate checks only request shape. Authorization is deliberately delegated
-// to AccessGuard for every operation and is never cached on Service.
 func (s *Service) validate(subject access.Subject) error {
 	if s == nil || s.db == nil || s.guard == nil || strings.TrimSpace(subject.AccountID) == "" {
 		return ErrUnauthorized
@@ -185,22 +85,30 @@ func (s *Service) validate(subject access.Subject) error {
 	return nil
 }
 
-// requireTokenScope gives collection operations an explicit scope failure
-// even when no mount remains visible. AccessGuard repeats this check for each
-// actual locator, so this helper is only an early, stable error boundary.
+func (s *Service) requireActiveCollectionAccount(ctx context.Context, accountID string) error {
+	var active int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM accounts WHERE id = ? AND status = 'active'`, accountID).Scan(&active); err != nil {
+		return err
+	}
+	if active != 1 {
+		return ErrUnauthorized
+	}
+	return nil
+}
+
 func (s *Service) requireTokenScope(ctx context.Context, subject access.Subject, scope aitoken.Scope) (access.Subject, error) {
 	if subject.Principal == nil {
 		return subject, nil
+	}
+	if strings.TrimSpace(subject.Principal.TokenID) == "" || subject.Principal.AccountID != subject.AccountID {
+		return subject, access.ErrUnauthorized
 	}
 	tokens := s.tokens
 	if tokens == nil {
 		tokens = aitoken.NewService(s.db)
 	}
 	fresh, err := tokens.RefreshPrincipal(ctx, subject.Principal.TokenID)
-	if err != nil {
-		return subject, err
-	}
-	if fresh.AccountID != subject.AccountID {
+	if err != nil || fresh.AccountID != subject.AccountID {
 		return subject, access.ErrUnauthorized
 	}
 	if !fresh.HasScope(scope) {
@@ -211,120 +119,107 @@ func (s *Service) requireTokenScope(ctx context.Context, subject access.Subject,
 }
 
 type mountRecord struct {
-	space      Space
+	source     contentref.Source
 	mount      Mount
-	root       string
-	identity   string
 	authorized access.AuthorizedMount
 	boundaries []string
 }
 
-// visibleMounts loads only active ACL rows, then asks AccessGuard to
-// authorize each current token boundary. This makes list/search results
-// fail closed when ACLs, token scopes, boundaries, mount state, or identity
-// drift after a token was issued.
-func (s *Service) visibleMounts(ctx context.Context, subject access.Subject, spaceID string, scope aitoken.Scope) ([]mountRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `
-SELECT sp.id, sp.kind, sp.name,
-       m.id, m.space_id, m.display_name, m.kind, m.mode,
-       m.root_path, COALESCE(m.mount_identity_json, '')
-FROM spaces sp
-JOIN space_members sm ON sm.space_id = sp.id AND sm.account_id = ?
-JOIN mounts m ON m.space_id = sp.id
-WHERE sp.status = 'active'
-  AND m.status = 'active'
-  AND (? = '' OR sp.id = ?)
-ORDER BY sp.name, sp.id, m.display_name, m.id
-`, subject.AccountID, spaceID, spaceID)
-	if err != nil {
-		return nil, err
+// visibleMounts replays Guard authorization for every live token boundary.
+// source may be personal, common_mount, or all_account_content.
+func (s *Service) visibleMounts(ctx context.Context, subject access.Subject, scope aitoken.Scope, source contentref.Source, mountID string) ([]mountRecord, error) {
+	if source != contentref.SourcePersonal && source != contentref.SourceCommonMount && source != aitoken.SourceAllAccountContent {
+		return nil, ErrInvalidInput
 	}
-	defer rows.Close()
-
 	var candidates []mountRecord
-	for rows.Next() {
-		var record mountRecord
-		if err := rows.Scan(
-			&record.space.ID, &record.space.Kind, &record.space.Name,
-			&record.mount.ID, &record.mount.SpaceID, &record.mount.Name,
-			&record.mount.Kind, &record.mount.Mode, &record.root, &record.identity,
-		); err != nil {
-			return nil, err
-		}
-		record.mount.ReadOnly = record.mount.Mode == domain.MountModeReadOnly
-		candidates = append(candidates, record)
+	if source == contentref.SourcePersonal || source == aitoken.SourceAllAccountContent {
+		candidates = append(candidates, mountRecord{source: contentref.SourcePersonal})
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-
-	var records []mountRecord
-	for _, record := range candidates {
-		boundaries, err := s.currentBoundaries(ctx, subject, record.space.ID, record.mount.ID)
+	if source == contentref.SourceCommonMount || source == aitoken.SourceAllAccountContent {
+		query := `
+SELECT m.id, m.display_name, m.storage_kind, mg.permission, m.mode
+FROM mount_grants mg
+JOIN mounts m ON m.id = mg.mount_id
+WHERE mg.account_id = ?
+  AND mg.permission IN ('viewer', 'editor')
+  AND m.purpose = 'common'
+  AND m.storage_kind = 'external'
+  AND m.status = 'active'
+  AND (? = '' OR m.id = ?)
+ORDER BY m.display_name, m.id`
+		rows, err := s.db.QueryContext(ctx, query, subject.AccountID, mountID, mountID)
 		if err != nil {
 			return nil, err
 		}
-		for _, boundary := range boundaries {
-			path := boundary
-			if path == "" {
-				path = "."
+		for rows.Next() {
+			var record mountRecord
+			record.source = contentref.SourceCommonMount
+			if err := rows.Scan(&record.mount.ID, &record.mount.Name, &record.mount.StorageKind, &record.mount.Permission, &record.mount.Mode); err != nil {
+				rows.Close()
+				return nil, err
 			}
-			authorized, authErr := s.guard.Authorize(ctx, access.CheckRequest{
-				Subject:            subject,
-				Scope:              scope,
-				Locator:            access.Locator{SpaceID: record.space.ID, MountID: record.mount.ID, Path: path},
-				RequiredPermission: domain.SpacePermissionViewer,
+			record.mount.ReadOnly = record.mount.Mode == domain.MountModeReadOnly
+			candidates = append(candidates, record)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+
+	records := make([]mountRecord, 0, len(candidates))
+	for _, candidate := range candidates {
+		paths := currentBoundaryPaths(subject.Principal, candidate.source, candidate.mount.ID)
+		for _, boundary := range paths {
+			locator := access.Locator{Source: candidate.source, MountID: candidate.mount.ID, Path: boundary}
+			if candidate.source == contentref.SourcePersonal {
+				locator.MountID = ""
+			}
+			authorized, err := s.guard.Authorize(ctx, access.CheckRequest{
+				Subject: subject, Scope: scope, Locator: locator,
+				RequiredPermission: domain.ContentPermissionViewer,
 			})
-			if authErr != nil {
+			if err != nil {
 				continue
 			}
-			record.authorized = authorized
-			record.boundaries = append(record.boundaries, authorized.RelativePath)
+			candidate.authorized = authorized
+			candidate.boundaries = append(candidate.boundaries, authorized.RelativePath)
 		}
-		if len(record.boundaries) > 0 {
-			records = append(records, record)
+		if len(candidate.boundaries) > 0 {
+			records = append(records, candidate)
 		}
 	}
 	return records, nil
 }
 
-// currentBoundaries is a live database read. Browser sessions can see the
-// whole mount; token subjects must use the currently persisted boundaries,
-// not the potentially stale copy that authenticated the request earlier.
-func (s *Service) currentBoundaries(ctx context.Context, subject access.Subject, spaceID, mountID string) ([]string, error) {
-	if subject.Principal == nil {
-		return []string{"."}, nil
+func currentBoundaryPaths(principal *aitoken.Principal, source contentref.Source, mountID string) []string {
+	if principal == nil {
+		return []string{"."}
 	}
-	if strings.TrimSpace(subject.Principal.TokenID) == "" {
-		return nil, ErrUnauthorized
-	}
-	rows, err := s.db.QueryContext(ctx, `
-	SELECT relative_path
-	FROM ai_token_boundaries
-WHERE token_id = ? AND space_id = ? AND mount_id = ?
-ORDER BY relative_path
-`, subject.Principal.TokenID, spaceID, mountID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var boundaries []string
-	for rows.Next() {
-		var value string
-		if err := rows.Scan(&value); err != nil {
-			return nil, err
-		}
-		cleaned, err := storage.CleanRelativePath(value)
-		if err != nil {
+	seen := map[string]bool{}
+	paths := make([]string, 0)
+	for _, boundary := range principal.Boundaries {
+		if boundary.Source == aitoken.SourceAllAccountContent {
+			if !seen["."] {
+				paths = append(paths, ".")
+				seen["."] = true
+			}
 			continue
 		}
-		boundaries = append(boundaries, cleaned)
+		if boundary.Source != source || source == contentref.SourceCommonMount && boundary.MountID != mountID {
+			continue
+		}
+		value := boundary.RelativePath
+		if value == "" {
+			value = "."
+		}
+		if !seen[value] {
+			paths = append(paths, value)
+			seen[value] = true
+		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return boundaries, nil
+	return paths
 }

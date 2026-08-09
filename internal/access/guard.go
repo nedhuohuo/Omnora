@@ -7,14 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"omnora/internal/aitoken"
+	"omnora/internal/contentref"
 	"omnora/internal/domain"
 	"omnora/internal/mountid"
-	"omnora/internal/storage"
 )
 
 var (
@@ -27,12 +28,9 @@ var (
 	ErrMountIdentityUnverifiable = mountid.ErrIdentityUnverifiable
 )
 
-// Locator identifies a mount-relative object. Path must never be a host path.
-type Locator struct {
-	SpaceID string
-	MountID string
-	Path    string
-}
+// Locator is the account/mount content coordinate shared by member and MCP
+// APIs. Automation authorization deliberately rejects collaboration locators.
+type Locator = contentref.Locator
 
 // Subject is either a browser session (Principal nil) or an AI-token subject.
 type Subject struct {
@@ -44,18 +42,23 @@ type CheckRequest struct {
 	Subject            Subject
 	Scope              aitoken.Scope
 	Locator            Locator
-	RequiredPermission domain.SpacePermission
+	RequiredPermission domain.ContentPermission
 	Write              bool
 }
 
+// AuthorizedMount separates the caller-visible source path from its unique
+// physical path inside the mount. Root is cropped to the account for personal
+// content; MountRoot is always the directory whose identity is verified.
 type AuthorizedMount struct {
-	ID           string
-	SpaceID      string
-	Root         string
-	Kind         string
-	Mode         domain.MountMode
-	IdentityJSON string
-	RelativePath string
+	Source              contentref.Source
+	ID                  string
+	Root                string
+	MountRoot           string
+	StorageKind         domain.StorageKind
+	Mode                domain.MountMode
+	IdentityJSON        string
+	RelativePath        string
+	StorageRelativePath string
 }
 
 type AuthorizedPair struct {
@@ -71,71 +74,79 @@ func NewGuard(db *sql.DB) *Guard {
 	return &Guard{db: db}
 }
 
-// Authorize performs a live account, token, ACL, mount, boundary, path and
-// mount-identity check. No authorization result is cached.
+// Authorize reloads token state, account state, content grants and mount
+// identity on every call. No authorization result is cached.
 func (g *Guard) Authorize(ctx context.Context, req CheckRequest) (AuthorizedMount, error) {
 	if g == nil || g.db == nil {
 		return AuthorizedMount{}, ErrUnauthorized
 	}
 	accountID := strings.TrimSpace(req.Subject.AccountID)
-	if accountID == "" || strings.TrimSpace(req.Locator.SpaceID) == "" || strings.TrimSpace(req.Locator.MountID) == "" {
+	if accountID == "" || !req.RequiredPermission.Valid() {
 		return AuthorizedMount{}, ErrInvalidRequest
 	}
-
-	principal := req.Subject.Principal
-	if principal != nil {
-		if principal.AccountID != accountID || strings.TrimSpace(principal.TokenID) == "" {
-			return AuthorizedMount{}, ErrUnauthorized
+	locator, err := contentref.NormalizeForAutomation(req.Locator)
+	if err != nil {
+		if errors.Is(err, contentref.ErrInvalidLocator) {
+			return AuthorizedMount{}, fmt.Errorf("%w: %v", ErrBoundaryViolation, err)
 		}
-		fresh, err := aitoken.NewService(g.db).RefreshPrincipal(ctx, principal.TokenID)
-		if err != nil {
-			return AuthorizedMount{}, fmt.Errorf("%w: token is not valid: %v", ErrUnauthorized, err)
-		}
-		if fresh.AccountID != accountID || !fresh.HasScope(req.Scope) {
-			if !fresh.HasScope(req.Scope) {
-				return AuthorizedMount{}, fmt.Errorf("%w: scope is not allowed", ErrForbidden)
-			}
-			return AuthorizedMount{}, ErrUnauthorized
-		}
-		principal = &fresh
+		return AuthorizedMount{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 
+	principal, err := g.refreshPrincipal(ctx, accountID, req.Subject.Principal, req.Scope)
+	if err != nil {
+		return AuthorizedMount{}, err
+	}
 	if err := g.requireActiveAccount(ctx, accountID); err != nil {
 		return AuthorizedMount{}, err
 	}
-	permission, err := g.spacePermission(ctx, accountID, req.Locator.SpaceID)
-	if err != nil {
-		return AuthorizedMount{}, err
-	}
-	if !permissionAllows(permission, req.RequiredPermission) {
-		return AuthorizedMount{}, fmt.Errorf("%w: insufficient space permission", ErrForbidden)
-	}
-	if req.Write && !permissionAllows(permission, domain.SpacePermissionEditor) {
-		return AuthorizedMount{}, fmt.Errorf("%w: write requires editor permission", ErrForbidden)
-	}
 
-	mount, err := g.loadMount(ctx, req.Locator.SpaceID, req.Locator.MountID)
+	var mount AuthorizedMount
+	var permission domain.ContentPermission
+	switch locator.Source {
+	case contentref.SourcePersonal:
+		mount, permission, err = g.authorizePersonal(ctx, accountID)
+	case contentref.SourceCommonMount:
+		mount, permission, err = g.authorizeCommon(ctx, accountID, locator.MountID)
+	default:
+		return AuthorizedMount{}, ErrInvalidRequest
+	}
 	if err != nil {
 		return AuthorizedMount{}, err
+	}
+	if !permission.Allows(req.RequiredPermission) || req.Write && permission != domain.ContentPermissionEditor {
+		return AuthorizedMount{}, ErrForbidden
 	}
 	if req.Write && mount.Mode != domain.MountModeReadWrite {
 		return AuthorizedMount{}, ErrReadonlyMount
 	}
-
-	cleaned, err := cleanLocatorPath(req.Locator.Path)
-	if err != nil {
-		return AuthorizedMount{}, fmt.Errorf("%w: %v", ErrBoundaryViolation, err)
-	}
-	if principal != nil && !withinBoundaries(*principal, req.Locator.SpaceID, req.Locator.MountID, cleaned) {
+	if principal != nil && !withinBoundaries(*principal, locator, locator.Path) {
 		return AuthorizedMount{}, ErrBoundaryViolation
-	}
-	if err := rejectSymlinkPath(mount.Root, cleaned); err != nil {
-		return AuthorizedMount{}, err
 	}
 	if err := g.VerifyMountIdentity(ctx, mount); err != nil {
 		return AuthorizedMount{}, err
 	}
-	mount.RelativePath = cleaned
+	if mount.Source == contentref.SourcePersonal {
+		accountPath, err := cleanAccountStoragePath(accountID)
+		if err != nil {
+			return AuthorizedMount{}, err
+		}
+		if err := rejectSymlinkPath(mount.MountRoot, accountPath); err != nil {
+			return AuthorizedMount{}, err
+		}
+		if err := requireRealDirectory(mount.Root); err != nil {
+			return AuthorizedMount{}, err
+		}
+	}
+	if err := rejectSymlinkPath(mount.Root, locator.Path); err != nil {
+		return AuthorizedMount{}, err
+	}
+
+	mount.RelativePath = locator.Path
+	if mount.Source == contentref.SourcePersonal {
+		mount.StorageRelativePath = path.Join(accountID, locator.Path)
+	} else {
+		mount.StorageRelativePath = locator.Path
+	}
 	return mount, nil
 }
 
@@ -151,29 +162,73 @@ func (g *Guard) AuthorizePair(ctx context.Context, source, destination CheckRequ
 	return AuthorizedPair{Source: src, Destination: dst}, nil
 }
 
-// LoadMount and VerifyMountIdentity are compatibility helpers for existing
-// handlers. They intentionally contain no ACL or token authorization logic.
-func (g *Guard) LoadMount(ctx context.Context, spaceID, mountID string) (AuthorizedMount, error) {
-	if g == nil || g.db == nil {
-		return AuthorizedMount{}, ErrUnauthorized
+// LoadMountIdentity loads only mount classification and identity metadata.
+// It performs no account authorization and accepts no legacy Space coordinate.
+func (g *Guard) LoadMountIdentity(ctx context.Context, mountID string) (AuthorizedMount, error) {
+	if g == nil || g.db == nil || strings.TrimSpace(mountID) == "" {
+		return AuthorizedMount{}, ErrInvalidRequest
 	}
-	return g.loadMount(ctx, spaceID, mountID)
+	var mount AuthorizedMount
+	var rootPath string
+	var purpose domain.MountPurpose
+	var status string
+	err := g.db.QueryRowContext(ctx, `
+SELECT id, root_path, purpose, storage_kind, mode, COALESCE(mount_identity_json, ''), status
+FROM mounts
+WHERE id = ? AND status <> 'deleted'
+`, strings.TrimSpace(mountID)).Scan(&mount.ID, &rootPath, &purpose, &mount.StorageKind, &mount.Mode, &mount.IdentityJSON, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AuthorizedMount{}, ErrMountUnavailable
+	}
+	if err != nil {
+		return AuthorizedMount{}, err
+	}
+	if status != "active" {
+		return AuthorizedMount{}, ErrMountUnavailable
+	}
+	switch purpose {
+	case domain.MountPurposePersonalDefault:
+		if mount.StorageKind != domain.StorageKindManaged || rootPath != "personal" || mount.Mode != domain.MountModeReadWrite {
+			return AuthorizedMount{}, ErrMountUnavailable
+		}
+		mount.Source = contentref.SourcePersonal
+	case domain.MountPurposeCommon:
+		if mount.StorageKind != domain.StorageKindExternal {
+			return AuthorizedMount{}, ErrMountUnavailable
+		}
+		mount.Source = contentref.SourceCommonMount
+	default:
+		return AuthorizedMount{}, ErrMountUnavailable
+	}
+	mountRoot, err := mountRootFromIdentity(rootPath, mount.Source, mount.IdentityJSON)
+	if err != nil {
+		_ = g.markUnavailable(ctx, mount.ID)
+		return AuthorizedMount{}, err
+	}
+	mount.Root = mountRoot
+	mount.MountRoot = mountRoot
+	return mount, nil
 }
 
+// VerifyMountIdentity checks the full mount root, never an account-cropped
+// personal directory. Malformed or drifted identity marks the mount unavailable.
 func (g *Guard) VerifyMountIdentity(ctx context.Context, mount AuthorizedMount) error {
-	if g == nil || g.db == nil || strings.TrimSpace(mount.ID) == "" {
+	if g == nil || g.db == nil || strings.TrimSpace(mount.ID) == "" || strings.TrimSpace(mount.MountRoot) == "" || strings.TrimSpace(mount.IdentityJSON) == "" {
+		if g != nil && g.db != nil && strings.TrimSpace(mount.ID) != "" {
+			_ = g.markUnavailable(ctx, mount.ID)
+		}
 		return ErrMountIdentityUnverifiable
 	}
-	if strings.TrimSpace(mount.IdentityJSON) == "" {
+	if err := requireRealDirectory(mount.MountRoot); err != nil {
 		_ = g.markUnavailable(ctx, mount.ID)
 		return ErrMountIdentityUnverifiable
 	}
 	var stored mountid.Identity
-	if err := json.Unmarshal([]byte(mount.IdentityJSON), &stored); err != nil {
+	if err := json.Unmarshal([]byte(mount.IdentityJSON), &stored); err != nil || filepath.Clean(stored.Path) != filepath.Clean(mount.MountRoot) {
 		_ = g.markUnavailable(ctx, mount.ID)
-		return fmt.Errorf("%w: %v", ErrMountIdentityUnverifiable, err)
+		return ErrMountIdentityUnverifiable
 	}
-	current, err := mountid.Capture(mount.Root)
+	current, err := mountid.Capture(mount.MountRoot)
 	if err != nil {
 		_ = g.markUnavailable(ctx, mount.ID)
 		return fmt.Errorf("%w: %v", ErrMountIdentityUnverifiable, err)
@@ -188,15 +243,21 @@ func (g *Guard) VerifyMountIdentity(ctx context.Context, mount AuthorizedMount) 
 	return nil
 }
 
-func (g *Guard) HasSpacePermission(ctx context.Context, accountID, spaceID string, required domain.SpacePermission) bool {
-	if g == nil || g.db == nil {
-		return false
+func (g *Guard) refreshPrincipal(ctx context.Context, accountID string, presented *aitoken.Principal, scope aitoken.Scope) (*aitoken.Principal, error) {
+	if presented == nil {
+		return nil, nil
 	}
-	permission, err := g.spacePermission(ctx, accountID, spaceID)
-	if err != nil {
-		return false
+	if presented.AccountID != accountID || strings.TrimSpace(presented.TokenID) == "" || strings.TrimSpace(string(scope)) == "" {
+		return nil, ErrUnauthorized
 	}
-	return permissionAllows(permission, required)
+	fresh, err := aitoken.NewService(g.db).RefreshPrincipal(ctx, presented.TokenID)
+	if err != nil || fresh.AccountID != accountID || strings.TrimSpace(fresh.TokenID) == "" || len(fresh.Boundaries) == 0 {
+		return nil, ErrUnauthorized
+	}
+	if !fresh.HasScope(scope) {
+		return nil, ErrForbidden
+	}
+	return &fresh, nil
 }
 
 func (g *Guard) requireActiveAccount(ctx context.Context, accountID string) error {
@@ -213,116 +274,143 @@ func (g *Guard) requireActiveAccount(ctx context.Context, accountID string) erro
 	return nil
 }
 
-func (g *Guard) spacePermission(ctx context.Context, accountID, spaceID string) (domain.SpacePermission, error) {
-	var permission domain.SpacePermission
+func (g *Guard) authorizePersonal(ctx context.Context, accountID string) (AuthorizedMount, domain.ContentPermission, error) {
+	var mountID, rootPath, identityJSON string
+	var storageKind domain.StorageKind
+	var mode domain.MountMode
 	err := g.db.QueryRowContext(ctx, `
-SELECT sm.permission
-FROM space_members sm
-JOIN spaces sp ON sp.id = sm.space_id
-WHERE sm.account_id = ? AND sm.space_id = ? AND sp.status = 'active'
-`, accountID, spaceID).Scan(&permission)
+SELECT m.id, m.root_path, m.storage_kind, m.mode, COALESCE(m.mount_identity_json, '')
+FROM personal_directories pd
+JOIN mounts m ON m.purpose = 'personal_default'
+WHERE pd.account_id = ?
+  AND pd.relative_path = pd.account_id
+  AND pd.state = 'ready'
+  AND m.root_path = 'personal'
+  AND m.storage_kind = 'managed'
+  AND m.governance = 'system'
+  AND m.mode = 'read_write'
+  AND m.status = 'active'
+`, accountID).Scan(&mountID, &rootPath, &storageKind, &mode, &identityJSON)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.SpacePermissionNone, ErrForbidden
+		return AuthorizedMount{}, domain.ContentPermissionNone, ErrMountUnavailable
 	}
 	if err != nil {
-		return domain.SpacePermissionNone, err
+		return AuthorizedMount{}, domain.ContentPermissionNone, err
 	}
-	return permission, nil
+	mountRoot, err := mountRootFromIdentity(rootPath, contentref.SourcePersonal, identityJSON)
+	if err != nil {
+		_ = g.markUnavailable(ctx, mountID)
+		return AuthorizedMount{}, domain.ContentPermissionNone, err
+	}
+	return AuthorizedMount{
+		Source:       contentref.SourcePersonal,
+		ID:           mountID,
+		Root:         filepath.Join(mountRoot, accountID),
+		MountRoot:    mountRoot,
+		StorageKind:  storageKind,
+		Mode:         mode,
+		IdentityJSON: identityJSON,
+	}, domain.ContentPermissionEditor, nil
 }
 
-func (g *Guard) loadMount(ctx context.Context, spaceID, mountID string) (AuthorizedMount, error) {
+func (g *Guard) authorizeCommon(ctx context.Context, accountID, mountID string) (AuthorizedMount, domain.ContentPermission, error) {
 	var mount AuthorizedMount
-	var status string
+	var rootPath string
+	var permission domain.ContentPermission
 	err := g.db.QueryRowContext(ctx, `
-SELECT id, space_id, root_path, kind, mode, COALESCE(mount_identity_json, ''), status
-FROM mounts
-WHERE id = ? AND space_id = ? AND status <> 'deleted'
-`, mountID, spaceID).Scan(&mount.ID, &mount.SpaceID, &mount.Root, &mount.Kind, &mount.Mode, &mount.IdentityJSON, &status)
+SELECT m.id, m.root_path, m.storage_kind, m.mode, COALESCE(m.mount_identity_json, ''), mg.permission
+FROM mount_grants mg
+JOIN mounts m ON m.id = mg.mount_id
+WHERE mg.account_id = ?
+  AND mg.mount_id = ?
+  AND mg.permission IN ('viewer', 'editor')
+  AND m.purpose = 'common'
+  AND m.storage_kind = 'external'
+  AND m.status = 'active'
+`, accountID, mountID).Scan(&mount.ID, &rootPath, &mount.StorageKind, &mount.Mode, &mount.IdentityJSON, &permission)
 	if errors.Is(err, sql.ErrNoRows) {
-		return AuthorizedMount{}, sql.ErrNoRows
+		return AuthorizedMount{}, domain.ContentPermissionNone, ErrForbidden
 	}
 	if err != nil {
-		return AuthorizedMount{}, err
+		return AuthorizedMount{}, domain.ContentPermissionNone, err
 	}
-	if status != "active" {
-		return AuthorizedMount{}, ErrMountUnavailable
-	}
-	return mount, nil
-}
-
-func (g *Guard) markUnavailable(ctx context.Context, mountID string) error {
-	_, err := g.db.ExecContext(ctx, `
-UPDATE mounts SET status = 'unavailable', updated_at = ?
-WHERE id = ? AND status = 'active'
-`, time.Now().UTC().Format(time.RFC3339Nano), mountID)
-	return err
-}
-
-func (g *Guard) refreshIdentity(ctx context.Context, mountID string, identity mountid.Identity) error {
-	identityJSON, err := json.Marshal(identity)
+	mountRoot, err := mountRootFromIdentity(rootPath, contentref.SourceCommonMount, mount.IdentityJSON)
 	if err != nil {
-		return err
+		_ = g.markUnavailable(ctx, mount.ID)
+		return AuthorizedMount{}, domain.ContentPermissionNone, err
 	}
-	_, err = g.db.ExecContext(ctx, `
-UPDATE mounts SET mount_identity_json = ?, updated_at = ?
-WHERE id = ? AND status = 'active'
-`, string(identityJSON), time.Now().UTC().Format(time.RFC3339Nano), mountID)
-	return err
+	mount.Source = contentref.SourceCommonMount
+	mount.Root = mountRoot
+	mount.MountRoot = mountRoot
+	return mount, permission, nil
 }
 
-func permissionAllows(permission, required domain.SpacePermission) bool {
-	switch required {
-	case domain.SpacePermissionViewer:
-		return accessRank(permission) >= accessRank(domain.SpacePermissionViewer)
-	case domain.SpacePermissionEditor:
-		return accessRank(permission) >= accessRank(domain.SpacePermissionEditor)
-	case domain.SpacePermissionManager:
-		return permission == domain.SpacePermissionManager
+func mountRootFromIdentity(rootPath string, source contentref.Source, identityJSON string) (string, error) {
+	if strings.TrimSpace(identityJSON) == "" {
+		return "", ErrMountIdentityUnverifiable
+	}
+	var identity mountid.Identity
+	if err := json.Unmarshal([]byte(identityJSON), &identity); err != nil || !filepath.IsAbs(identity.Path) {
+		return "", ErrMountIdentityUnverifiable
+	}
+	identityRoot := filepath.Clean(identity.Path)
+	switch source {
+	case contentref.SourcePersonal:
+		if rootPath != "personal" || filepath.Base(identityRoot) != rootPath {
+			return "", ErrMountIdentityUnverifiable
+		}
+	case contentref.SourceCommonMount:
+		if !filepath.IsAbs(rootPath) || filepath.Clean(rootPath) != identityRoot {
+			return "", ErrMountIdentityUnverifiable
+		}
 	default:
-		return false
+		return "", ErrMountIdentityUnverifiable
 	}
+	return identityRoot, nil
 }
 
-func accessRank(permission domain.SpacePermission) int {
-	switch permission {
-	case domain.SpacePermissionViewer:
-		return 1
-	case domain.SpacePermissionEditor:
-		return 2
-	case domain.SpacePermissionManager:
-		return 3
-	default:
-		return 0
+func cleanAccountStoragePath(accountID string) (string, error) {
+	if accountID == "" || filepath.IsAbs(accountID) || strings.ContainsAny(accountID, `/\\`) || accountID == "." || accountID == ".." {
+		return "", ErrBoundaryViolation
 	}
+	return accountID, nil
 }
 
-func withinBoundaries(principal aitoken.Principal, spaceID, mountID, cleaned string) bool {
+func withinBoundaries(principal aitoken.Principal, locator Locator, cleaned string) bool {
 	for _, boundary := range principal.Boundaries {
-		if boundary.SpaceID != spaceID || boundary.MountID != mountID {
+		if boundary.Source == aitoken.SourceAllAccountContent {
+			return true
+		}
+		if boundary.Source != locator.Source {
 			continue
 		}
-		boundaryPath, err := storage.CleanRelativePath(boundary.RelativePath)
-		if err != nil {
+		if locator.Source == contentref.SourcePersonal && boundary.MountID != "" {
 			continue
 		}
-		if boundaryPath == "." || cleaned == boundaryPath || strings.HasPrefix(cleaned, boundaryPath+"/") {
+		if locator.Source == contentref.SourceCommonMount && boundary.MountID != locator.MountID {
+			continue
+		}
+		boundaryPath := strings.TrimSpace(boundary.RelativePath)
+		if boundaryPath == "" {
+			boundaryPath = "."
+		}
+		if pathWithin(cleaned, boundaryPath) {
 			return true
 		}
 	}
 	return false
 }
 
-func cleanLocatorPath(value string) (string, error) {
-	raw := strings.TrimSpace(value)
-	if strings.HasPrefix(raw, "/") || filepath.IsAbs(raw) || strings.Contains(raw, "\\") {
-		return "", errors.New("absolute paths are not allowed")
+func pathWithin(candidate, boundary string) bool {
+	return boundary == "." || candidate == boundary || strings.HasPrefix(candidate, boundary+"/")
+}
+
+func requireRealDirectory(root string) error {
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ErrMountIdentityUnverifiable
 	}
-	for _, part := range strings.Split(raw, "/") {
-		if part == ".." {
-			return "", errors.New("path traversal is not allowed")
-		}
-	}
-	return storage.CleanRelativePath(raw)
+	return nil
 }
 
 func rejectSymlinkPath(root, cleaned string) error {
@@ -350,6 +438,26 @@ func rejectSymlinkPath(root, cleaned string) error {
 		}
 	}
 	return nil
+}
+
+func (g *Guard) markUnavailable(ctx context.Context, mountID string) error {
+	_, err := g.db.ExecContext(ctx, `
+UPDATE mounts SET status = 'unavailable', updated_at = ?
+WHERE id = ? AND status = 'active'
+`, time.Now().UTC().Format(time.RFC3339Nano), mountID)
+	return err
+}
+
+func (g *Guard) refreshIdentity(ctx context.Context, mountID string, identity mountid.Identity) error {
+	identityJSON, err := json.Marshal(identity)
+	if err != nil {
+		return err
+	}
+	_, err = g.db.ExecContext(ctx, `
+UPDATE mounts SET mount_identity_json = ?, updated_at = ?
+WHERE id = ? AND status = 'active'
+`, string(identityJSON), time.Now().UTC().Format(time.RFC3339Nano), mountID)
+	return err
 }
 
 // MountIdentityMatches compares durable filesystem identity. Kernel mount IDs

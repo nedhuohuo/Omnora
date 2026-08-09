@@ -80,7 +80,7 @@ func memberShareDTO(item membershare.Share) shareRecordDTO {
 		status = "active"
 	}
 	result := shareRecordDTO{
-		ID: item.ID, PublicID: item.PublicID, SpaceID: item.SpaceID, SpaceName: item.SpaceName,
+		ID: item.ID, PublicID: item.PublicID,
 		MountID: item.MountID, MountName: item.MountName, RelativePath: item.RelativePath,
 		CreatorEmail: item.CreatorEmail, CreatorDisplayName: item.CreatorDisplayName,
 		AllowPreview: item.AllowPreview, AllowDownload: item.AllowDownload,

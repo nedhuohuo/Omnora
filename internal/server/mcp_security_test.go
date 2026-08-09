@@ -13,6 +13,7 @@ import (
 
 	"omnora/internal/aitoken"
 	"omnora/internal/config"
+	"omnora/internal/contentref"
 	"omnora/internal/domain"
 	"omnora/internal/store"
 )
@@ -180,9 +181,9 @@ func newMCPHTTPTestServer(t *testing.T, mcpConfig config.MCPConfig) (*store.DB, 
 	issued, err := aitoken.NewService(db.SQL()).Create(context.Background(), aitoken.CreateRequest{
 		AccountID: admin.ID,
 		Name:      "mcp-test",
-		Scopes:    []aitoken.Scope{aitoken.ScopeSpacesRead},
+		Scopes:    []aitoken.Scope{aitoken.ScopeMountsRead},
 		Boundaries: []aitoken.DirectoryBoundary{{
-			SpaceID: "mcp-space", MountID: "mcp-mount", RelativePath: ".",
+			Source: contentref.SourceCommonMount, MountID: "mcp-mount", RelativePath: ".",
 		}},
 		ExpiresAt: time.Now().Add(time.Hour),
 	})

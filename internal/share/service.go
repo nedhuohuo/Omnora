@@ -162,10 +162,27 @@ func loadShareForExchange(ctx context.Context, tx *sql.Tx, publicID string) (sha
 	// event, ...) simply stops matching and is treated like "not found",
 	// the same way a revoked or expired share is, so it never enumerates.
 	err := tx.QueryRowContext(ctx, `
-SELECT id, secret_hash, password_hash, expires_at, generation, revoked_at
-FROM shares
-WHERE public_id = ?
-  AND credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
+SELECT sh.id, sh.secret_hash, sh.password_hash, sh.expires_at, sh.generation, sh.revoked_at
+FROM shares sh
+JOIN accounts creator ON creator.id = sh.creator_account_id AND creator.status = 'active'
+JOIN mounts m ON m.id = sh.mount_id AND m.status = 'active' AND m.share_enabled = 1
+WHERE sh.public_id = ?
+  AND (
+    (m.purpose = 'personal_default'
+      AND (sh.relative_path = sh.creator_account_id OR sh.relative_path LIKE sh.creator_account_id || '/%')
+      AND EXISTS (
+        SELECT 1 FROM personal_directories pd
+        WHERE pd.account_id = sh.creator_account_id AND pd.state = 'ready'
+      ))
+    OR
+    (m.purpose = 'common' AND EXISTS (
+      SELECT 1 FROM mount_grants mg
+      WHERE mg.mount_id = sh.mount_id
+        AND mg.account_id = sh.creator_account_id
+        AND mg.permission = 'editor'
+    ))
+  )
+  AND sh.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
 `, publicID).Scan(
 		&record.id,
 		&record.secretHash,

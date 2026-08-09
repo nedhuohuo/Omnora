@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"omnora/internal/access"
+	"omnora/internal/contentref"
 	"omnora/internal/files"
 	"omnora/internal/httpx"
 	"omnora/internal/memberfiles"
@@ -23,7 +24,6 @@ func (s *Server) renameObject(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	var req struct {
 		From   string `json:"from"`
@@ -39,7 +39,7 @@ func (s *Server) renameObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.memberFiles.RenameSecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
-		SpaceID: spaceID, MountID: mountID, Path: req.From,
+		Source: contentref.SourceCommonMount, MountID: mountID, Path: req.From,
 	}, target, func(ctx context.Context, tx *sql.Tx) error {
 		return s.recordAuditTx(ctx, tx, r, session.AccountID, "object_rename", "file_object", target, `{}`)
 	})
@@ -56,7 +56,6 @@ func (s *Server) moveObject(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	var req struct {
 		From  string `json:"from"`
@@ -70,8 +69,8 @@ func (s *Server) moveObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.memberFiles.MoveSecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
-		SpaceID: spaceID, MountID: mountID, Path: req.From,
-	}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: req.ToDir}, func(ctx context.Context, tx *sql.Tx) error {
+		Source: contentref.SourceCommonMount, MountID: mountID, Path: req.From,
+	}, access.Locator{Source: contentref.SourceCommonMount, MountID: mountID, Path: req.ToDir}, func(ctx context.Context, tx *sql.Tx) error {
 		return s.recordAuditTx(ctx, tx, r, session.AccountID, "object_move", "file_object", req.From, `{}`)
 	})
 	if err != nil {
@@ -87,7 +86,6 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	relativePath := r.URL.Query().Get("path")
 	if strings.TrimSpace(relativePath) == "" {
@@ -96,7 +94,7 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 	}
 	permanent := r.URL.Query().Get("permanent") == "1" || strings.EqualFold(r.URL.Query().Get("permanent"), "true")
 	if !permanent {
-		item, err := s.memberFiles.TrashSecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: relativePath}, func(ctx context.Context, tx *sql.Tx) error {
+		item, err := s.memberFiles.TrashSecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{Source: contentref.SourceCommonMount, MountID: mountID, Path: relativePath}, func(ctx context.Context, tx *sql.Tx) error {
 			return s.recordAuditTx(ctx, tx, r, session.AccountID, "object_trash", "file_object", relativePath, `{}`)
 		})
 		if err != nil {
@@ -117,7 +115,7 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, legacy)
 		return
 	}
-	result, err := s.memberFiles.DeletePermanentlySecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: relativePath}, func(ctx context.Context, tx *sql.Tx) error {
+	result, err := s.memberFiles.DeletePermanentlySecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{Source: contentref.SourceCommonMount, MountID: mountID, Path: relativePath}, func(ctx context.Context, tx *sql.Tx) error {
 		return s.recordAuditTx(ctx, tx, r, session.AccountID, "object_delete", "file_object", relativePath, `{}`)
 	})
 	if err != nil {
@@ -135,9 +133,8 @@ func (s *Server) listTrash(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	result, err := s.memberFiles.ListTrashViewer(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: "."})
+	result, err := s.memberFiles.ListTrashViewer(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{Source: contentref.SourceCommonMount, MountID: mountID, Path: "."})
 	if err != nil {
 		writeMemberFilesError(w, r, err, "listing trash requires viewer permission")
 		return
@@ -151,10 +148,9 @@ func (s *Server) restoreTrash(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	trashID := r.PathValue("trashId")
-	result, err := s.memberFiles.RestoreTrashSecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: "."}, trashID, func(ctx context.Context, tx *sql.Tx) error {
+	result, err := s.memberFiles.RestoreTrashSecure(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{Source: contentref.SourceCommonMount, MountID: mountID, Path: "."}, trashID, func(ctx context.Context, tx *sql.Tx) error {
 		return s.recordAuditTx(ctx, tx, r, session.AccountID, "object_trash_restore", "file_object", trashID, fmt.Sprintf(`{"trashId":%q}`, trashID))
 	})
 	if err != nil {
@@ -170,10 +166,9 @@ func (s *Server) purgeTrash(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	trashID := r.PathValue("trashId")
-	if _, err := s.memberFiles.PurgeTrash(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: "."}, trashID); err != nil {
+	if _, err := s.memberFiles.PurgeTrash(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{Source: contentref.SourceCommonMount, MountID: mountID, Path: "."}, trashID); err != nil {
 		writeMemberFilesError(w, r, err, "purging trash requires editor permission")
 		return
 	}
@@ -189,9 +184,8 @@ func (s *Server) emptyTrash(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	result, err := s.memberFiles.EmptyTrash(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{SpaceID: spaceID, MountID: mountID, Path: "."})
+	result, err := s.memberFiles.EmptyTrash(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{Source: contentref.SourceCommonMount, MountID: mountID, Path: "."})
 	if err != nil {
 		writeMemberFilesError(w, r, err, "emptying trash requires editor permission")
 		return
@@ -216,7 +210,6 @@ func (s *Server) handleCrossMount(w http.ResponseWriter, r *http.Request, move b
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	sourceSpaceID := r.PathValue("spaceId")
 	sourceMountID := r.PathValue("mountId")
 	var req struct {
 		From      string `json:"from"`
@@ -234,13 +227,13 @@ func (s *Server) handleCrossMount(w http.ResponseWriter, r *http.Request, move b
 	subject := access.Subject{AccountID: session.AccountID}
 	var mutation memberfiles.MutationResult
 	if move {
-		mutation, err = s.memberFiles.CrossMountMove(r.Context(), subject,
-			access.Locator{SpaceID: sourceSpaceID, MountID: sourceMountID, Path: req.From},
-			access.Locator{SpaceID: req.ToSpaceID, MountID: req.ToMountID, Path: req.ToDir})
+		mutation, err = s.memberFiles.CrossMountMoveSecure(r.Context(), subject,
+			access.Locator{Source: contentref.SourceCommonMount, MountID: sourceMountID, Path: req.From},
+			access.Locator{Source: contentref.SourceCommonMount, MountID: req.ToMountID, Path: req.ToDir}, nil)
 	} else {
 		mutation, err = s.memberFiles.CrossMountCopy(r.Context(), subject,
-			access.Locator{SpaceID: sourceSpaceID, MountID: sourceMountID, Path: req.From},
-			access.Locator{SpaceID: req.ToSpaceID, MountID: req.ToMountID, Path: req.ToDir})
+			access.Locator{Source: contentref.SourceCommonMount, MountID: sourceMountID, Path: req.From},
+			access.Locator{Source: contentref.SourceCommonMount, MountID: req.ToMountID, Path: req.ToDir})
 	}
 	if err != nil {
 		if errors.Is(err, memberfiles.ErrCrossMountSameMount) {
@@ -276,7 +269,7 @@ func mountForListingFromAuthorized(mount access.AuthorizedMount) mountForListing
 		ID:           mount.ID,
 		Root:         mount.Root,
 		Mode:         mount.Mode,
-		Kind:         mount.Kind,
+		Kind:         string(mount.StorageKind),
 		IdentityJSON: mount.IdentityJSON,
 	}
 }

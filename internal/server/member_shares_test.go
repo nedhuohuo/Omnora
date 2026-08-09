@@ -12,6 +12,7 @@ import (
 )
 
 func TestListAndRevokeShares(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newShareAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)
 	root := createTestSpaceAndMount(t, db, "space-1", "mount-1", admin.ID, "read_write")

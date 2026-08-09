@@ -55,6 +55,7 @@ func TestMountRootAllowedForKindUsesConfiguredRootBoundaries(t *testing.T) {
 }
 
 func TestCreateMountEnforcesConfiguredRootForKind(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	workspace, err := filepath.Abs(".")
 	if err != nil {
 		t.Fatalf("resolve workspace: %v", err)
@@ -148,6 +149,7 @@ VALUES ('space-allowlist', 'shared', 'Allowlist Test', ?, 'active')
 }
 
 func TestCreateReadWriteMountReportsNotWritable(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	workspace, err := filepath.Abs(".")
 	if err != nil {
 		t.Fatalf("resolve workspace: %v", err)

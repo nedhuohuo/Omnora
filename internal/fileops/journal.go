@@ -20,11 +20,14 @@ import (
 type Kind string
 
 const (
-	KindRename       Kind = "same_mount_rename"
-	KindMove         Kind = "same_mount_move"
-	KindDelete       Kind = "delete"
-	KindTrash        Kind = "trash"
-	KindTrashRestore Kind = "trash_restore"
+	KindRename         Kind = "same_mount_rename"
+	KindMove           Kind = "same_mount_move"
+	KindCrossMountMove Kind = "cross_mount_move"
+	KindDelete         Kind = "delete"
+	KindTrash          Kind = "trash"
+	KindTrashRestore   Kind = "trash_restore"
+	KindTrashPurge     Kind = "trash_purge"
+	KindTrashEmpty     Kind = "trash_empty"
 )
 
 // Status mirrors the file_operations.status CHECK constraint in migration 008.
@@ -47,13 +50,13 @@ var (
 
 // OperationSpec describes one durable file mutation intent.
 type OperationSpec struct {
-	ID              string
-	Kind            Kind
-	SpaceID         string
-	MountID         string
-	SourcePath      string
-	DestinationPath string
-	ActorAccountID  string
+	ID                             string
+	Kind                           Kind
+	SourceMountID                  string
+	SourceStorageRelativePath      string
+	DestinationMountID             string
+	DestinationStorageRelativePath string
+	ActorAccountID                 string
 }
 
 // Operation is the durable, read-back view of a journaled mutation.
@@ -104,13 +107,13 @@ func (j *Journal) Prepare(ctx context.Context, spec OperationSpec, sideEffects .
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO file_operations(
     id, kind, status,
-    source_space_id, source_mount_id, source_relative_path,
-    destination_space_id, destination_mount_id, destination_relative_path,
+    source_mount_id, source_relative_path,
+    destination_mount_id, destination_relative_path,
     actor_account_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, spec.ID, string(spec.Kind), string(StatusPrepared),
-		nullableString(spec.SpaceID), nullableString(spec.MountID), nullableString(spec.SourcePath),
-		nullableString(spec.SpaceID), nullableString(spec.MountID), nullableString(spec.DestinationPath),
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, spec.ID, string(spec.Kind), string(StatusPrepared),
+		nullableString(spec.SourceMountID), nullableString(spec.SourceStorageRelativePath),
+		nullableString(spec.DestinationMountID), nullableString(spec.DestinationStorageRelativePath),
 		nullableString(spec.ActorAccountID))
 	if err != nil {
 		return fmt.Errorf("fileops: insert operation: %w", err)
@@ -171,6 +174,28 @@ WHERE id = ? AND status = ?
 		return fmt.Errorf("fileops: require recovery: %w", err)
 	}
 	return requireOneRowAffected(result)
+}
+
+// QuarantineUnfinished marks operations left in an in-flight phase after a
+// process restart as recovery_required. A restart cannot safely infer whether
+// the filesystem reached publication, so it must not resume or delete any
+// staging material by guesswork.
+func (j *Journal) QuarantineUnfinished(ctx context.Context) error {
+	if j == nil || j.db == nil {
+		return ErrJournalNotConfigured
+	}
+	now := formatTime(j.now())
+	_, err := j.db.ExecContext(ctx, `
+UPDATE file_operations
+SET status = ?,
+    last_error = CASE WHEN COALESCE(last_error, '') = '' THEN ? ELSE last_error END,
+    updated_at = ?
+WHERE status IN ('prepared', 'source_staged', 'copying', 'destination_staged', 'published', 'source_cleaned')
+`, string(StatusRecoveryRequired), "process restarted before file operation finalized", now)
+	if err != nil {
+		return fmt.Errorf("fileops: quarantine unfinished operations: %w", err)
+	}
+	return nil
 }
 
 // Get returns the durable state of one operation, primarily for tests and

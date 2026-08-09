@@ -13,6 +13,7 @@ import (
 )
 
 func TestAdminHostDirectorySuggestionsStayInsideConfiguredRoots(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, _ := newAPITestServer(t)
 	root := t.TempDir()
 	managed := filepath.Join(root, "managed")

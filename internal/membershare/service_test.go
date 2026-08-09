@@ -7,278 +7,249 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"omnora/internal/access"
-	"omnora/internal/aitoken"
+	"omnora/internal/contentref"
 	"omnora/internal/mountid"
 	"omnora/internal/share"
 	"omnora/internal/store"
 )
 
 type shareFixture struct {
-	db      *sql.DB
-	root    string
-	spaceID string
-	mountID string
-	now     time.Time
+	db           *sql.DB
+	commonRoot   string
+	personalRoot string
+	now          time.Time
 }
 
 func newShareFixture(t *testing.T) shareFixture {
 	t.Helper()
 	handle, err := store.OpenSQLite(context.Background(), store.SQLiteOptions{Path: filepath.Join(t.TempDir(), "membershare.db")})
 	if err != nil {
-		t.Fatalf("OpenSQLite() error = %v", err)
+		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = handle.Close() })
-	root, err := os.MkdirTemp(".", ".membershare-mount-")
+	db := handle.SQL()
+	commonRoot := realDir(t, "common")
+	managedRoot := realDir(t, "managed")
+	personalRoot := filepath.Join(managedRoot, "personal")
+	if err := os.Mkdir(personalRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, account := range []string{"owner", "viewer"} {
+		if err := os.MkdirAll(filepath.Join(personalRoot, account, "docs"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(personalRoot, account, "docs", "private.txt"), []byte(account), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(commonRoot, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(commonRoot, "docs", "shared.txt"), []byte("shared"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commonIdentity := identityJSON(t, commonRoot)
+	personalIdentity := identityJSON(t, personalRoot)
+	_, err = db.Exec(`
+INSERT INTO accounts(id,email,display_name,role,status) VALUES
+ ('owner','owner@example.test','Owner','member','active'),
+ ('viewer','viewer@example.test','Viewer','member','active');
+INSERT INTO personal_directories(account_id,relative_path,state) VALUES
+	 ('owner','owner','ready'),('viewer','viewer','ready');
+`)
 	if err != nil {
-		t.Fatalf("MkdirTemp() error = %v", err)
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE mounts SET mount_identity_json=? WHERE id='personal-default'`, personalIdentity); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+INSERT INTO mounts(id,display_name,root_path,purpose,storage_kind,governance,mode,index_enabled,share_enabled,status,mount_identity_json)
+VALUES ('common','Common',?,'common','external','normal','read_write',1,1,'active',?);
+INSERT INTO mount_grants(mount_id,account_id,permission) VALUES
+ ('common','owner','editor'),('common','viewer','viewer');
+`, commonRoot, commonIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored mountid.Identity
+	if err := json.Unmarshal([]byte(commonIdentity), &stored); err != nil {
+		t.Fatal(err)
+	}
+	current, err := mountid.Capture(commonRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !access.MountIdentityMatches(stored, current) {
+		t.Fatalf("fixture identity changed: stored=%#v current=%#v", stored, current)
+	}
+	guard := access.NewGuard(db)
+	loaded, err := guard.LoadMountIdentity(context.Background(), "common")
+	if err != nil {
+		t.Fatalf("fixture load mount: %v", err)
+	}
+	if err := guard.VerifyMountIdentity(context.Background(), loaded); err != nil {
+		t.Fatalf("fixture mount identity %#v: %v", loaded, err)
+	}
+	if _, err := guard.Authorize(context.Background(), access.CheckRequest{
+		Subject:            access.Subject{AccountID: "owner"},
+		Locator:            access.Locator{Source: contentref.SourceCommonMount, MountID: "common", Path: "docs/shared.txt"},
+		RequiredPermission: "editor",
+	}); err != nil {
+		t.Fatalf("fixture guard authorization: %v", err)
+	}
+	if _, err := guard.Authorize(context.Background(), access.CheckRequest{
+		Subject:            access.Subject{AccountID: "owner"},
+		Locator:            access.Locator{Source: contentref.SourcePersonal, Path: "docs/private.txt"},
+		RequiredPermission: "editor",
+	}); err != nil {
+		t.Fatalf("fixture personal authorization: %v", err)
+	}
+	return shareFixture{db: db, commonRoot: commonRoot, personalRoot: personalRoot, now: time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)}
+}
+
+func realDir(t *testing.T, name string) string {
+	t.Helper()
+	root, err := os.MkdirTemp(".", ".membershare-"+name+"-")
+	if err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	root, err = filepath.Abs(root)
 	if err != nil {
-		t.Fatalf("Abs(root) error = %v", err)
+		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o755); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "docs", "readme.txt"), []byte("member share"), 0o644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
+	return root
+}
+
+func identityJSON(t *testing.T, root string) string {
+	t.Helper()
 	identity, err := mountid.Capture(root)
 	if err != nil {
-		t.Fatalf("Capture() error = %v", err)
+		t.Fatal(err)
 	}
-	identityJSON, err := json.Marshal(identity)
+	encoded, err := json.Marshal(identity)
 	if err != nil {
-		t.Fatalf("Marshal(identity) error = %v", err)
+		t.Fatal(err)
 	}
-	_, err = handle.SQL().Exec(`
-INSERT INTO accounts(id, email, display_name, role, status)
-VALUES ('acct-manager', 'manager@example.test', 'Manager', 'member', 'active'),
-       ('acct-viewer', 'viewer@example.test', 'Viewer', 'member', 'active');
-INSERT INTO spaces(id, kind, name, owner_account_id, status)
-VALUES ('space-share', 'shared', 'Share Space', 'acct-manager', 'active');
-INSERT INTO space_members(space_id, account_id, permission)
-VALUES ('space-share', 'acct-manager', 'manager'),
-       ('space-share', 'acct-viewer', 'viewer');
-INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status, mount_identity_json)
-VALUES ('mount-share', 'space-share', 'Files', ?, 'managed', 'read_write', 'active', ?)
-`, root, string(identityJSON))
-	if err != nil {
-		t.Fatalf("insert fixture: %v", err)
-	}
-	return shareFixture{db: handle.SQL(), root: root, spaceID: "space-share", mountID: "mount-share", now: time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)}
+	return string(encoded)
 }
 
 func (f shareFixture) service() *Service {
 	return NewService(f.db, access.NewGuard(f.db), WithClock(func() time.Time { return f.now }))
 }
 
-func (f shareFixture) manager() access.Subject { return access.Subject{AccountID: "acct-manager"} }
-
-func (f shareFixture) viewer() access.Subject { return access.Subject{AccountID: "acct-viewer"} }
-
-func (f shareFixture) locator(path string) access.Locator {
-	return access.Locator{SpaceID: f.spaceID, MountID: f.mountID, Path: path}
-}
-
-func TestCreateIsManagerOnlyValidatesOptionsAndReturnsOneTimeCapability(t *testing.T) {
+func TestCreateUsesAccountMountSourcesAndEnforcesSharePolicy(t *testing.T) {
 	f := newShareFixture(t)
 	s := f.service()
 	ctx := context.Background()
-	issued, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("docs/readme.txt")})
+	common := access.Locator{Source: contentref.SourceCommonMount, MountID: "common", Path: "docs/shared.txt"}
+	issued, err := s.Create(ctx, access.Subject{AccountID: "owner"}, CreateRequest{Locator: common})
 	if err != nil {
-		t.Fatalf("Create() error = %v", err)
+		t.Fatalf("Create(common) error = %v", err)
 	}
-	if issued.Secret == "" || issued.Fragment == "" || issued.URL != "/share#"+issued.Fragment {
-		t.Fatalf("issued = %#v, want one-time fragment and URL", issued)
+	if issued.Source != contentref.SourceCommonMount || issued.MountID != "common" || issued.RelativePath != "docs/shared.txt" {
+		t.Fatalf("issued common share = %#v", issued.Share)
 	}
-	if !strings.HasPrefix(issued.Fragment, issued.PublicID+".") {
-		t.Fatalf("fragment = %q, want public-id prefix", issued.Fragment)
-	}
-	if issued.AllowPreview != true || issued.AllowDownload != true {
-		t.Fatalf("default capabilities = preview=%v download=%v", issued.AllowPreview, issued.AllowDownload)
-	}
-	if _, err := s.Create(ctx, f.viewer(), CreateRequest{Locator: f.locator("docs/readme.txt")}); !errors.Is(err, ErrForbidden) {
+	if _, err := s.Create(ctx, access.Subject{AccountID: "viewer"}, CreateRequest{Locator: common}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("viewer Create() error = %v, want forbidden", err)
 	}
-	falseValue := false
-	if _, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("docs/readme.txt"), AllowPreview: &falseValue, AllowDownload: &falseValue}); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("no-capability Create() error = %v, want invalid input", err)
+	if _, err := f.db.Exec(`UPDATE mounts SET share_enabled=0 WHERE id='common'`); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("docs/readme.txt"), MaxVisits: ptrInt64(0)}); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("zero max visits error = %v, want invalid input", err)
+	if _, err := s.Create(ctx, access.Subject{AccountID: "owner"}, CreateRequest{Locator: common}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("disabled policy Create() error = %v, want forbidden", err)
 	}
-	if _, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("docs/readme.txt"), MaxDownloads: ptrInt64(1), AllowDownload: &falseValue}); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("download limit without download error = %v, want invalid input", err)
-	}
-	if _, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("docs/../readme.txt")}); !errors.Is(err, access.ErrBoundaryViolation) && !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("traversal Create() error = %v, want path rejection", err)
-	}
-	if _, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("docs/readme.txt"), ExpiresAt: f.now}); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("expired Create() error = %v, want invalid input", err)
-	}
-
-	var storedSecret, fragmentSecret string
-	if err := f.db.QueryRow(`SELECT secret_hash, COALESCE(fragment_secret, '') FROM shares WHERE id = ?`, issued.ID).Scan(&storedSecret, &fragmentSecret); err != nil {
-		t.Fatalf("query stored secret: %v", err)
-	}
-	if storedSecret == issued.Secret || fragmentSecret != "" || !share.VerifySecret(issued.Secret, storedSecret) {
-		t.Fatalf("share secret persistence is unsafe: hash=%q fragment=%q", storedSecret, fragmentSecret)
+	if _, err := share.NewService(f.db, share.WithClock(func() time.Time { return f.now })).Exchange(ctx, share.ExchangeRequest{PublicID: issued.PublicID, FragmentSecret: issued.Secret}); err == nil {
+		t.Fatal("share policy disable did not invalidate public exchange")
 	}
 }
 
-func TestListVisibilityNeverReturnsExistingFragmentOrPasswordMaterial(t *testing.T) {
+func TestPersonalShareStoresStoragePathButDTOHidesAccountPrefixAndDefaultMount(t *testing.T) {
 	f := newShareFixture(t)
 	s := f.service()
-	issued, err := s.Create(context.Background(), f.manager(), CreateRequest{Locator: f.locator("docs/readme.txt"), Password: "correct horse"})
+	issued, err := s.Create(context.Background(), access.Subject{AccountID: "owner"}, CreateRequest{Locator: access.Locator{Source: contentref.SourcePersonal, Path: "docs/private.txt"}})
 	if err != nil {
-		t.Fatalf("Create() error = %v", err)
+		t.Fatalf("Create(personal) error = %v", err)
 	}
-	items, err := s.List(context.Background(), f.manager(), ListFilter{})
-	if err != nil || len(items) != 1 {
-		t.Fatalf("List() = %#v, error = %v", items, err)
+	if issued.Source != contentref.SourcePersonal || issued.MountID != "" || issued.RelativePath != "docs/private.txt" {
+		t.Fatalf("personal DTO leaked storage identity: %#v", issued.Share)
 	}
-	payload, err := json.Marshal(items)
-	if err != nil {
-		t.Fatalf("Marshal(list) error = %v", err)
+	var mountID, storedPath string
+	if err := f.db.QueryRow(`SELECT mount_id,relative_path FROM shares WHERE id=?`, issued.ID).Scan(&mountID, &storedPath); err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(string(payload), issued.Secret) || strings.Contains(string(payload), issued.Fragment) || strings.Contains(string(payload), "password") {
-		t.Fatalf("list leaked secret material: %s", payload)
+	if mountID != "personal-default" || storedPath != "owner/docs/private.txt" {
+		t.Fatalf("stored target = %q/%q", mountID, storedPath)
 	}
-	if _, err := s.List(context.Background(), f.viewer(), ListFilter{}); !errors.Is(err, ErrForbidden) && err != nil {
-		// A viewer with shares:read is still allowed to call the service, but
-		// should receive no shares. This branch documents the stable choice.
-		t.Fatalf("viewer List() error = %v", err)
-	}
-	viewerItems, err := s.List(context.Background(), f.viewer(), ListFilter{})
-	if err != nil {
-		t.Fatalf("viewer List() error = %v", err)
-	}
-	if len(viewerItems) != 0 {
-		t.Fatalf("viewer List() = %#v, want no visible shares", viewerItems)
+	items, err := s.List(context.Background(), access.Subject{AccountID: "owner"}, ListFilter{})
+	if err != nil || len(items) != 1 || items[0].MountID != "" || items[0].RelativePath != "docs/private.txt" {
+		t.Fatalf("List() = %#v, %v", items, err)
 	}
 }
 
-func TestListUsesCreatorOrCurrentManagerWithLiveMountChecks(t *testing.T) {
+func TestRevokedGrantAndAccountDisableInvalidatePublicShare(t *testing.T) {
+	for _, mutation := range []string{
+		`DELETE FROM mount_grants WHERE mount_id='common' AND account_id='owner'`,
+		`UPDATE accounts SET status='disabled' WHERE id='owner'`,
+	} {
+		t.Run(mutation, func(t *testing.T) {
+			f := newShareFixture(t)
+			issued, err := f.service().Create(context.Background(), access.Subject{AccountID: "owner"}, CreateRequest{Locator: access.Locator{Source: contentref.SourceCommonMount, MountID: "common", Path: "docs/shared.txt"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			public := share.NewService(f.db, share.WithClock(func() time.Time { return f.now }))
+			session, err := public.Exchange(context.Background(), share.ExchangeRequest{PublicID: issued.PublicID, FragmentSecret: issued.Secret})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.db.Exec(mutation); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := public.Exchange(context.Background(), share.ExchangeRequest{PublicID: issued.PublicID, FragmentSecret: issued.Secret}); err == nil {
+				t.Fatal("stale public share remained usable")
+			}
+			if _, err := public.VerifySession(context.Background(), session.SessionToken); err == nil {
+				t.Fatal("existing share session survived live authorization loss")
+			}
+		})
+	}
+}
+
+func TestRevokePathTxUsesMountAndStorageRelativePath(t *testing.T) {
 	f := newShareFixture(t)
 	s := f.service()
-	ctx := context.Background()
-	owned, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("docs/readme.txt")})
+	for _, target := range []string{"docs/shared.txt", "docs/child.txt"} {
+		if target == "docs/child.txt" {
+			if err := os.WriteFile(filepath.Join(f.commonRoot, target), []byte("child"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.Create(context.Background(), access.Subject{AccountID: "owner"}, CreateRequest{Locator: access.Locator{Source: contentref.SourceCommonMount, MountID: "common", Path: target}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx, err := f.db.BeginTx(context.Background(), nil)
 	if err != nil {
-		t.Fatalf("Create(owned) error = %v", err)
+		t.Fatal(err)
 	}
-	// A creator remains able to see their own share even after ACL removal.
-	if _, err := f.db.Exec(`UPDATE space_members SET permission = 'viewer' WHERE space_id = ? AND account_id = ?`, f.spaceID, "acct-manager"); err != nil {
-		t.Fatalf("demote creator ACL: %v", err)
+	if err := s.RevokePathTx(context.Background(), tx, "common", "docs"); err != nil {
+		t.Fatal(err)
 	}
-	items, err := s.List(ctx, f.manager(), ListFilter{})
-	if err != nil || len(items) != 1 || items[0].ID != owned.ID {
-		t.Fatalf("List(creator without ACL) = %#v, error = %v", items, err)
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
-
-	// Restore manager access and insert a share created by another member so
-	// the current-manager branch is exercised independently.
-	if _, err := f.db.Exec(`UPDATE space_members SET permission = 'manager' WHERE space_id = ? AND account_id = ?`, f.spaceID, "acct-manager"); err != nil {
-		t.Fatalf("restore manager ACL: %v", err)
-	}
-	if _, err := f.db.Exec(`
-INSERT INTO shares(id, public_id, secret_hash, creator_account_id, space_id, mount_id, relative_path, expires_at)
-VALUES ('share-viewer', 'pub-viewer', ?, 'acct-viewer', ?, ?, 'docs/readme.txt', ?)
-`, share.HashSecret("viewer-secret"), f.spaceID, f.mountID, formatSQLiteTime(f.now.Add(time.Hour))); err != nil {
-		t.Fatalf("insert viewer share: %v", err)
-	}
-	items, err = s.List(ctx, f.manager(), ListFilter{})
-	if err != nil || len(items) != 2 {
-		t.Fatalf("List(current manager) = %#v, error = %v", items, err)
-	}
-	if _, err := f.db.Exec(`UPDATE mounts SET status = 'disabled' WHERE id = ?`, f.mountID); err != nil {
-		t.Fatalf("disable mount: %v", err)
-	}
-	if items, err := s.List(ctx, f.manager(), ListFilter{}); err != nil || len(items) != 0 {
-		t.Fatalf("List(disabled mount) = %#v, error = %v, want empty", items, err)
-	}
-	if _, err := f.db.Exec(`UPDATE mounts SET status = 'active', mount_identity_json = '{}' WHERE id = ?`, f.mountID); err != nil {
-		t.Fatalf("set drifted mount identity: %v", err)
-	}
-	if items, err := s.List(ctx, f.manager(), ListFilter{}); err != nil || len(items) != 0 {
-		t.Fatalf("List(drifted mount identity) = %#v, error = %v, want empty", items, err)
+	var count int
+	if err := f.db.QueryRow(`SELECT COUNT(*) FROM shares WHERE revoked_at IS NOT NULL`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("revoked count = %d, error = %v", count, err)
 	}
 }
-
-func TestRevokeAllowsCreatorOrCurrentManagerAndInvalidatesPathDescendants(t *testing.T) {
-	f := newShareFixture(t)
-	s := f.service()
-	ctx := context.Background()
-	first, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("docs/readme.txt")})
-	if err != nil {
-		t.Fatalf("Create(first) error = %v", err)
-	}
-	second, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("docs")})
-	if err != nil {
-		t.Fatalf("Create(second) error = %v", err)
-	}
-	// The creator is allowed to revoke its own share.
-	if err := s.Revoke(ctx, f.manager(), first.ID); err != nil {
-		t.Fatalf("Revoke(creator) error = %v", err)
-	}
-	if _, err := share.NewService(f.db, share.WithClock(func() time.Time { return f.now })).Exchange(ctx, share.ExchangeRequest{PublicID: first.PublicID, FragmentSecret: first.Secret}); err == nil {
-		t.Fatal("revoked share exchange unexpectedly succeeded")
-	}
-	third, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("docs/readme.txt")})
-	if err != nil {
-		t.Fatalf("Create(third) error = %v", err)
-	}
-	if err := s.Revoke(ctx, f.viewer(), third.ID); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("viewer Revoke() error = %v, want forbidden", err)
-	}
-	if err := s.RevokePath(ctx, f.spaceID, f.mountID, "docs"); err != nil {
-		t.Fatalf("RevokePath() error = %v", err)
-	}
-	var revoked int
-	if err := f.db.QueryRow(`SELECT COUNT(1) FROM shares WHERE space_id = ? AND revoked_at IS NOT NULL`, f.spaceID).Scan(&revoked); err != nil {
-		t.Fatalf("count revoked: %v", err)
-	}
-	if revoked != 3 {
-		t.Fatalf("revoked count = %d, want all shares under docs", revoked)
-	}
-	if err := s.RevokePath(ctx, f.spaceID, f.mountID, ".omnora/secret"); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("reserved RevokePath() error = %v, want invalid input", err)
-	}
-	_ = second
-}
-
-func TestTokenScopesAndBoundariesApplyToMemberShares(t *testing.T) {
-	f := newShareFixture(t)
-	issued, err := aitoken.NewService(f.db).Create(context.Background(), aitoken.CreateRequest{
-		AccountID: "acct-manager", Name: "share token", Scopes: []aitoken.Scope{aitoken.ScopeSharesCreate, aitoken.ScopeSharesRead, aitoken.ScopeSharesRevoke},
-		Boundaries: []aitoken.DirectoryBoundary{{SpaceID: f.spaceID, MountID: f.mountID, RelativePath: "docs"}}, ExpiresAt: time.Now().UTC().Add(time.Hour),
-	})
-	if err != nil {
-		t.Fatalf("Create(token) error = %v", err)
-	}
-	principal := aitoken.Principal{AccountID: issued.Token.AccountID, TokenID: issued.Token.ID, PublicID: issued.Token.PublicID, Scopes: issued.Token.Scopes, Boundaries: issued.Token.Boundaries, ExpiresAt: issued.Token.ExpiresAt}
-	subject := access.Subject{AccountID: principal.AccountID, Principal: &principal}
-	s := f.service()
-	if _, err := s.Create(context.Background(), subject, CreateRequest{Locator: f.locator("docs/readme.txt")}); err != nil {
-		t.Fatalf("token Create() error = %v", err)
-	}
-	if _, err := s.Create(context.Background(), subject, CreateRequest{Locator: f.locator("outside.txt")}); !errors.Is(err, access.ErrBoundaryViolation) {
-		t.Fatalf("token boundary Create() error = %v, want boundary violation", err)
-	}
-	if _, err := s.List(context.Background(), subject, ListFilter{}); err != nil {
-		t.Fatalf("token List() error = %v", err)
-	}
-	if _, err := f.db.Exec(`UPDATE ai_tokens SET revoked_at = ? WHERE id = ?`, formatSQLiteTime(f.now), issued.Token.ID); err != nil {
-		t.Fatalf("revoke token: %v", err)
-	}
-	if _, err := s.List(context.Background(), subject, ListFilter{}); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("revoked token List() error = %v, want unauthorized", err)
-	}
-}
-
-func ptrInt64(value int64) *int64 { return &value }

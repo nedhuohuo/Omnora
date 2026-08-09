@@ -376,20 +376,20 @@ ON CONFLICT(id) DO NOTHING
 		t.Fatalf("insert account: %v", err)
 	}
 	_, err = db.ExecContext(ctx, `
-INSERT INTO spaces(id, kind, name, owner_account_id, status)
-VALUES ('space-1', 'shared', 'Space', 'account-1', 'active')
-ON CONFLICT(id) DO NOTHING
-`)
-	if err != nil {
-		t.Fatalf("insert space: %v", err)
-	}
-	_, err = db.ExecContext(ctx, `
-INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status)
-VALUES ('mount-1', 'space-1', 'Mount', '/tmp/omnora', 'managed', 'read_only', 'active')
+INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, share_enabled, status)
+VALUES ('mount-1', 'Mount', '/tmp/omnora', 'common', 'external', 'normal', 'read_only', 1, 'active')
 ON CONFLICT(id) DO NOTHING
 `)
 	if err != nil {
 		t.Fatalf("insert mount: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+INSERT INTO mount_grants(mount_id, account_id, permission)
+VALUES ('mount-1', 'account-1', 'editor')
+ON CONFLICT(mount_id, account_id) DO UPDATE SET permission='editor'
+`)
+	if err != nil {
+		t.Fatalf("insert grant: %v", err)
 	}
 	credentialGeneration := share.CredentialGeneration
 	if credentialGeneration == 0 {
@@ -397,9 +397,9 @@ ON CONFLICT(id) DO NOTHING
 	}
 	_, err = db.ExecContext(ctx, `
 INSERT INTO shares(
-	id, public_id, secret_hash, password_hash, creator_account_id, space_id, mount_id,
+	id, public_id, secret_hash, password_hash, creator_account_id, mount_id,
 	relative_path, max_visits, used_visits, expires_at, credential_generation
-) VALUES (?, ?, ?, ?, 'account-1', 'space-1', 'mount-1', 'docs', ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, 'account-1', 'mount-1', 'docs', ?, ?, ?, ?)
 `, share.ID, share.PublicID, HashSecret(share.FragmentSecret), share.PasswordHash, share.MaxVisits, share.UsedVisits, formatSQLiteTime(share.ExpiresAt), credentialGeneration)
 	if err != nil {
 		t.Fatalf("insert share: %v", err)

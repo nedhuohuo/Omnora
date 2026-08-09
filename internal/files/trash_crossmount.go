@@ -1,6 +1,7 @@
 package files
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,12 +18,16 @@ import (
 	"omnora/internal/storage"
 )
 
-const trashDirName = "trash"
+const (
+	trashDirName         = "trash"
+	MaxPersonalTrashItem = int64(200 * 1024 * 1024)
+)
 
 var (
 	ErrCrossMountIncomplete = errors.New("cross-mount operation incomplete")
 	ErrNotManagedMount      = errors.New("operation requires a managed mount")
 	ErrTrashItemNotFound    = errors.New("trash item was not found")
+	ErrTrashTooLarge        = errors.New("object exceeds the 200 MiB personal trash limit; confirmed permanent delete is required")
 )
 
 type TrashItem struct {
@@ -32,15 +38,108 @@ type TrashItem struct {
 	Size              int64     `json:"size"`
 	DeletedAt         time.Time `json:"deletedAt"`
 	TrashRelativePath string    `json:"trashRelativePath"`
+	RecoveredOnly     bool      `json:"-"`
 }
 
 type trashMeta struct {
-	ID           string `json:"id"`
-	OriginalPath string `json:"originalPath"`
-	Name         string `json:"name"`
-	Kind         string `json:"kind"`
-	Size         int64  `json:"size"`
-	DeletedAt    string `json:"deletedAt"`
+	ID            string `json:"id"`
+	OriginalPath  string `json:"originalPath"`
+	Name          string `json:"name"`
+	Kind          string `json:"kind"`
+	Size          int64  `json:"size"`
+	DeletedAt     string `json:"deletedAt"`
+	RecoveredOnly bool   `json:"recoveredOnly,omitempty"`
+}
+
+// SoftDeleteToPersonalTrash copies a writable source object into the deleting
+// account's managed trash, verifies the copy, and only then removes source.
+func (Service) SoftDeleteToPersonalTrash(source, personal Mount, relativePath string) (TrashItem, error) {
+	return (Service{}).SoftDeleteToPersonalTrashWithID(source, personal, relativePath, "trash_"+httpx.NewRequestID())
+}
+
+func (Service) SoftDeleteToPersonalTrashWithID(source, personal Mount, relativePath, id string) (TrashItem, error) {
+	if source.Mode != domain.MountModeReadWrite {
+		return TrashItem{}, ErrInvalidMountMode
+	}
+	if err := requireManagedWritable(personal); err != nil {
+		return TrashItem{}, err
+	}
+	cleaned, err := storage.CleanRelativePath(relativePath)
+	if err != nil || cleaned == "." {
+		return TrashItem{}, ErrNotFile
+	}
+	if !validTrashID(id) {
+		return TrashItem{}, ErrTrashItemNotFound
+	}
+	srcRoot, _, err := openMountRoot(source)
+	if err != nil {
+		return TrashItem{}, err
+	}
+	defer srcRoot.Close()
+	dstRoot, _, err := openMountRoot(personal)
+	if err != nil {
+		return TrashItem{}, err
+	}
+	defer dstRoot.Close()
+	if err := rejectSymlinkPath(srcRoot, cleaned); err != nil {
+		return TrashItem{}, err
+	}
+	info, err := srcRoot.Lstat(cleaned)
+	if err != nil {
+		return TrashItem{}, err
+	}
+	kind, ok := entryKind(info)
+	if !ok {
+		return TrashItem{}, ErrNotFile
+	}
+	size, err := trashObjectSize(srcRoot, cleaned, MaxPersonalTrashItem)
+	if err != nil {
+		return TrashItem{}, err
+	}
+	trashRoot := path.Join(storage.ReservedNamespace, trashDirName, id)
+	if err := ensureReservedDirs(dstRoot); err != nil {
+		return TrashItem{}, err
+	}
+	if err := dstRoot.Mkdir(trashRoot, 0o755); err != nil {
+		return TrashItem{}, err
+	}
+	name := path.Base(cleaned)
+	destination := path.Join(trashRoot, name)
+	if kind == EntryKindDir {
+		err = copyDirTree(srcRoot, dstRoot, cleaned, destination)
+	} else {
+		err = copyFileVerified(srcRoot, dstRoot, cleaned, destination, info.Size())
+	}
+	if err != nil {
+		_ = dstRoot.RemoveAll(trashRoot)
+		return TrashItem{}, err
+	}
+	sourceManifest, err := captureTreeNamed(srcRoot, cleaned, name)
+	if err != nil {
+		_ = dstRoot.RemoveAll(trashRoot)
+		return TrashItem{}, err
+	}
+	destinationManifest, err := captureTreeNamed(dstRoot, destination, name)
+	if err != nil || destinationManifest != sourceManifest {
+		_ = dstRoot.RemoveAll(trashRoot)
+		return TrashItem{}, errors.Join(ErrCrossMountIncomplete, err)
+	}
+	deletedAt := time.Now().UTC()
+	meta := trashMeta{ID: id, OriginalPath: cleaned, Name: name, Kind: string(kind), Size: size, DeletedAt: deletedAt.Format(time.RFC3339Nano), RecoveredOnly: true}
+	if err := writeTrashMeta(dstRoot, trashRoot, meta); err != nil {
+		_ = dstRoot.RemoveAll(trashRoot)
+		return TrashItem{}, err
+	}
+	if kind == EntryKindDir {
+		err = srcRoot.RemoveAll(cleaned)
+	} else {
+		err = srcRoot.Remove(cleaned)
+	}
+	if err != nil {
+		_ = dstRoot.RemoveAll(trashRoot)
+		return TrashItem{}, fmt.Errorf("%w: source cleanup failed: %v", ErrCrossMountIncomplete, err)
+	}
+	return TrashItem{ID: id, OriginalPath: cleaned, Name: name, Kind: kind, Size: size, DeletedAt: deletedAt, TrashRelativePath: destination, RecoveredOnly: true}, nil
 }
 
 // SoftDelete moves a managed-mount object into `.omnora/trash/<id>/`.
@@ -79,6 +178,10 @@ func (Service) SoftDeleteWithID(mount Mount, relativePath, id string) (TrashItem
 	if !ok {
 		return TrashItem{}, ErrNotFile
 	}
+	size, err := trashObjectSize(root, cleaned, MaxPersonalTrashItem)
+	if err != nil {
+		return TrashItem{}, err
+	}
 	trashRoot := path.Join(storage.ReservedNamespace, trashDirName, id)
 	if err := ensureReservedDirs(root); err != nil {
 		return TrashItem{}, err
@@ -91,10 +194,6 @@ func (Service) SoftDeleteWithID(mount Mount, relativePath, id string) (TrashItem
 	if err := root.Rename(cleaned, destRel); err != nil {
 		_ = root.RemoveAll(trashRoot)
 		return TrashItem{}, err
-	}
-	size := info.Size()
-	if kind == EntryKindDir {
-		size = 0
 	}
 	meta := trashMeta{
 		ID:           id,
@@ -120,6 +219,53 @@ func (Service) SoftDeleteWithID(mount Mount, relativePath, id string) (TrashItem
 		DeletedAt:         deletedAt,
 		TrashRelativePath: destRel,
 	}, nil
+}
+
+func trashObjectSize(root *os.Root, relative string, limit int64) (int64, error) {
+	info, err := root.Lstat(relative)
+	if err != nil {
+		return 0, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return 0, ErrNotFile
+	}
+	if info.Mode().IsRegular() {
+		if info.Size() > limit {
+			return 0, ErrTrashTooLarge
+		}
+		return info.Size(), nil
+	}
+	if !info.IsDir() {
+		return 0, ErrNotFile
+	}
+	directory, err := root.Open(relative)
+	if err != nil {
+		return 0, err
+	}
+	entries, readErr := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if readErr != nil {
+		return 0, readErr
+	}
+	if closeErr != nil {
+		return 0, closeErr
+	}
+	var total int64
+	for _, entry := range entries {
+		remaining := limit - total
+		if remaining < 0 {
+			return 0, ErrTrashTooLarge
+		}
+		size, err := trashObjectSize(root, path.Join(relative, entry.Name()), remaining)
+		if err != nil {
+			return 0, err
+		}
+		total += size
+		if total > limit {
+			return 0, ErrTrashTooLarge
+		}
+	}
+	return total, nil
 }
 
 // ListTrash returns soft-deleted items for a managed mount.
@@ -180,12 +326,16 @@ func (Service) RestoreTrash(mount Mount, trashID string) (string, error) {
 		return "", err
 	}
 	target := item.OriginalPath
-	if _, err := root.Lstat(target); err == nil {
-		target = conflictSafePath(item.OriginalPath, trashID)
+	parent := path.Dir(target)
+	if item.RecoveredOnly || !restorableOriginalParent(root, parent) {
+		target = path.Join("Recovered Files", trashID, item.Name)
+		parent = path.Dir(target)
+	} else if _, err := root.Lstat(target); err == nil {
+		target = path.Join("Recovered Files", trashID, item.Name)
+		parent = path.Dir(target)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	parent := path.Dir(target)
 	if parent != "." {
 		if err := mkdirAllRoot(root, parent); err != nil {
 			return "", err
@@ -196,6 +346,17 @@ func (Service) RestoreTrash(mount Mount, trashID string) (string, error) {
 	}
 	_ = root.RemoveAll(trashRoot)
 	return target, nil
+}
+
+func restorableOriginalParent(root *os.Root, parent string) bool {
+	if parent == "." {
+		return true
+	}
+	if err := rejectSymlinkPath(root, parent); err != nil {
+		return false
+	}
+	info, err := root.Lstat(parent)
+	return err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0
 }
 
 // PurgeTrash permanently removes a single soft-deleted item.
@@ -337,24 +498,134 @@ func (Service) CopyAcrossMounts(source, dest Mount, from, toDir string) (string,
 	return destPath, nil
 }
 
-// MoveAcrossMounts copies then deletes the source after verifying the destination.
+// MoveAcrossMounts uses an operation-scoped source staging area so a source
+// path cannot be changed or partially deleted while the destination is being
+// built. The legacy entry point still works, but callers that have a durable
+// operation ID should use MoveAcrossMountsWithOperationID.
 func (Service) MoveAcrossMounts(source, dest Mount, from, toDir string) (string, error) {
+	return (Service{}).MoveAcrossMountsWithOperationID(source, dest, from, toDir, "cross-mount-"+httpx.NewRequestID())
+}
+
+// MoveAcrossMountsWithOperationID stages the source under the reserved
+// operation namespace, verifies the complete source and destination trees,
+// publishes the destination without replacement, and removes source staging
+// only after publication. If cleanup is ambiguous, both the published target
+// and operation-scoped source remain and ErrCrossMountIncomplete is returned.
+func (Service) MoveAcrossMountsWithOperationID(source, dest Mount, from, toDir, operationID string) (string, error) {
+	cleanedFrom, err := storage.CleanRelativePath(from)
+	if err != nil || cleanedFrom == "." {
+		return "", ErrNotFile
+	}
+	if operationID == "" || strings.ContainsAny(operationID, "/\\") {
+		return "", ErrCrossMountIncomplete
+	}
+	destDir, err := cleanDirectory(toDir)
+	if err != nil {
+		return "", err
+	}
+	destPath := joinRelativePath(destDir, path.Base(cleanedFrom))
 	srcRoot, srcReadOnly, err := openMountRoot(source)
 	if err != nil {
 		return "", err
 	}
-	srcRoot.Close()
+	defer srcRoot.Close()
 	if srcReadOnly {
 		return "", ErrInvalidMountMode
 	}
-	copied, err := (Service{}).CopyAcrossMounts(source, dest, from, toDir)
+	dstRoot, dstReadOnly, err := openMountRoot(dest)
 	if err != nil {
 		return "", err
 	}
-	if err := (Service{}).Delete(source, from); err != nil {
-		return copied, fmt.Errorf("%w: copied to %s but source delete failed: %v", ErrCrossMountIncomplete, copied, err)
+	defer dstRoot.Close()
+	if dstReadOnly {
+		return "", ErrInvalidMountMode
 	}
-	return copied, nil
+	if err := rejectSymlinkPath(srcRoot, cleanedFrom); err != nil {
+		return "", err
+	}
+	if err := rejectSymlinkPath(dstRoot, destDir); err != nil {
+		return "", err
+	}
+	if _, err := dstRoot.Lstat(destPath); err == nil {
+		return "", fmt.Errorf("%w: target already exists", ErrInvalidMount)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	info, err := srcRoot.Lstat(cleanedFrom)
+	if err != nil {
+		return "", err
+	}
+	kind, ok := entryKind(info)
+	if !ok {
+		return "", ErrNotFile
+	}
+
+	stageRoot := path.Join(storage.ReservedNamespace, "operations", operationID)
+	stagePath := path.Join(stageRoot, "source")
+	if err := mkdirAllRoot(srcRoot, stageRoot); err != nil {
+		return "", err
+	}
+	if err := srcRoot.Rename(cleanedFrom, stagePath); err != nil {
+		_ = srcRoot.RemoveAll(stageRoot)
+		return "", err
+	}
+	restoreSource := func() error {
+		if _, statErr := srcRoot.Lstat(cleanedFrom); statErr == nil {
+			return fmt.Errorf("source path is occupied")
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		return renameNoReplace(srcRoot, stagePath, cleanedFrom, kind)
+	}
+	cleanupDestination := func(stageDestination string) error {
+		if stageDestination == "" {
+			return nil
+		}
+		if err := dstRoot.RemoveAll(stageDestination); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	failBeforePublish := func(cause error, stageDestination string) (string, error) {
+		cleanupErr := cleanupDestination(stageDestination)
+		restoreErr := restoreSource()
+		if cleanupErr != nil || restoreErr != nil {
+			return "", fmt.Errorf("%w: operation %s retained source staging: %v", ErrCrossMountIncomplete, operationID, errors.Join(cause, cleanupErr, restoreErr))
+		}
+		return "", cause
+	}
+
+	logicalName := path.Base(cleanedFrom)
+	sourceManifest, err := captureTreeNamed(srcRoot, stagePath, logicalName)
+	if err != nil {
+		return failBeforePublish(err, "")
+	}
+	stageDestination := path.Join(destDir, ".omnora-copy-"+operationID)
+	if kind == EntryKindDir {
+		err = copyDirTree(srcRoot, dstRoot, stagePath, stageDestination)
+	} else {
+		err = copyFileVerified(srcRoot, dstRoot, stagePath, stageDestination, info.Size())
+	}
+	if err != nil {
+		return failBeforePublish(err, stageDestination)
+	}
+	if destinationManifest, manifestErr := captureTreeNamed(dstRoot, stageDestination, logicalName); manifestErr != nil {
+		return failBeforePublish(manifestErr, stageDestination)
+	} else if destinationManifest != sourceManifest {
+		return failBeforePublish(fmt.Errorf("destination manifest differs from source"), stageDestination)
+	}
+	if err := renameNoReplace(dstRoot, stageDestination, destPath, kind); err != nil {
+		return failBeforePublish(err, stageDestination)
+	}
+	if sourceAfter, manifestErr := captureTreeNamed(srcRoot, stagePath, logicalName); manifestErr != nil {
+		return destPath, fmt.Errorf("%w: operation %s source verification failed after publication: %v", ErrCrossMountIncomplete, operationID, manifestErr)
+	} else if sourceAfter != sourceManifest {
+		return destPath, fmt.Errorf("%w: operation %s source changed during copy", ErrCrossMountIncomplete, operationID)
+	}
+	if err := srcRoot.RemoveAll(stageRoot); err != nil {
+		return destPath, fmt.Errorf("%w: operation %s source cleanup failed after publishing %s: %v", ErrCrossMountIncomplete, operationID, destPath, err)
+	}
+	return destPath, nil
 }
 
 func requireManagedWritable(mount Mount) error {
@@ -416,13 +687,8 @@ func readTrashItem(root *os.Root, trashRoot string) (TrashItem, error) {
 		Size:              meta.Size,
 		DeletedAt:         deletedAt,
 		TrashRelativePath: objectPath,
+		RecoveredOnly:     meta.RecoveredOnly,
 	}, nil
-}
-
-func conflictSafePath(original, trashID string) string {
-	ext := path.Ext(original)
-	base := strings.TrimSuffix(original, ext)
-	return fmt.Sprintf("%s.restored-%s%s", base, trashID, ext)
 }
 
 func cleanDirectory(value string) (string, error) {
@@ -501,7 +767,7 @@ func copyDirTree(src, dst *os.Root, from, to string) error {
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			continue
+			return ErrNotFile
 		}
 		if info.IsDir() {
 			if err := copyDirTree(src, dst, childFrom, childTo); err != nil {
@@ -510,13 +776,89 @@ func copyDirTree(src, dst *os.Root, from, to string) error {
 			continue
 		}
 		if !info.Mode().IsRegular() {
-			continue
+			return ErrNotFile
 		}
 		if err := copyFileVerified(src, dst, childFrom, childTo, info.Size()); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// captureTree returns a deterministic digest of a regular-file/directory
+// tree. Unsupported entries are rejected instead of being silently skipped;
+// otherwise a move could delete source data that was never copied.
+func captureTree(root *os.Root, relative string) (string, error) {
+	return captureTreeNamed(root, relative, path.Base(relative))
+}
+
+func captureTreeNamed(root *os.Root, relative, displayName string) (string, error) {
+	digest := sha256.New()
+	var walk func(string, string) error
+	walk = func(current, display string) error {
+		info, err := root.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+			return ErrNotFile
+		}
+		kind := "file"
+		if info.IsDir() {
+			kind = "dir"
+		}
+		size := info.Size()
+		if info.IsDir() {
+			// Directory st_size is filesystem-specific; it is not part of the
+			// logical tree and would make an otherwise identical cross-mount
+			// copy fail verification on different filesystems.
+			size = 0
+		}
+		fmt.Fprintf(digest, "path=%s|kind=%s|size=%d\n", display, kind, size)
+		if info.IsDir() {
+			directory, err := root.Open(current)
+			if err != nil {
+				return err
+			}
+			entries, err := directory.ReadDir(-1)
+			closeErr := directory.Close()
+			if err != nil {
+				return err
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+			for _, entry := range entries {
+				name := entry.Name()
+				child := path.Join(current, name)
+				childDisplay := path.Join(display, name)
+				if err := walk(child, childDisplay); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		file, err := root.Open(current)
+		if err != nil {
+			return err
+		}
+		content := sha256.New()
+		_, copyErr := io.Copy(content, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		fmt.Fprintf(digest, "sha256=%x\n", content.Sum(nil))
+		return nil
+	}
+	if err := walk(relative, displayName); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sha256:%x", digest.Sum(nil)), nil
 }
 
 func copyFileVerified(src, dst *os.Root, from, to string, expectedSize int64) error {

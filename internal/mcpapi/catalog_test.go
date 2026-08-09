@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
+	"omnora/internal/contentref"
 	"omnora/internal/files"
 	"omnora/internal/httpx"
 	"omnora/internal/memberfiles"
@@ -20,7 +21,7 @@ import (
 )
 
 func TestOrdinaryToolCatalogIsStable(t *testing.T) {
-	want := []string{"spaces.list", "mounts.list", "files.list", "files.metadata", "files.search", "files.read_text", "files.prepare_download", "directories.create", "files.prepare_upload", "uploads.status", "uploads.complete", "uploads.cancel", "files.rename", "files.copy", "trash.list", "trash.restore", "shares.list"}
+	want := []string{"mounts.list", "files.list", "files.metadata", "files.search", "files.read_text", "files.prepare_download", "directories.create", "files.prepare_upload", "uploads.status", "uploads.complete", "uploads.cancel", "files.rename", "files.copy", "trash.list", "trash.restore", "shares.list"}
 	specs := OrdinaryToolSpecs()
 	if len(specs) != len(want) {
 		t.Fatalf("ordinary tool count = %d, want %d", len(specs), len(want))
@@ -64,7 +65,7 @@ func TestToolsListFiltersCurrentScopesAndIsPrivate(t *testing.T) {
 		t.Fatalf("full tools/list error = %v", err)
 	}
 	fullResult := full.(*mcp.ListToolsResult)
-	if len(fullResult.Tools) != 17 || fullResult.TTLMs != 0 || fullResult.CacheScope != "private" || fullResult.NextCursor != "" {
+	if len(fullResult.Tools) != 16 || fullResult.TTLMs != 0 || fullResult.CacheScope != "private" || fullResult.NextCursor != "" {
 		t.Fatalf("full tools/list = count %d ttl %d scope %q cursor %q", len(fullResult.Tools), fullResult.TTLMs, fullResult.CacheScope, fullResult.NextCursor)
 	}
 	narrow, err := middleware(context.Background(), methodToolsList, &mcp.ServerRequest[*mcp.ListToolsParams]{Extra: &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{Scopes: []string{"files:list"}}}})
@@ -78,7 +79,7 @@ func TestToolsListFiltersCurrentScopesAndIsPrivate(t *testing.T) {
 }
 
 func TestTypedSchemasUseLowerCamelFields(t *testing.T) {
-	for _, typ := range []reflect.Type{reflect.TypeOf(LocatorInput{}), reflect.TypeOf(SearchInput{}), reflect.TypeOf(UploadPrepareInput{}), reflect.TypeOf(UploadIDInput{}), reflect.TypeOf(DownloadTicketOutput{}), reflect.TypeOf(UploadTicketOutput{})} {
+	for _, typ := range []reflect.Type{reflect.TypeOf(LocatorInput{}), reflect.TypeOf(SearchInput{}), reflect.TypeOf(UploadPrepareInput{}), reflect.TypeOf(FileUpdateInput{}), reflect.TypeOf(UploadIDInput{}), reflect.TypeOf(DownloadTicketOutput{}), reflect.TypeOf(UploadTicketOutput{})} {
 		for i := 0; i < typ.NumField(); i++ {
 			field := typ.Field(i)
 			if field.Anonymous {
@@ -108,12 +109,53 @@ func TestPrepareDownloadIsNotIdempotent(t *testing.T) {
 func TestAuditEventUsesRequestTraceIDsAndSanitizesPath(t *testing.T) {
 	req := &mcp.CallToolRequest{Extra: &mcp.RequestExtra{Header: map[string][]string{"X-Trace-Id": []string{"trace-1"}}}}
 	ctx := httpx.WithRequestID(context.Background(), "request-1")
-	event := auditEvent(ctx, req, "files.rename", "intent", aitoken.Principal{AccountID: "acct", PublicID: "tok"}, access.Locator{SpaceID: "space", MountID: "mount", Path: "../secret"})
+	event := auditEvent(ctx, req, "files.rename", "intent", aitoken.Principal{AccountID: "acct", PublicID: "tok"}, access.Locator{Source: contentref.SourceCommonMount, MountID: "mount", Path: "../secret"})
 	if event.RequestID != "request-1" || event.TraceID != "trace-1" {
 		t.Fatalf("audit ids = request %q trace %q", event.RequestID, event.TraceID)
 	}
-	if event.TargetID != "space/mount/<invalid>" || strings.Contains(event.MetadataJSON, "../secret") {
+	if event.TargetID != "common_mount:mount:<invalid>" || strings.Contains(event.MetadataJSON, "../secret") || strings.Contains(event.MetadataJSON, "space") {
 		t.Fatalf("audit target/path leaked: target=%q metadata=%q", event.TargetID, event.MetadataJSON)
+	}
+}
+
+func TestMCPContractContainsNoSpaceLocator(t *testing.T) {
+	if _, err := ValidateLocatorInput(LocatorInput{Source: contentref.SourcePersonal, Path: "docs"}); err != nil {
+		t.Fatalf("personal locator rejected: %v", err)
+	}
+	if _, err := ValidateLocatorInput(LocatorInput{Source: contentref.SourceCommonMount, MountID: "mount-1", Path: "docs"}); err != nil {
+		t.Fatalf("common locator rejected: %v", err)
+	}
+	for _, invalid := range []LocatorInput{
+		{Source: contentref.SourcePersonal, MountID: "personal-default", Path: "."},
+		{Source: contentref.SourceCommonMount, Path: "."},
+		{Source: contentref.SourceCollaboration, Path: "."},
+		{Source: aitoken.SourceAllAccountContent, Path: "."},
+	} {
+		if _, err := ValidateLocatorInput(invalid); err == nil {
+			t.Fatalf("invalid automation locator accepted: %#v", invalid)
+		}
+	}
+	for _, spec := range append(OrdinaryToolSpecs(), HighRiskToolSpecs()...) {
+		if spec.Name == "spaces.list" || spec.Scope == aitoken.Scope("spaces:read") {
+			t.Fatalf("legacy Space contract remains: %#v", spec)
+		}
+	}
+}
+
+func TestLegacyMCPIdentityFieldsAreRejectedRecursively(t *testing.T) {
+	for _, raw := range []string{
+		`{"spaceId":"old","path":"."}`,
+		`{"source":{"space_id":"old"},"destination":{"source":"personal","path":"."}}`,
+		`{"accountId":"acct","source":"personal","path":"."}`,
+		`{"defaultMountId":"personal-default","source":"personal","path":"."}`,
+		`{"collaborationId":"collab","source":"personal","path":"."}`,
+	} {
+		if !containsForbiddenMCPField([]byte(raw)) {
+			t.Fatalf("legacy identity field accepted: %s", raw)
+		}
+	}
+	if containsForbiddenMCPField([]byte(`{"source":"common_mount","mountId":"m1","path":"docs"}`)) {
+		t.Fatal("valid account-mount locator was rejected")
 	}
 }
 
@@ -131,6 +173,7 @@ func TestStableErrorCodesCoverTransferFailures(t *testing.T) {
 		{memberfiles.ErrMutationInvalidPath, "invalid_input"},
 		{memberfiles.ErrCrossMountSameMount, "invalid_input"},
 		{files.ErrNotManagedMount, "invalid_input"},
+		{files.ErrCrossMountIncomplete, "cross_mount_incomplete"},
 		{ErrConfirmationStale, "confirmation_stale"},
 		{os.ErrNotExist, "not_found"},
 	}

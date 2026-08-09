@@ -13,11 +13,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"omnora/internal/aitoken"
 	"omnora/internal/confirmation"
+	"omnora/internal/contentref"
 	"omnora/internal/store"
 )
 
 func TestHighRiskCatalogueExact(t *testing.T) {
-	want := []string{"files.move", "files.trash", "trash.purge", "trash.empty", "files.delete_permanently", "shares.create", "shares.revoke"}
+	want := []string{"files.move", "files.trash", "trash.purge", "trash.empty", "files.delete_permanently", "shares.create", "shares.revoke", "files.update"}
 	specs := HighRiskToolSpecs()
 	if len(specs) != len(want) {
 		t.Fatalf("high-risk count = %d, want %d", len(specs), len(want))
@@ -71,13 +72,10 @@ func TestConfirmationGateMRTRAcceptsOnceAndDeclineDoesNotExecute(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO accounts(id,email,display_name,role,status) VALUES ('acct-mcp','mcp@example.test','MCP','member','active')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO spaces(id,kind,name,owner_account_id,status) VALUES ('space-mcp','shared','MCP','acct-mcp','active')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO personal_directories(account_id,relative_path,state) VALUES ('acct-mcp','acct-mcp','ready')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO mounts(id,space_id,display_name,root_path,kind,mode,status) VALUES ('mount-mcp','space-mcp','MCP','/tmp','managed','read_write','active')`); err != nil {
-		t.Fatal(err)
-	}
-	issued, err := aitoken.NewService(db).Create(context.Background(), aitoken.CreateRequest{AccountID: "acct-mcp", Name: "mcp", Scopes: []aitoken.Scope{aitoken.ScopeFilesWrite}, Boundaries: []aitoken.DirectoryBoundary{{SpaceID: "space-mcp", MountID: "mount-mcp", RelativePath: "."}}, ExpiresAt: time.Now().Add(time.Hour)})
+	issued, err := aitoken.NewService(db).Create(context.Background(), aitoken.CreateRequest{AccountID: "acct-mcp", Name: "mcp", Scopes: []aitoken.Scope{aitoken.ScopeFilesWrite}, Boundaries: []aitoken.DirectoryBoundary{{Source: contentref.SourcePersonal, RelativePath: "."}}, ExpiresAt: time.Now().Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}

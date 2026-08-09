@@ -24,6 +24,7 @@ import (
 	"omnora/internal/aitoken"
 	"omnora/internal/audit"
 	"omnora/internal/catalog"
+	"omnora/internal/contentref"
 	"omnora/internal/domain"
 	"omnora/internal/files"
 	"omnora/internal/httpx"
@@ -150,18 +151,9 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("POST /api/v1/account/reauthenticate", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.reauthenticateAccount)))
 	s.mux.Handle("POST /api/v1/account/totp/setup", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.setupTOTP)))
 	s.mux.Handle("POST /api/v1/account/totp/confirm", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.confirmTOTP)))
-	s.mux.Handle("GET /api/v1/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listSpaces)))
-	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMounts)))
-	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts/{mountId}/children", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listChildren)))
-	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/directories", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createDirectory)))
-	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts/{mountId}/download", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.downloadFile)))
-	s.mux.Handle("GET /api/v1/spaces/{spaceId}/search", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.searchSpace)))
-	s.mux.Handle("GET /api/v1/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listShares)))
-	s.mux.Handle("POST /api/v1/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createShare)))
-	s.mux.Handle("DELETE /api/v1/shares/{shareId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeShare)))
-	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/rename", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.renameObject)))
-	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/move", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.moveObject)))
-	s.mux.Handle("DELETE /api/v1/spaces/{spaceId}/mounts/{mountId}/object", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteObject)))
+	s.mux.Handle("GET /api/v1/member/content-sources", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMemberContentSources)))
+	s.mux.Handle("GET /api/v1/member/files/children", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMemberFileChildren)))
+	s.mux.Handle("GET /api/v1/member/collaborations", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMemberCollaborations)))
 	s.mux.Handle("GET /api/v1/account", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.getAccount)))
 	s.mux.Handle("PATCH /api/v1/account/password", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.changeAccountPassword)))
 	s.mux.Handle("GET /api/v1/account/sessions", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAccountSessions)))
@@ -178,48 +170,18 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("POST /api/v1/admin/users/{userId}/disable", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.disableAdminUser)))
 	s.mux.Handle("POST /api/v1/admin/users/{userId}/enable", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.enableAdminUser)))
 	s.mux.Handle("POST /api/v1/admin/users/{userId}/revoke-sessions", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAdminUserSessions)))
-	s.mux.Handle("GET /api/v1/admin/spaces/{spaceId}/members", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminSpaceMembers)))
-	s.mux.Handle("PUT /api/v1/admin/spaces/{spaceId}/members/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putAdminSpaceMember)))
-	s.mux.Handle("DELETE /api/v1/admin/spaces/{spaceId}/members/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteAdminSpaceMember)))
-	s.mux.Handle("PATCH /api/v1/admin/spaces/{spaceId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.renameAdminSpace)))
-	s.mux.Handle("DELETE /api/v1/admin/spaces/{spaceId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteAdminSpace)))
-	s.mux.Handle("POST /api/v1/admin/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createAdminSpace)))
-	s.mux.Handle("GET /api/v1/admin/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminShares)))
-	s.mux.Handle("DELETE /api/v1/admin/shares/{shareId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAdminShare)))
 	s.mux.Handle("GET /api/v1/admin/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminAITokens)))
 	s.mux.Handle("DELETE /api/v1/admin/ai-tokens/{tokenId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAdminAIToken)))
 	s.mux.Handle("GET /api/v1/admin/backups", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listBackups)))
 	s.mux.Handle("POST /api/v1/admin/backups", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createBackup)))
 	s.mux.Handle("GET /api/v1/admin/recovery", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.recoveryStatus)))
 	s.mux.Handle("POST /api/v1/admin/backups/{backupId}/restore", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.restoreBackup)))
-	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/cross-mount-copy", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.crossMountCopy)))
-	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/cross-mount-move", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.crossMountMove)))
-	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts/{mountId}/trash", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listTrash)))
-	s.mux.Handle("DELETE /api/v1/spaces/{spaceId}/mounts/{mountId}/trash", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.emptyTrash)))
-	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/trash/{trashId}/restore", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.restoreTrash)))
-	s.mux.Handle("DELETE /api/v1/spaces/{spaceId}/mounts/{mountId}/trash/{trashId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.purgeTrash)))
 	s.registerOpenAPIRoutes()
 	s.mux.Handle("GET /api/v1/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAITokens)))
 	s.mux.Handle("POST /api/v1/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createAIToken)))
 	s.mux.Handle("DELETE /api/v1/ai-tokens/{tokenId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAIToken)))
-	s.mux.Handle("POST /api/v1/uploads", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createUpload)))
-	s.mux.Handle("GET /api/v1/uploads/{uploadId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.getUpload)))
-	s.mux.Handle("PUT /api/v1/uploads/{uploadId}/parts/{partNumber}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.uploadPart)))
-	s.mux.Handle("POST /api/v1/uploads/{uploadId}/complete", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.completeUpload)))
-	s.mux.Handle("DELETE /api/v1/uploads/{uploadId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.cancelUpload)))
-	s.mux.Handle("GET /api/v1/admin/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminSpaces)))
-	s.mux.Handle("GET /api/v1/admin/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminMounts)))
-	s.mux.Handle("GET /api/v1/admin/host-directories", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminHostDirectories)))
-	s.mux.Handle("POST /api/v1/admin/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createMount)))
-	s.mux.Handle("PATCH /api/v1/admin/mounts/{mountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.renameMount)))
-	s.mux.Handle("POST /api/v1/admin/mounts/{mountId}/reverify", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.reverifyMount)))
-	s.mux.Handle("DELETE /api/v1/admin/mounts/{mountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteMount)))
-	s.mux.Handle("GET /api/v1/admin/index-jobs", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listIndexJobs)))
-	s.mux.Handle("POST /api/v1/admin/index-jobs", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.enqueueIndexJob)))
-	s.mux.Handle("POST /api/v1/admin/index-jobs/{jobId}/run", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.runIndexJob)))
 	s.mux.Handle("GET /api/v1/admin/route-groups", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminRouteGroups)))
 	s.mux.Handle("PATCH /api/v1/admin/route-groups/{groupId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.updateAdminRouteGroup)))
-	s.mux.Handle("GET /api/v1/audit/events", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAuditEvents)))
 	s.mux.Handle("POST /api/v1/share-sessions", s.gate(domain.RouteGroupShare, http.HandlerFunc(s.createShareSession)))
 }
 
@@ -242,12 +204,11 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	payload.InitializationAvailable = s.initializationAvailable(r.Context(), db)
 
 	session, authenticated := s.optionalSession(r)
-	payload.Mounts = s.bootstrapMounts(r, db, session, authenticated)
-	payload.Files = s.bootstrapFiles(r, db, session, authenticated)
-	payload.Shares = s.bootstrapShares(r, db, session, authenticated)
-	payload.Tokens = s.bootstrapTokens(r, db, session, authenticated)
+	payload.Mounts = []mountDTO{}
+	payload.Files = []fileDTO{}
+	payload.Shares = []shareDTO{}
 	if authenticated && s.isAdmin(r, session.AccountID) {
-		payload.AuditRows = s.bootstrapAudit(r, db)
+		payload.AuditRows = []auditDTO{}
 		payload.AdminRisks = s.bootstrapRisks(db)
 	} else if authenticated {
 		payload.AdminRisks = []adminRiskDTO{{Label: "Session", Value: "authenticated", Tone: "ok"}}
@@ -303,12 +264,12 @@ func (s *Server) initialize(w http.ResponseWriter, r *http.Request) {
 		writeRateLimited(w, r, decision)
 		return
 	}
-	created, err := identity.New(db, identity.Options{}).InitializeSecure(r.Context(), identity.InitializationRequest{
+	created, err := identity.New(db, identity.Options{ManagedDir: s.cfg.Storage.ManagedDir}).InitializeSecure(r.Context(), identity.InitializationRequest{
 		Token:       req.Token,
 		Email:       req.Email,
 		DisplayName: req.DisplayName,
 		Password:    req.Password,
-	}, func(ctx context.Context, tx *sql.Tx, created identity.AccountWithPersonalSpace) error {
+	}, func(ctx context.Context, tx *sql.Tx, created identity.AccountWithPersonalDirectory) error {
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO system_state(key, value, updated_at)
 VALUES ('initial_admin_account_id', ?, ?)
@@ -329,8 +290,8 @@ ON CONFLICT(key) DO NOTHING
 	}
 	s.recordCredentialSuccess(r, ratelimit.ScopeInitialize, initSubject)
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
-		"user":  accountResponse(created.Account),
-		"space": spaceResponse(created.PersonalSpace, domain.SpacePermissionManager),
+		"user":              accountResponse(created.Account),
+		"personalDirectory": created.PersonalDirectory,
 	})
 }
 
@@ -401,11 +362,11 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, s.sessionCookie(r, issued.Token, issued.Session.ExpiresAt))
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
-		"userId":                  account.ID,
-		"expiresAt":               issued.Session.ExpiresAt,
-		"isAdmin":                 s.isAdmin(r, account.ID),
-		"purpose":                 issued.Session.Purpose,
-		"requiresTotpEnrollment":  issued.Session.Purpose == identity.SessionPurposeTOTPEnrollment,
+		"userId":                   account.ID,
+		"expiresAt":                issued.Session.ExpiresAt,
+		"isAdmin":                  s.isAdmin(r, account.ID),
+		"purpose":                  issued.Session.Purpose,
+		"requiresTotpEnrollment":   issued.Session.Purpose == identity.SessionPurposeTOTPEnrollment,
 		"passwordResetRecommended": account.PasswordResetRequired,
 	})
 }
@@ -638,45 +599,11 @@ func (s *Server) confirmTOTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listSpaces(w http.ResponseWriter, r *http.Request) {
-	session, err := s.requireSession(r)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
-		return
-	}
-	spaces, err := s.memberFiles.ListSpaces(r.Context(), access.Subject{AccountID: session.AccountID})
-	if err != nil {
-		writeMemberFilesError(w, r, err, "space is not available to this session")
-		return
-	}
-	// Keep the legacy role field in the REST representation. Visibility and
-	// mount/account liveness come from MemberFileService; this query is only
-	// presentation metadata and cannot broaden the returned set.
-	roles := make(map[string]string, len(spaces))
-	for _, space := range spaces {
-		var role string
-		if err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT permission FROM space_members WHERE space_id = ? AND account_id = ?
-`, space.ID, session.AccountID).Scan(&role); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			writeDBError(w, r, err)
-			return
-		}
-		roles[space.ID] = role
-	}
-	items := make([]map[string]string, 0, len(spaces))
-	for _, space := range spaces {
-		role, ok := roles[space.ID]
-		if !ok {
-			continue
-		}
-		items = append(items, map[string]string{
-			"id": space.ID, "type": space.Kind, "name": space.Name, "role": role,
-		})
-	}
+	writeLegacySpaceGone(w, r)
+}
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+func writeLegacySpaceGone(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteError(w, r, http.StatusGone, "space_api_removed", "Space-scoped REST APIs were removed; use account content sources")
 }
 
 func (s *Server) listAdminSpaces(w http.ResponseWriter, r *http.Request) {
@@ -778,7 +705,7 @@ func (s *Server) listMounts(w http.ResponseWriter, r *http.Request) {
 	// MemberFileService intentionally returns only active, identity-verified
 	// mounts. Disabled/unavailable mounts are fail-closed and must not be
 	// presented as usable REST or MCP targets.
-	visible, err := s.memberFiles.ListMounts(r.Context(), access.Subject{AccountID: session.AccountID}, spaceID)
+	visible, err := s.memberFiles.ListMounts(r.Context(), access.Subject{AccountID: session.AccountID})
 	if err != nil {
 		writeMemberFilesError(w, r, err, "space is not available to this session")
 		return
@@ -807,10 +734,9 @@ func (s *Server) listChildren(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	listing, err := s.memberFiles.List(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
-		SpaceID: spaceID, MountID: mountID, Path: r.URL.Query().Get("path"),
+		Source: contentref.SourceCommonMount, MountID: mountID, Path: r.URL.Query().Get("path"),
 	})
 	if err != nil {
 		writeMemberFilesError(w, r, err, "space is not available to this session")
@@ -893,7 +819,6 @@ func (s *Server) createDirectory(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
-	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	var req struct {
 		ParentPath string `json:"parentPath"`
@@ -903,7 +828,7 @@ func (s *Server) createDirectory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.memberFiles.CreateDirectory(r.Context(), access.Subject{AccountID: session.AccountID}, access.Locator{
-		SpaceID: spaceID, MountID: mountID, Path: req.ParentPath,
+		Source: contentref.SourceCommonMount, MountID: mountID, Path: req.ParentPath,
 	}, req.Name)
 	if err != nil {
 		writeMemberFilesError(w, r, err, "creating a directory requires editor permission")
@@ -927,10 +852,9 @@ func (s *Server) searchSpace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := catalog.NewService(s.sqlDB()).Search(r.Context(), catalog.SearchOptions{
-		SpaceID: spaceID,
-		Query:   r.URL.Query().Get("q"),
-		Cursor:  r.URL.Query().Get("cursor"),
-		Limit:   parseIntDefault(r.URL.Query().Get("limit"), 50),
+		Query:  r.URL.Query().Get("q"),
+		Cursor: r.URL.Query().Get("cursor"),
+		Limit:  parseIntDefault(r.URL.Query().Get("limit"), 50),
 	})
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_search", err.Error())
@@ -957,7 +881,7 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	targetPath := pathJoinForUpload(req.ParentPath, req.FileName)
 	result, err := s.memberFiles.PrepareUpload(r.Context(), access.Subject{AccountID: session.AccountID}, memberfiles.UploadRequest{
-		Locator:      access.Locator{SpaceID: req.SpaceID, MountID: req.MountID, Path: targetPath},
+		Locator:      access.Locator{Source: contentref.SourceCommonMount, MountID: req.MountID, Path: targetPath},
 		ExpectedSize: req.Size,
 	})
 	if err != nil {
@@ -1489,7 +1413,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		maxDownloads = &value
 	}
 	issued, err := s.memberShares.CreateSecure(r.Context(), access.Subject{AccountID: session.AccountID}, membershare.CreateRequest{
-		Locator:  access.Locator{SpaceID: req.SpaceID, MountID: req.MountID, Path: req.RelativePath},
+		Locator:  access.Locator{Source: contentref.SourceCommonMount, MountID: req.MountID, Path: req.RelativePath},
 		Password: req.Password, AllowPreview: req.AllowPreview, AllowDownload: req.AllowDownload,
 		MaxVisits: maxVisits, MaxDownloads: maxDownloads, ExpiresAt: expiresAt,
 	}, func(ctx context.Context, tx *sql.Tx, issued membershare.IssuedShare) error {
@@ -1517,11 +1441,12 @@ func (s *Server) listAITokens(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
 SELECT t.id, t.public_id, t.name, t.scopes, t.created_at, t.expires_at,
        COALESCE(t.last_used_at, ''), COALESCE(t.revoked_at, ''),
-       COALESCE(group_concat(b.space_id || char(31) || COALESCE(sp.name, '') || char(31) || b.mount_id || char(31) || COALESCE(m.display_name, '') || char(31) || b.relative_path, char(30)), '')
+       COALESCE(group_concat(b.source || char(31) || COALESCE(b.mount_id, '') || char(31) ||
+           CASE WHEN b.source = 'common_mount' THEN COALESCE(m.display_name, '') ELSE '' END || char(31) ||
+           b.relative_path, char(30)), '')
 FROM ai_tokens t
 LEFT JOIN ai_token_boundaries b ON b.token_id = t.id
-LEFT JOIN spaces sp ON sp.id = b.space_id
-LEFT JOIN mounts m ON m.id = b.mount_id
+LEFT JOIN mounts m ON b.source = 'common_mount' AND m.id = b.mount_id
 WHERE t.account_id = ?
 GROUP BY t.id
 ORDER BY t.created_at DESC, t.id DESC
@@ -1559,21 +1484,14 @@ func (s *Server) createAIToken(w http.ResponseWriter, r *http.Request) {
 		Name       string   `json:"name"`
 		Scopes     []string `json:"scopes"`
 		Boundaries []struct {
-			SpaceID      string `json:"spaceId"`
-			SpaceIDAlt   string `json:"space_id"`
-			MountID      string `json:"mountId"`
-			MountIDAlt   string `json:"mount_id"`
-			Path         string `json:"path"`
-			RelativePath string `json:"relativePath"`
+			Source  contentref.Source `json:"source"`
+			MountID string            `json:"mountId"`
+			Path    string            `json:"path"`
 		} `json:"boundaries"`
-		ExpiresAt    string `json:"expiresAt"`
-		ExpiresAtAlt string `json:"expires_at"`
+		ExpiresAt string `json:"expiresAt"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
-	}
-	if req.ExpiresAt == "" {
-		req.ExpiresAt = req.ExpiresAtAlt
 	}
 	// An empty expiresAt creates a token that never expires; otherwise it must
 	// be a future RFC3339 timestamp.
@@ -1592,41 +1510,24 @@ func (s *Server) createAIToken(w http.ResponseWriter, r *http.Request) {
 	}
 	boundaries := make([]aitoken.DirectoryBoundary, 0, len(req.Boundaries))
 	for _, raw := range req.Boundaries {
-		spaceID := raw.SpaceID
-		if spaceID == "" {
-			spaceID = raw.SpaceIDAlt
-		}
-		mountID := raw.MountID
-		if mountID == "" {
-			mountID = raw.MountIDAlt
-		}
-		relativePath := raw.Path
-		if relativePath == "" {
-			relativePath = raw.RelativePath
-		}
-		if _, err := access.NewGuard(s.sqlDB()).Authorize(r.Context(), access.CheckRequest{
-			Subject:            access.Subject{AccountID: session.AccountID},
-			Scope:              aitoken.ScopeSpacesRead,
-			Locator:            access.Locator{SpaceID: spaceID, MountID: mountID, Path: relativePath},
-			RequiredPermission: domain.SpacePermissionViewer,
-		}); err != nil {
-			httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "token boundary is outside this session")
-			return
-		}
 		boundaries = append(boundaries, aitoken.DirectoryBoundary{
-			SpaceID: spaceID, MountID: mountID, RelativePath: relativePath,
+			Source: raw.Source, MountID: raw.MountID, RelativePath: raw.Path,
 		})
 	}
-	if scopeIncluded(scopes, aitoken.ScopeUploadsCreate) {
+	if tokenScopesRequireWrite(scopes) {
 		for _, boundary := range boundaries {
+			if boundary.Source == aitoken.SourceAllAccountContent {
+				httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "write scopes require explicit personal or common mount boundaries")
+				return
+			}
 			if _, err := access.NewGuard(s.sqlDB()).Authorize(r.Context(), access.CheckRequest{
 				Subject:            access.Subject{AccountID: session.AccountID},
-				Scope:              aitoken.ScopeUploadsCreate,
-				Locator:            access.Locator{SpaceID: boundary.SpaceID, MountID: boundary.MountID, Path: boundary.RelativePath},
-				RequiredPermission: domain.SpacePermissionEditor,
+				Scope:              aitoken.ScopeFilesWrite,
+				Locator:            access.Locator{Source: boundary.Source, MountID: boundary.MountID, Path: boundary.RelativePath},
+				RequiredPermission: domain.ContentPermissionEditor,
 				Write:              true,
 			}); err != nil {
-				httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "upload scope requires editor permission on a read-write mount")
+				httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "write scopes require editor permission on a read-write content source")
 				return
 			}
 		}
@@ -1827,7 +1728,7 @@ func (s *Server) requireAuthenticatedSession(r *http.Request) (identity.Session,
 }
 
 func (s *Server) canReadSpace(r *http.Request, accountID, spaceID string) bool {
-	return access.NewGuard(s.sqlDB()).HasSpacePermission(r.Context(), accountID, spaceID, domain.SpacePermissionViewer)
+	return false
 }
 
 type accountTOTP struct {
@@ -1924,7 +1825,7 @@ func (s *Server) totpAEAD() (cipher.AEAD, error) {
 }
 
 func (s *Server) hasSpacePermission(r *http.Request, accountID, spaceID string, required domain.SpacePermission) bool {
-	return access.NewGuard(s.sqlDB()).HasSpacePermission(r.Context(), accountID, spaceID, required)
+	return false
 }
 
 func (s *Server) isAdmin(r *http.Request, accountID string) bool {
@@ -2187,10 +2088,10 @@ func (s *Server) loadCatalogMount(r *http.Request, mountID string) (catalog.Moun
 	var indexEnabled int
 	var identity string
 	err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT id, space_id, root_path, status, index_enabled, COALESCE(mount_identity_json, '')
+SELECT id, root_path, status, index_enabled, COALESCE(mount_identity_json, '')
 FROM mounts
 WHERE id = ? AND status <> 'deleted'
-`, mountID).Scan(&mount.ID, &mount.SpaceID, &mount.Root, &mount.Status, &indexEnabled, &identity)
+`, mountID).Scan(&mount.ID, &mount.Root, &mount.Status, &indexEnabled, &identity)
 	if err != nil {
 		return catalog.Mount{}, err
 	}
@@ -2209,9 +2110,15 @@ func pathJoinForUpload(parentPath, fileName string) string {
 	return parentPath + "/" + fileName
 }
 
-func scopeIncluded(scopes []aitoken.Scope, want aitoken.Scope) bool {
+func tokenScopesRequireWrite(scopes []aitoken.Scope) bool {
 	for _, scope := range scopes {
-		if scope == want {
+		switch scope {
+		case aitoken.ScopeUploadsCreate,
+			aitoken.ScopeFilesWrite,
+			aitoken.ScopeFilesTrash,
+			aitoken.ScopeFilesRestore,
+			aitoken.ScopeFilesPurge,
+			aitoken.ScopeSharesCreate:
 			return true
 		}
 	}
@@ -2219,21 +2126,22 @@ func scopeIncluded(scopes []aitoken.Scope, want aitoken.Scope) bool {
 }
 
 func (s *Server) mountBelongsToSpace(r *http.Request, spaceID, mountID string) bool {
-	_, err := access.NewGuard(s.sqlDB()).LoadMount(r.Context(), spaceID, mountID)
-	return err == nil
+	return false
 }
 
 func (s *Server) mountAllowsUpload(r *http.Request, spaceID, mountID string) bool {
-	mount, err := access.NewGuard(s.sqlDB()).LoadMount(r.Context(), spaceID, mountID)
-	return err == nil && mount.Mode == domain.MountModeReadWrite
+	return false
 }
 
 func (s *Server) aiTokenBoundaries(r *http.Request, tokenID string) ([]map[string]string, error) {
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
-SELECT space_id, mount_id, relative_path
-FROM ai_token_boundaries
-WHERE token_id = ?
-ORDER BY space_id, mount_id, relative_path
+SELECT b.source, COALESCE(b.mount_id, ''),
+       CASE WHEN b.source = 'common_mount' THEN COALESCE(m.display_name, '') ELSE '' END,
+       b.relative_path
+FROM ai_token_boundaries b
+LEFT JOIN mounts m ON b.source = 'common_mount' AND m.id = b.mount_id
+WHERE b.token_id = ?
+ORDER BY b.source, b.mount_id, b.relative_path
 	`, tokenID)
 	if err != nil {
 		return nil, err
@@ -2242,11 +2150,11 @@ ORDER BY space_id, mount_id, relative_path
 
 	items := []map[string]string{}
 	for rows.Next() {
-		var spaceID, mountID, relativePath string
-		if err := rows.Scan(&spaceID, &mountID, &relativePath); err != nil {
+		var source, mountID, mountName, relativePath string
+		if err := rows.Scan(&source, &mountID, &mountName, &relativePath); err != nil {
 			return nil, err
 		}
-		items = append(items, map[string]string{"spaceId": spaceID, "mountId": mountID, "path": relativePath})
+		items = append(items, aiTokenBoundaryResponse(source, mountID, mountName, relativePath))
 	}
 	return items, rows.Err()
 }
@@ -2259,14 +2167,25 @@ func parseBoundaryList(value string) []map[string]string {
 	items := make([]map[string]string, 0, len(rows))
 	for _, row := range rows {
 		parts := strings.Split(row, string(rune(31)))
-		switch len(parts) {
-		case 3:
-			items = append(items, map[string]string{"spaceId": parts[0], "mountId": parts[1], "path": parts[2]})
-		case 5:
-			items = append(items, map[string]string{"spaceId": parts[0], "spaceName": parts[1], "mountId": parts[2], "mountName": parts[3], "path": parts[4]})
+		if len(parts) == 4 {
+			items = append(items, aiTokenBoundaryResponse(parts[0], parts[1], parts[2], parts[3]))
 		}
 	}
 	return items
+}
+
+func aiTokenBoundaryResponse(source, mountID, mountName, relativePath string) map[string]string {
+	item := map[string]string{"source": source}
+	if source == string(contentref.SourceCommonMount) {
+		item["mountId"] = mountID
+		if mountName != "" {
+			item["mountName"] = mountName
+		}
+	}
+	if relativePath != "" {
+		item["path"] = relativePath
+	}
+	return item
 }
 
 func aiTokenResponse(id, publicID, name, scopesJSON, createdAt, expiresAt, lastUsedAt, revokedAt string, boundaries []map[string]string) map[string]any {
@@ -2435,7 +2354,7 @@ type mountForListing struct {
 }
 
 func loadMountForListing(r *http.Request, db *sql.DB, spaceID, mountID string) (mountForListing, error) {
-	loaded, err := access.NewGuard(db).LoadMount(r.Context(), spaceID, mountID)
+	loaded, err := access.NewGuard(db).LoadMountIdentity(r.Context(), mountID)
 	if err != nil {
 		return mountForListing{}, err
 	}
@@ -2443,7 +2362,7 @@ func loadMountForListing(r *http.Request, db *sql.DB, spaceID, mountID string) (
 		ID:           loaded.ID,
 		Root:         loaded.Root,
 		Mode:         loaded.Mode,
-		Kind:         loaded.Kind,
+		Kind:         string(loaded.StorageKind),
 		IdentityJSON: loaded.IdentityJSON,
 	}, nil
 }
@@ -2484,8 +2403,8 @@ func (s *Server) verifyLoadedMountIdentity(r *http.Request, mount mountForListin
 	return access.NewGuard(s.sqlDB()).VerifyMountIdentity(r.Context(), access.AuthorizedMount{
 		ID:           mount.ID,
 		Root:         mount.Root,
+		MountRoot:    mount.Root,
 		Mode:         mount.Mode,
-		Kind:         mount.Kind,
 		IdentityJSON: mount.IdentityJSON,
 	})
 }

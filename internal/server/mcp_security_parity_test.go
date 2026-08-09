@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -17,7 +16,7 @@ import (
 func TestMCPAccountDisableRejectsTheNextRequest(t *testing.T) {
 	fixture := newMCPProtocolFixture(t)
 	call := mcpToolsCallBody("files.list", map[string]any{
-		"spaceId": "mcp-protocol-space",
+		"source":  "common_mount",
 		"mountId": "mcp-protocol-mount",
 		"path":    ".",
 	})
@@ -39,7 +38,7 @@ func TestMCPReadOnlyMountChangeRejectsWrite(t *testing.T) {
 		t.Fatalf("make MCP fixture mount read-only: %v", err)
 	}
 	call := mcpToolsCallBody("directories.create", map[string]any{
-		"spaceId": "mcp-protocol-space",
+		"source":  "common_mount",
 		"mountId": "mcp-protocol-mount",
 		"path":    ".",
 		"name":    "must-not-exist",
@@ -59,7 +58,7 @@ func TestMCPMountIdentityDriftRejectsTheNextRequest(t *testing.T) {
 		t.Fatalf("drift MCP fixture mount identity: %v", err)
 	}
 	call := mcpToolsCallBody("files.list", map[string]any{
-		"spaceId": "mcp-protocol-space",
+		"source":  "common_mount",
 		"mountId": "mcp-protocol-mount",
 		"path":    ".",
 	})
@@ -77,7 +76,7 @@ func TestRESTAndMCPRepresentativeAuthorizationParity(t *testing.T) {
 	fixture := newMCPProtocolFixture(t)
 	cookie := issueAPITestSession(t, fixture.db, fixture.accountID)
 
-	restRead := httptest.NewRequest(http.MethodGet, "/api/v1/spaces/mcp-protocol-space/mounts/mcp-protocol-mount/children?path=.", nil)
+	restRead := httptest.NewRequest(http.MethodGet, "/api/v1/member/files/children?source=common_mount&mountId=mcp-protocol-mount&path=.", nil)
 	restRead.AddCookie(cookie)
 	restReadRecorder := httptest.NewRecorder()
 	fixture.handler.ServeHTTP(restReadRecorder, restRead)
@@ -85,7 +84,7 @@ func TestRESTAndMCPRepresentativeAuthorizationParity(t *testing.T) {
 		t.Fatalf("REST representative read status/body = %d/%s", restReadRecorder.Code, restReadRecorder.Body.String())
 	}
 	mcpRead := mcpRawRequest(fixture, http.MethodPost, "/mcp", mcpToolsCallBody("files.list", map[string]any{
-		"spaceId": "mcp-protocol-space",
+		"source":  "common_mount",
 		"mountId": "mcp-protocol-mount",
 		"path":    ".",
 	}), "", "", nil)
@@ -93,31 +92,14 @@ func TestRESTAndMCPRepresentativeAuthorizationParity(t *testing.T) {
 		t.Fatalf("MCP representative read status/body = %d/%s", mcpRead.Code, mcpRead.Body.String())
 	}
 
-	restWrite := httptest.NewRequest(http.MethodPost, "/api/v1/spaces/mcp-protocol-space/mounts/mcp-protocol-mount/directories", bytes.NewBufferString(`{"parentPath":".","name":"rest-parity-dir"}`))
-	restWrite.Header.Set("Content-Type", "application/json")
-	restWrite.AddCookie(cookie)
-	restWriteRecorder := httptest.NewRecorder()
-	fixture.handler.ServeHTTP(restWriteRecorder, restWrite)
-	if restWriteRecorder.Code != http.StatusCreated {
-		t.Fatalf("REST representative write status = %d", restWriteRecorder.Code)
-	}
 	mcpWrite := mcpRawRequest(fixture, http.MethodPost, "/mcp", mcpToolsCallBody("directories.create", map[string]any{
-		"spaceId": "mcp-protocol-space",
+		"source":  "common_mount",
 		"mountId": "mcp-protocol-mount",
 		"path":    ".",
 		"name":    "mcp-parity-dir",
 	}), "", "", nil)
 	if mcpWrite.Code != http.StatusOK || strings.Contains(mcpWrite.Body.String(), `"isError":true`) {
 		t.Fatalf("MCP representative write status/body = %d/%s", mcpWrite.Code, mcpWrite.Body.String())
-	}
-
-	restShare := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewBufferString(`{"spaceId":"mcp-protocol-space","mountId":"mcp-protocol-mount","relativePath":"hello.txt","allowPreview":true,"allowDownload":true}`))
-	restShare.Header.Set("Content-Type", "application/json")
-	restShare.AddCookie(cookie)
-	restShareRecorder := httptest.NewRecorder()
-	fixture.handler.ServeHTTP(restShareRecorder, restShare)
-	if restShareRecorder.Code != http.StatusCreated {
-		t.Fatalf("REST representative share status = %d", restShareRecorder.Code)
 	}
 
 	client, closeClient := fixture.client(t, &mcp.ClientOptions{
@@ -135,7 +117,7 @@ func TestRESTAndMCPRepresentativeAuthorizationParity(t *testing.T) {
 	mcpShare, err := session.CallTool(context.Background(), &mcp.CallToolParams{
 		Name: "shares.create",
 		Arguments: map[string]any{
-			"spaceId":       "mcp-protocol-space",
+			"source":        "common_mount",
 			"mountId":       "mcp-protocol-mount",
 			"path":          "hello.txt",
 			"allowPreview":  true,
@@ -149,11 +131,11 @@ func TestRESTAndMCPRepresentativeAuthorizationParity(t *testing.T) {
 		t.Fatal("MCP representative share returned an MCP error")
 	}
 	var shareCount int
-	if err := fixture.db.SQL().QueryRow(`SELECT COUNT(1) FROM shares WHERE space_id = 'mcp-protocol-space'`).Scan(&shareCount); err != nil {
+	if err := fixture.db.SQL().QueryRow(`SELECT COUNT(1) FROM shares WHERE mount_id = 'mcp-protocol-mount'`).Scan(&shareCount); err != nil {
 		t.Fatalf("count parity shares: %v", err)
 	}
-	if shareCount != 2 {
-		t.Fatalf("REST/MCP representative share count = %d, want two successful creations", shareCount)
+	if shareCount != 1 {
+		t.Fatalf("MCP representative share count = %d, want one successful creation", shareCount)
 	}
 }
 

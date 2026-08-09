@@ -8,6 +8,7 @@ import (
 	"omnora/internal/aitoken"
 	"omnora/internal/audit"
 	"omnora/internal/confirmation"
+	"omnora/internal/contentref"
 	"omnora/internal/memberfiles"
 	"omnora/internal/membershare"
 	"omnora/internal/transferticket"
@@ -39,8 +40,7 @@ type ToolSpec struct {
 // tools are intentionally added by a later confirmation layer.
 func OrdinaryToolSpecs() []ToolSpec {
 	return []ToolSpec{
-		{Name: "spaces.list", Title: "List spaces", Description: "List spaces currently visible to the authenticated member.", Scope: aitoken.ScopeSpacesRead, ReadOnly: true},
-		{Name: "mounts.list", Title: "List mounts", Description: "List accessible mounts in a space.", Scope: aitoken.ScopeSpacesRead, ReadOnly: true},
+		{Name: "mounts.list", Title: "List common mounts", Description: "List common mounts currently granted to the authenticated account.", Scope: aitoken.ScopeMountsRead, ReadOnly: true},
 		{Name: "files.list", Title: "List files", Description: "List a directory within an authorized mount.", Scope: aitoken.ScopeFilesList, ReadOnly: true},
 		{Name: "files.metadata", Title: "Read file metadata", Description: "Read metadata for an authorized file or directory.", Scope: aitoken.ScopeFilesMetadata, ReadOnly: true},
 		{Name: "files.search", Title: "Search files", Description: "Search indexed content within current authorization boundaries.", Scope: aitoken.ScopeSearchRead, ReadOnly: true},
@@ -60,24 +60,27 @@ func OrdinaryToolSpecs() []ToolSpec {
 }
 
 type LocatorInput struct {
-	SpaceID string `json:"spaceId" jsonschema:"required"`
-	MountID string `json:"mountId" jsonschema:"required"`
-	Path    string `json:"path" jsonschema:"required"`
+	Source  contentref.Source `json:"source" jsonschema:"required"`
+	MountID string            `json:"mountId,omitempty"`
+	Path    string            `json:"path" jsonschema:"required"`
 }
 
 func (in LocatorInput) locator() access.Locator {
-	return access.Locator{SpaceID: in.SpaceID, MountID: in.MountID, Path: in.Path}
+	locator, _ := ValidateLocatorInput(in)
+	return locator
+}
+
+func ValidateLocatorInput(in LocatorInput) (access.Locator, error) {
+	return contentref.NormalizeForAutomation(contentref.Locator{Source: in.Source, MountID: in.MountID, Path: in.Path})
 }
 
 type EmptyInput struct{}
-type SpaceListInput struct {
-	SpaceID string `json:"spaceId" jsonschema:"required"`
-}
 type SearchInput struct {
-	SpaceID string `json:"spaceId" jsonschema:"required"`
-	Query   string `json:"query" jsonschema:"required"`
-	Limit   int    `json:"limit,omitempty"`
-	Cursor  string `json:"cursor,omitempty"`
+	Source  contentref.Source `json:"source" jsonschema:"required"`
+	MountID string            `json:"mountId,omitempty"`
+	Query   string            `json:"query" jsonschema:"required"`
+	Limit   int               `json:"limit,omitempty"`
+	Cursor  string            `json:"cursor,omitempty"`
 }
 type TextInput struct {
 	LocatorInput
@@ -88,6 +91,11 @@ type DirectoryInput struct {
 	Name string `json:"name" jsonschema:"required"`
 }
 type UploadPrepareInput struct {
+	LocatorInput
+	ExpectedSize int64  `json:"expectedSize" jsonschema:"required"`
+	Checksum     string `json:"checksum,omitempty"`
+}
+type FileUpdateInput struct {
 	LocatorInput
 	ExpectedSize int64  `json:"expectedSize" jsonschema:"required"`
 	Checksum     string `json:"checksum,omitempty"`
@@ -108,8 +116,7 @@ type RestoreInput struct {
 	TrashID string `json:"trashId" jsonschema:"required"`
 }
 type ShareListInput struct {
-	SpaceID string `json:"spaceId,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	Limit int `json:"limit,omitempty"`
 }
 
 type MoveInput struct {
@@ -145,6 +152,7 @@ func HighRiskToolSpecs() []ToolSpec {
 		{Name: "files.delete_permanently", Title: "Delete permanently", Description: "Permanently delete an authorized object after confirmation.", Scope: aitoken.ScopeFilesPurge, Destructive: true},
 		{Name: "shares.create", Title: "Create share", Description: "Create a public share after confirmation.", Scope: aitoken.ScopeSharesCreate, OpenWorld: true},
 		{Name: "shares.revoke", Title: "Revoke share", Description: "Revoke a public share after confirmation.", Scope: aitoken.ScopeSharesRevoke, Destructive: true, OpenWorld: true},
+		{Name: "files.update", Title: "Update file content", Description: "Replace an authorized file's content through a confirmed upload.", Scope: aitoken.ScopeUploadsCreate, Destructive: true},
 	}
 }
 

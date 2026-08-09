@@ -54,7 +54,10 @@ var routeMatrix = []RouteRule{
 	{Method: "POST", Pattern: "/api/v1/account/totp/setup", Mode: RouteAuthCookie, CSRF: true, AllowEnrollment: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/account/totp/confirm", Mode: RouteAuthCookie, CSRF: true, AllowEnrollment: true, RequiresRecentAuth: true},
 	{Method: "DELETE", Pattern: "/api/v1/auth/session", Mode: RouteAuthCookie, CSRF: true, AllowEnrollment: true},
-	{Method: "PATCH", Pattern: "/api/v1/account/password", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	// Password change verifies the current password and, when enabled, TOTP in
+	// the same request; a separate recent-reauthentication round trip would
+	// verify the same credentials twice.
+	{Method: "PATCH", Pattern: "/api/v1/account/password", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "DELETE", Pattern: "/api/v1/account/sessions/*", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "POST", Pattern: "/api/v1/account/totp/disable", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	// Lenient recent-reauth matrix: only credential issuance and hard-to-undo
@@ -65,9 +68,6 @@ var routeMatrix = []RouteRule{
 	{Method: "POST", Pattern: "/api/v1/admin/backups/*/restore", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/users/*/disable", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/users/*/revoke-sessions", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
-	// Member ACL deletes share the spaces/* prefix; keep them off the reauth list.
-	{Method: "DELETE", Pattern: "/api/v1/admin/spaces/*/members/*", Mode: RouteAuthCookie, CSRF: true},
-	{Method: "DELETE", Pattern: "/api/v1/admin/spaces/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "GET", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie},
 	{Method: "HEAD", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie},
 	{Method: "*", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie, CSRF: true},

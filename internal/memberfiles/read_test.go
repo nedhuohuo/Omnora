@@ -4,306 +4,213 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
 	"omnora/internal/catalog"
-	"omnora/internal/files"
+	"omnora/internal/contentref"
+	"omnora/internal/domain"
 	"omnora/internal/mountid"
 	"omnora/internal/store"
 )
 
-type readFixture struct {
-	db      *sql.DB
-	root    string
-	spaceID string
-	mountID string
+type memberFixture struct {
+	db           *sql.DB
+	personalRoot string
+	commonRoot   string
+	service      *Service
 }
 
-func newReadFixture(t *testing.T) readFixture {
+func newMemberFixture(t *testing.T) memberFixture {
 	t.Helper()
-	handle, err := store.OpenSQLite(context.Background(), store.SQLiteOptions{Path: filepath.Join(t.TempDir(), "memberfiles.db")})
+	handle, err := store.OpenSQLite(context.Background(), store.SQLiteOptions{Path: filepath.Join(t.TempDir(), "member.db")})
 	if err != nil {
-		t.Fatalf("OpenSQLite() error = %v", err)
+		t.Fatalf("open target database: %v", err)
 	}
 	t.Cleanup(func() { _ = handle.Close() })
-	root, err := os.MkdirTemp(".", ".memberfiles-mount-")
+	db := handle.SQL()
+	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
-		t.Fatalf("MkdirTemp() error = %v", err)
+		t.Fatalf("resolve fixture root: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	root, err = filepath.Abs(root)
-	if err != nil {
-		t.Fatalf("Abs(root) error = %v", err)
+	personalRoot := filepath.Join(base, "personal")
+	commonRoot := filepath.Join(base, "common")
+	for _, root := range []string{personalRoot, commonRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatalf("create root: %v", err)
+		}
 	}
+	if _, err := db.Exec(`
+INSERT INTO accounts(id, email, display_name, role, status)
+VALUES ('acct-1', 'one@example.test', 'One', 'member', 'active'),
+       ('acct-2', 'two@example.test', 'Two', 'member', 'active'),
+       ('acct-admin', 'admin@example.test', 'Admin', 'admin', 'active');
+INSERT INTO personal_directories(account_id, relative_path, state)
+VALUES ('acct-1', 'acct-1', 'ready'), ('acct-2', 'acct-2', 'ready'), ('acct-admin', 'acct-admin', 'ready')
+`); err != nil {
+		t.Fatalf("insert accounts: %v", err)
+	}
+	for _, accountID := range []string{"acct-1", "acct-2", "acct-admin"} {
+		if err := os.Mkdir(filepath.Join(personalRoot, accountID), 0o700); err != nil {
+			t.Fatalf("create account root: %v", err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE mounts SET mount_identity_json = ?, index_enabled = 1 WHERE id = 'personal-default'`, memberIdentity(t, personalRoot)); err != nil {
+		t.Fatalf("bind personal identity: %v", err)
+	}
+	if _, err := db.Exec(`
+INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, index_enabled, status, mount_identity_json)
+VALUES ('common-1', 'Team files', ?, 'common', 'external', 'normal', 'read_write', 1, 'active', ?);
+INSERT INTO mount_grants(mount_id, account_id, permission)
+VALUES ('common-1', 'acct-1', 'editor'), ('common-1', 'acct-2', 'viewer')
+`, commonRoot, memberIdentity(t, commonRoot)); err != nil {
+		t.Fatalf("insert common mount: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(personalRoot, "acct-1", "docs"), 0o700); err != nil {
+		t.Fatalf("create docs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(personalRoot, "acct-1", "docs", "readme.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write personal file: %v", err)
+	}
+	return memberFixture{db: db, personalRoot: personalRoot, commonRoot: commonRoot, service: NewService(db, access.NewGuard(db), catalog.NewService(db))}
+}
+
+func memberIdentity(t *testing.T, root string) string {
+	t.Helper()
 	identity, err := mountid.Capture(root)
 	if err != nil {
-		t.Fatalf("Capture() error = %v", err)
+		t.Fatalf("capture identity: %v", err)
 	}
-	identityJSON, err := json.Marshal(identity)
+	encoded, err := json.Marshal(identity)
 	if err != nil {
-		t.Fatalf("Marshal(identity) error = %v", err)
+		t.Fatalf("marshal identity: %v", err)
 	}
-	if _, err := handle.SQL().Exec(`
-INSERT INTO accounts(id, email, display_name, role, status)
-VALUES ('acct-memberfiles', 'memberfiles@example.test', 'Member Files', 'member', 'active'),
-       ('acct-other', 'other@example.test', 'Other', 'member', 'active');
-INSERT INTO spaces(id, kind, name, owner_account_id, status)
-VALUES ('space-memberfiles', 'shared', 'Member Files', 'acct-memberfiles', 'active'),
-       ('space-hidden', 'shared', 'Hidden', 'acct-other', 'active');
-INSERT INTO space_members(space_id, account_id, permission)
-VALUES ('space-memberfiles', 'acct-memberfiles', 'editor'),
-       ('space-hidden', 'acct-other', 'viewer');
-INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status, index_enabled, mount_identity_json)
-VALUES ('mount-memberfiles', 'space-memberfiles', 'Files', ?, 'managed', 'read_write', 'active', 1, ?)
-`, root, string(identityJSON)); err != nil {
-		t.Fatalf("insert fixture: %v", err)
-	}
-	if err := os.Mkdir(filepath.Join(root, "docs"), 0o755); err != nil {
-		t.Fatalf("Mkdir(docs) error = %v", err)
-	}
-	if err := os.Mkdir(filepath.Join(root, "docs2"), 0o755); err != nil {
-		t.Fatalf("Mkdir(docs2) error = %v", err)
-	}
-	writeReadFile(t, filepath.Join(root, "docs", "readme.txt"), "hello member")
-	writeReadFile(t, filepath.Join(root, "docs2", "outside.txt"), "outside")
-	writeReadFile(t, filepath.Join(root, "small.txt"), "small")
-	writeReadFile(t, filepath.Join(root, "binary.bin"), string([]byte{0xff, 0xfe, 0xfd}))
-	writeReadFile(t, filepath.Join(root, "nul.bin"), "before\x00after")
-	writeReadFile(t, filepath.Join(root, "large.txt"), strings.Repeat("0123456789", 110000))
-	writeReadFile(t, filepath.Join(root, "boundary-binary.bin"), strings.Repeat("a", int(DefaultReadTextBytes)-1)+string([]byte{0xff})+"tail")
-	if err := os.Symlink(filepath.Join(root, "small.txt"), filepath.Join(root, "linked.txt")); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-	return readFixture{db: handle.SQL(), root: root, spaceID: "space-memberfiles", mountID: "mount-memberfiles"}
+	return string(encoded)
 }
 
-func (f readFixture) service() *Service {
-	return NewService(f.db, access.NewGuard(f.db), catalog.NewService(f.db))
+func memberSubject(accountID string) access.Subject { return access.Subject{AccountID: accountID} }
+
+func personalLocator(value string) access.Locator {
+	return access.Locator{Source: contentref.SourcePersonal, Path: value}
 }
 
-func (f readFixture) locator(path string) access.Locator {
-	return access.Locator{SpaceID: f.spaceID, MountID: f.mountID, Path: path}
-}
-
-func (f readFixture) session() access.Subject {
-	return access.Subject{AccountID: "acct-memberfiles"}
-}
-
-func (f readFixture) token(t *testing.T, boundary string) access.Subject {
-	return f.tokenWithScopes(t, boundary,
-		aitoken.ScopeSpacesRead,
-		aitoken.ScopeFilesList,
-		aitoken.ScopeFilesMetadata,
-		aitoken.ScopeFilesText,
-		aitoken.ScopeSearchRead,
-	)
-}
-
-func (f readFixture) tokenWithScopes(t *testing.T, boundary string, scopes ...aitoken.Scope) access.Subject {
-	t.Helper()
-	issued, err := aitoken.NewService(f.db).Create(context.Background(), aitoken.CreateRequest{
-		AccountID:  "acct-memberfiles",
-		Name:       "memberfiles read token",
-		Scopes:     scopes,
-		Boundaries: []aitoken.DirectoryBoundary{{SpaceID: f.spaceID, MountID: f.mountID, RelativePath: boundary}},
-		ExpiresAt:  time.Now().UTC().Add(time.Hour),
-	})
+func TestListMountsAndPersonalReadHaveNoSpaceOrDefaultMountLeak(t *testing.T) {
+	f := newMemberFixture(t)
+	mounts, err := f.service.ListMounts(context.Background(), memberSubject("acct-1"))
 	if err != nil {
-		t.Fatalf("Create(token) error = %v", err)
+		t.Fatalf("ListMounts: %v", err)
 	}
-	principal := aitoken.Principal{
-		AccountID:  issued.Token.AccountID,
-		TokenID:    issued.Token.ID,
-		PublicID:   issued.Token.PublicID,
-		Scopes:     issued.Token.Scopes,
-		Boundaries: issued.Token.Boundaries,
-		ExpiresAt:  issued.Token.ExpiresAt,
-	}
-	return access.Subject{AccountID: principal.AccountID, Principal: &principal}
-}
-
-func TestListSpacesMountsAndReadOperationsUseSessionACL(t *testing.T) {
-	f := newReadFixture(t)
-	s := f.service()
-	ctx := context.Background()
-	spaces, err := s.ListSpaces(ctx, f.session())
-	if err != nil {
-		t.Fatalf("ListSpaces() error = %v", err)
-	}
-	if len(spaces) != 1 || spaces[0].ID != f.spaceID {
-		t.Fatalf("spaces = %#v, want only member space", spaces)
-	}
-	mounts, err := s.ListMounts(ctx, f.session(), f.spaceID)
-	if err != nil {
-		t.Fatalf("ListMounts() error = %v", err)
-	}
-	if len(mounts) != 1 || mounts[0].ID != f.mountID || mounts[0].ReadOnly || mounts[0].Name == "" {
+	if len(mounts) != 1 || mounts[0].ID != "common-1" || mounts[0].Permission != domain.ContentPermissionEditor {
 		t.Fatalf("mounts = %#v", mounts)
 	}
 	payload, _ := json.Marshal(mounts)
-	if strings.Contains(string(payload), f.root) {
-		t.Fatalf("mount response leaked host root: %s", payload)
+	if strings.Contains(string(payload), "personal-default") || strings.Contains(string(payload), "space") || strings.Contains(string(payload), f.commonRoot) {
+		t.Fatalf("mount payload leaked protected coordinates: %s", payload)
 	}
-	listing, err := s.List(ctx, f.session(), f.locator("docs"))
+	listing, err := f.service.List(context.Background(), memberSubject("acct-1"), personalLocator("docs"))
 	if err != nil || len(listing.Entries) != 1 || listing.Entries[0].Name != "readme.txt" {
-		t.Fatalf("List() = %#v, error = %v", listing, err)
+		t.Fatalf("List = %#v, err=%v", listing, err)
 	}
-	metadata, err := s.Metadata(ctx, f.session(), f.locator("docs/readme.txt"))
-	if err != nil || metadata.Kind != files.EntryKindFile || metadata.Size != int64(len("hello member")) {
-		t.Fatalf("Metadata() = %#v, error = %v", metadata, err)
-	}
-	text, err := s.ReadText(ctx, f.session(), f.locator("small.txt"), 0)
-	if err != nil || text.Text != "small" || text.Truncated {
-		t.Fatalf("ReadText() = %#v, error = %v", text, err)
-	}
-
-	if _, err := f.db.Exec(`DELETE FROM space_members WHERE space_id = ? AND account_id = ?`, f.spaceID, "acct-memberfiles"); err != nil {
-		t.Fatalf("remove ACL: %v", err)
-	}
-	if _, err := s.List(ctx, f.session(), f.locator("docs")); !errors.Is(err, access.ErrForbidden) {
-		t.Fatalf("List() after ACL removal error = %v, want forbidden", err)
+	if _, err := f.service.List(context.Background(), memberSubject("acct-2"), personalLocator("docs")); err == nil {
+		t.Fatal("second account read first account directory")
 	}
 }
 
-func TestListSpacesUsesLegacyKindNameOrdering(t *testing.T) {
-	f := newReadFixture(t)
+func TestPrepareUploadStoresMountGlobalPathWithoutSpace(t *testing.T) {
+	f := newMemberFixture(t)
+	result, err := f.service.PrepareUpload(context.Background(), memberSubject("acct-1"), UploadRequest{
+		Locator: personalLocator("upload.txt"), ExpectedSize: 3,
+	})
+	if err != nil {
+		t.Fatalf("PrepareUpload: %v", err)
+	}
+	var mountID, target string
+	if err := f.db.QueryRow(`SELECT mount_id, target_relative_path FROM upload_sessions WHERE id = ?`, result.ID).Scan(&mountID, &target); err != nil {
+		t.Fatalf("read upload row: %v", err)
+	}
+	if mountID != "personal-default" || target != "acct-1/upload.txt" {
+		t.Fatalf("upload coordinate = %q %q", mountID, target)
+	}
+}
+
+func TestSearchAllAccountContentStripsOnlyCurrentPersonalPrefix(t *testing.T) {
+	f := newMemberFixture(t)
 	if _, err := f.db.Exec(`
-INSERT INTO spaces(id, kind, name, owner_account_id, status)
-VALUES ('space-order-personal', 'personal', 'Same Name', 'acct-memberfiles', 'active'),
-       ('space-order-shared', 'shared', 'Same Name', 'acct-memberfiles', 'active');
-INSERT INTO space_members(space_id, account_id, permission)
-VALUES ('space-order-personal', 'acct-memberfiles', 'viewer'),
-       ('space-order-shared', 'acct-memberfiles', 'viewer')
+INSERT INTO catalog_entries(id, mount_id, relative_path, name, entry_kind, preview_kind, size_bytes, modified_at, identity_fingerprint)
+VALUES ('mine', 'personal-default', 'acct-1/docs/readme.txt', 'readme.txt', 'file', 'text', 5, '2026-08-08T00:00:00Z', 'mine'),
+       ('other', 'personal-default', 'acct-2/secret.txt', 'secret.txt', 'file', 'text', 5, '2026-08-08T00:00:00Z', 'other'),
+       ('common', 'common-1', 'team.txt', 'team.txt', 'file', 'text', 5, '2026-08-08T00:00:00Z', 'common')
 `); err != nil {
-		t.Fatalf("insert ordering spaces: %v", err)
+		t.Fatalf("insert catalog: %v", err)
 	}
-	spaces, err := f.service().ListSpaces(context.Background(), f.session())
+	result, err := f.service.Search(context.Background(), memberSubject("acct-1"), SearchRequest{Source: aitoken.SourceAllAccountContent})
 	if err != nil {
-		t.Fatalf("ListSpaces() error = %v", err)
+		t.Fatalf("Search: %v", err)
 	}
-	indices := map[string]int{}
-	for index, space := range spaces {
-		indices[space.ID] = index
+	if len(result.Items) != 2 {
+		t.Fatalf("items = %#v", result.Items)
 	}
-	if indices["space-order-personal"] >= indices["space-order-shared"] {
-		t.Fatalf("space order = %#v, want personal before shared for same name", spaces)
+	paths := map[string]string{}
+	for _, item := range result.Items {
+		paths[string(item.Source)] = item.RelativePath
+		if item.Source == contentref.SourcePersonal && item.MountID != "" {
+			t.Fatalf("personal search leaked default mount ID: %#v", item)
+		}
+	}
+	if paths["personal"] != "docs/readme.txt" || paths["common_mount"] != "team.txt" {
+		t.Fatalf("paths = %#v", paths)
+	}
+	payload, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	if strings.Contains(string(payload), "personal-default") {
+		t.Fatalf("personal search payload leaked default mount ID: %s", payload)
 	}
 }
 
-func TestTokenBoundaryFiltersAdjacentPrefixesAndCatalogResults(t *testing.T) {
-	f := newReadFixture(t)
-	ctx := context.Background()
-	if _, err := catalog.NewService(f.db).ScanMount(ctx, catalog.Mount{
-		ID: f.mountID, SpaceID: f.spaceID, Root: f.root,
-		Status: catalog.MountStatusActive, IndexEnabled: true, IdentityVerified: true,
-	}, catalog.ScanOptions{}); err != nil {
-		t.Fatalf("ScanMount() error = %v", err)
-	}
-	if _, err := f.db.Exec(`
-INSERT INTO catalog_entries(
-  id, space_id, mount_id, relative_path, name, entry_kind, preview_kind,
-  size_bytes, modified_at, identity_fingerprint, indexed_at, deleted_at
-) VALUES
-  ('evil-dotdot', ?, ?, 'docs/../outside.txt', 'outside.txt', 'file', 'text', 7, '2026-08-06T15:06:37Z', 'evil-dotdot', CURRENT_TIMESTAMP, NULL),
-  ('evil-absolute', ?, ?, '/host.txt', 'host.txt', 'file', 'text', 7, '2026-08-06T15:06:37Z', 'evil-absolute', CURRENT_TIMESTAMP, NULL),
-  ('evil-reserved', ?, ?, '.omnora/secret.txt', 'secret.txt', 'file', 'text', 7, '2026-08-06T15:06:37Z', 'evil-reserved', CURRENT_TIMESTAMP, NULL)
-`, f.spaceID, f.mountID, f.spaceID, f.mountID, f.spaceID, f.mountID); err != nil {
-		t.Fatalf("insert malformed catalog rows: %v", err)
-	}
-	s := f.service()
-	subject := f.token(t, "docs")
-	if mounts, err := s.ListMounts(ctx, subject, f.spaceID); err != nil || len(mounts) != 1 {
-		t.Fatalf("ListMounts(token) = %#v, error = %v", mounts, err)
-	}
-	listing, err := s.List(ctx, subject, f.locator("docs"))
-	if err != nil || len(listing.Entries) != 1 || listing.Entries[0].Name != "readme.txt" {
-		t.Fatalf("List(token) = %#v, error = %v", listing, err)
-	}
-	if _, err := s.List(ctx, subject, f.locator("docs2")); !errors.Is(err, access.ErrBoundaryViolation) {
-		t.Fatalf("List(adjacent boundary) error = %v, want boundary violation", err)
-	}
-	result, err := s.Search(ctx, subject, SearchRequest{SpaceID: f.spaceID, Query: ".txt", Limit: 50})
+func TestPersonalTrashIsAccountIsolated(t *testing.T) {
+	f := newMemberFixture(t)
+	trashed, err := f.service.Trash(context.Background(), memberSubject("acct-1"), personalLocator("docs/readme.txt"))
 	if err != nil {
-		t.Fatalf("Search() error = %v", err)
+		t.Fatalf("Trash: %v", err)
 	}
-	if len(result.Items) != 1 || result.Items[0].RelativePath != "docs/readme.txt" {
-		t.Fatalf("Search() items = %#v, want only docs/readme.txt", result.Items)
+	listed, err := f.service.ListTrash(context.Background(), memberSubject("acct-1"), personalLocator("."))
+	if err != nil || len(listed.Items) != 1 || listed.Items[0].ID != trashed.TrashID {
+		t.Fatalf("owner trash = %#v, err=%v", listed, err)
 	}
-	spaces, err := s.ListSpaces(ctx, subject)
-	if err != nil || len(spaces) != 1 || spaces[0].ID != f.spaceID {
-		t.Fatalf("ListSpaces(token) = %#v, error = %v", spaces, err)
-	}
-	withoutSpacesScope := f.tokenWithScopes(t, "docs", aitoken.ScopeSearchRead)
-	if _, err := s.ListMounts(ctx, withoutSpacesScope, f.spaceID); !errors.Is(err, access.ErrForbidden) {
-		t.Fatalf("ListMounts(missing scope) error = %v, want forbidden", err)
-	}
-	withoutSearchScope := f.tokenWithScopes(t, "docs", aitoken.ScopeSpacesRead)
-	if _, err := s.Search(ctx, withoutSearchScope, SearchRequest{SpaceID: f.spaceID, Query: ".txt"}); !errors.Is(err, access.ErrForbidden) {
-		t.Fatalf("Search(missing scope) error = %v, want forbidden", err)
-	}
-	if _, err := f.db.Exec(`UPDATE mounts SET status = 'disabled' WHERE id = ?`, f.mountID); err != nil {
-		t.Fatalf("disable mount: %v", err)
-	}
-	if spaces, err := s.ListSpaces(ctx, subject); err != nil || len(spaces) != 0 {
-		t.Fatalf("ListSpaces(disabled mount) = %#v, error = %v, want empty", spaces, err)
-	}
-	if _, err := f.db.Exec(`UPDATE mounts SET status = 'active', mount_identity_json = '{}' WHERE id = ?`, f.mountID); err != nil {
-		t.Fatalf("set drifted identity: %v", err)
-	}
-	if spaces, err := s.ListSpaces(ctx, subject); err != nil || len(spaces) != 0 {
-		t.Fatalf("ListSpaces(drifted identity) = %#v, error = %v, want empty", spaces, err)
+	other, err := f.service.ListTrash(context.Background(), memberSubject("acct-2"), personalLocator("."))
+	if err != nil || len(other.Items) != 0 {
+		t.Fatalf("other trash = %#v, err=%v", other, err)
 	}
 }
 
-func TestReadTextLimitsUTF8BinaryDirectoryAndSymlink(t *testing.T) {
-	f := newReadFixture(t)
-	s := f.service()
-	ctx := context.Background()
-	session := f.session()
-	defaultResult, err := s.ReadText(ctx, session, f.locator("large.txt"), 0)
+func TestCommonMountDeleteUsesDeletingAccountsPersonalTrash(t *testing.T) {
+	f := newMemberFixture(t)
+	if err := os.WriteFile(filepath.Join(f.commonRoot, "team.txt"), []byte("team"), 0o600); err != nil {
+		t.Fatalf("write common file: %v", err)
+	}
+	common := access.Locator{Source: contentref.SourceCommonMount, MountID: "common-1", Path: "team.txt"}
+	trashed, err := f.service.Trash(context.Background(), memberSubject("acct-1"), common)
 	if err != nil {
-		t.Fatalf("ReadText(default) error = %v", err)
+		t.Fatalf("Trash common file: %v", err)
 	}
-	if defaultResult.BytesRead != DefaultReadTextBytes || !defaultResult.Truncated {
-		t.Fatalf("default result = %#v, want 64KiB truncated", defaultResult)
+	if _, err := os.Stat(filepath.Join(f.commonRoot, "team.txt")); !os.IsNotExist(err) {
+		t.Fatalf("common source remains after verified trash copy: %v", err)
 	}
-	hardResult, err := s.ReadText(ctx, session, f.locator("large.txt"), MaxReadTextBytes*2)
+	listed, err := f.service.ListTrash(context.Background(), memberSubject("acct-1"), personalLocator("."))
+	if err != nil || len(listed.Items) != 1 || listed.Items[0].ID != trashed.TrashID {
+		t.Fatalf("personal trash = %#v, err=%v", listed, err)
+	}
+	restored, err := f.service.RestoreTrash(context.Background(), memberSubject("acct-1"), personalLocator("."), trashed.TrashID)
 	if err != nil {
-		t.Fatalf("ReadText(hard limit) error = %v", err)
+		t.Fatalf("RestoreTrash: %v", err)
 	}
-	if hardResult.BytesRead > MaxReadTextBytes || !hardResult.Truncated {
-		t.Fatalf("hard result bytes=%d truncated=%v, want <=1MiB truncated", hardResult.BytesRead, hardResult.Truncated)
-	}
-	if _, err := s.ReadText(ctx, session, f.locator("binary.bin"), 0); !errors.Is(err, ErrNotTextFile) {
-		t.Fatalf("ReadText(binary) error = %v, want ErrNotTextFile", err)
-	}
-	if _, err := s.ReadText(ctx, session, f.locator("boundary-binary.bin"), 0); !errors.Is(err, ErrNotTextFile) {
-		t.Fatalf("ReadText(boundary binary) error = %v, want ErrNotTextFile", err)
-	}
-	if _, err := s.ReadText(ctx, session, f.locator("nul.bin"), 0); !errors.Is(err, ErrNotTextFile) {
-		t.Fatalf("ReadText(NUL) error = %v, want ErrNotTextFile", err)
-	}
-	if _, err := s.ReadText(ctx, session, f.locator("docs"), 0); !errors.Is(err, files.ErrNotFile) {
-		t.Fatalf("ReadText(directory) error = %v, want ErrNotFile", err)
-	}
-	if _, err := s.ReadText(ctx, session, f.locator("linked.txt"), 0); !errors.Is(err, access.ErrBoundaryViolation) {
-		t.Fatalf("ReadText(symlink) error = %v, want boundary violation", err)
-	}
-	if _, err := s.ReadText(ctx, session, f.locator("../small.txt"), 0); err == nil {
-		t.Fatal("ReadText(path traversal) unexpectedly succeeded")
-	}
-}
-
-func writeReadFile(t *testing.T, name, value string) {
-	t.Helper()
-	if err := os.WriteFile(name, []byte(value), 0o644); err != nil {
-		t.Fatalf("WriteFile(%q) error = %v", name, err)
+	if !strings.HasPrefix(restored.RelativePath, "Recovered Files/") {
+		t.Fatalf("restored path = %q, want personal recovery directory", restored.RelativePath)
 	}
 }

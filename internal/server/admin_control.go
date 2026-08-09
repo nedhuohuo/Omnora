@@ -67,8 +67,8 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 		writeDBError(w, r, err)
 		return
 	}
-	var spaceCount int
-	if err := db.QueryRowContext(r.Context(), "SELECT COUNT(1) FROM spaces WHERE status = 'active'").Scan(&spaceCount); err != nil {
+	var commonMountCount int
+	if err := db.QueryRowContext(r.Context(), "SELECT COUNT(1) FROM mounts WHERE purpose = 'common' AND status <> 'deleted'").Scan(&commonMountCount); err != nil {
 		writeDBError(w, r, err)
 		return
 	}
@@ -99,7 +99,7 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"accounts":       accountsByStatus,
-		"spaces":         spaceCount,
+		"commonMounts":   commonMountCount,
 		"mountsByHealth": mountsByHealth,
 		"jobsByStatus":   jobsByStatus,
 		"routeGroups":    s.routeGroups(),
@@ -195,12 +195,12 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 	if req.Role == string(domain.AccountRoleAdmin) {
 		role = domain.AccountRoleAdmin
 	}
-	created, err := identity.New(s.sqlDB(), identity.Options{}).CreateAccountSecure(r.Context(), identity.CreateAccountRequest{
+	created, err := identity.New(s.sqlDB(), identity.Options{ManagedDir: s.cfg.Storage.ManagedDir}).CreateAccountSecure(r.Context(), identity.CreateAccountRequest{
 		Email:       req.Email,
 		DisplayName: req.DisplayName,
 		Password:    req.Password,
 		Role:        role,
-	}, func(ctx context.Context, tx *sql.Tx, created identity.AccountWithPersonalSpace) error {
+	}, func(ctx context.Context, tx *sql.Tx, created identity.AccountWithPersonalDirectory) error {
 		return s.recordAuditTx(ctx, tx, r, adminSession.AccountID, "admin_user_create", "account", created.Account.ID, "{}")
 	})
 	if err != nil {
@@ -208,8 +208,8 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
-		"user":  accountResponse(created.Account),
-		"space": spaceResponse(created.PersonalSpace, domain.SpacePermissionManager),
+		"user":              accountResponse(created.Account),
+		"personalDirectory": created.PersonalDirectory,
 	})
 }
 

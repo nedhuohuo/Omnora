@@ -9,6 +9,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"omnora/internal/contentref"
 )
 
 const timestampLayout = time.RFC3339Nano
@@ -52,7 +54,7 @@ func InstallSchema(ctx context.Context, db *sql.DB) error {
 
 func AllowlistedScopes() []Scope {
 	return []Scope{
-		ScopeSpacesRead,
+		ScopeMountsRead,
 		ScopeFilesList,
 		ScopeFilesMetadata,
 		ScopeFilesText,
@@ -122,6 +124,9 @@ func (s *Service) CreateSecure(ctx context.Context, req CreateRequest, auditWrit
 	if active != 1 {
 		return IssuedToken{}, ErrInvalidInput
 	}
+	if err := s.validateBoundaryAuthorizations(ctx, accountID, boundaries); err != nil {
+		return IssuedToken{}, err
+	}
 	var credentialGeneration int64
 	if err := s.db.QueryRowContext(ctx, `
 SELECT CAST(value AS INTEGER)
@@ -176,9 +181,9 @@ WHERE key = 'credential_generation'
 	}
 	for _, boundary := range boundaries {
 		_, err = tx.ExecContext(ctx, `
-INSERT INTO ai_token_boundaries(token_id, space_id, mount_id, relative_path)
+INSERT INTO ai_token_boundaries(token_id, source, mount_id, relative_path)
 VALUES (?, ?, ?, ?)
-`, token.ID, boundary.SpaceID, boundary.MountID, boundary.RelativePath)
+`, token.ID, boundary.Source, boundaryMountArgument(boundary), boundary.RelativePath)
 		if err != nil {
 			return IssuedToken{}, err
 		}
@@ -428,11 +433,11 @@ WHERE t.id = ?
 
 func (s *Service) loadBoundaries(ctx context.Context, tokenID string) ([]DirectoryBoundary, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT space_id, mount_id, relative_path
-FROM ai_token_boundaries
-WHERE token_id = ?
-ORDER BY space_id, mount_id, relative_path
-`, tokenID)
+	SELECT source, COALESCE(mount_id, ''), relative_path
+	FROM ai_token_boundaries
+	WHERE token_id = ?
+	ORDER BY id
+	`, tokenID)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +446,7 @@ ORDER BY space_id, mount_id, relative_path
 	var boundaries []DirectoryBoundary
 	for rows.Next() {
 		var boundary DirectoryBoundary
-		if err := rows.Scan(&boundary.SpaceID, &boundary.MountID, &boundary.RelativePath); err != nil {
+		if err := rows.Scan(&boundary.Source, &boundary.MountID, &boundary.RelativePath); err != nil {
 			return nil, err
 		}
 		boundaries = append(boundaries, boundary)
@@ -449,7 +454,16 @@ ORDER BY space_id, mount_id, relative_path
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return boundaries, nil
+	normalized, err := normalizeBoundaries(boundaries)
+	if err != nil || len(normalized) != len(boundaries) {
+		return nil, ErrInvalidToken
+	}
+	for index := range boundaries {
+		if normalized[index] != boundaries[index] {
+			return nil, ErrInvalidToken
+		}
+	}
+	return normalized, nil
 }
 
 type loadedToken struct {
@@ -479,19 +493,35 @@ func normalizeBoundaries(boundaries []DirectoryBoundary) ([]DirectoryBoundary, e
 	seen := make(map[string]bool, len(boundaries))
 	normalized := make([]DirectoryBoundary, 0, len(boundaries))
 	for _, boundary := range boundaries {
-		spaceID := strings.TrimSpace(boundary.SpaceID)
+		source := contentref.Source(strings.TrimSpace(string(boundary.Source)))
 		mountID := strings.TrimSpace(boundary.MountID)
 		relativePath, err := normalizeRelativePath(boundary.RelativePath)
-		if err != nil || spaceID == "" || mountID == "" {
+		if err != nil {
 			return nil, ErrInvalidInput
 		}
-		key := spaceID + "\x00" + mountID + "\x00" + relativePath
+		switch source {
+		case contentref.SourcePersonal:
+			if mountID != "" {
+				return nil, ErrInvalidInput
+			}
+		case contentref.SourceCommonMount:
+			if mountID == "" {
+				return nil, ErrInvalidInput
+			}
+		case SourceAllAccountContent:
+			if mountID != "" || relativePath != "" {
+				return nil, ErrInvalidInput
+			}
+		default:
+			return nil, ErrInvalidInput
+		}
+		key := string(source) + "\x00" + mountID + "\x00" + relativePath
 		if seen[key] {
 			return nil, ErrInvalidInput
 		}
 		seen[key] = true
 		normalized = append(normalized, DirectoryBoundary{
-			SpaceID:      spaceID,
+			Source:       source,
 			MountID:      mountID,
 			RelativePath: relativePath,
 		})
@@ -504,22 +534,70 @@ func normalizeRelativePath(value string) (string, error) {
 	if value == "" || value == "." {
 		return "", nil
 	}
-	if strings.Contains(value, "\x00") || strings.HasPrefix(value, "/") {
+	if strings.Contains(value, "\x00") || path.IsAbs(value) || strings.ContainsRune(value, '\\') {
 		return "", ErrInvalidInput
+	}
+	for component := range strings.SplitSeq(value, "/") {
+		if component == ".." || component == ".omnora" {
+			return "", ErrInvalidInput
+		}
 	}
 	cleaned := path.Clean(value)
 	if cleaned == "." {
 		return "", nil
 	}
-	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
-		return "", ErrInvalidInput
-	}
-	for _, part := range strings.Split(cleaned, "/") {
-		if part == ".omnora" {
-			return "", ErrInvalidInput
+	return cleaned, nil
+}
+
+func (s *Service) validateBoundaryAuthorizations(ctx context.Context, accountID string, boundaries []DirectoryBoundary) error {
+	for _, boundary := range boundaries {
+		var authorized int
+		var err error
+		switch boundary.Source {
+		case contentref.SourcePersonal:
+			err = s.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM personal_directories pd
+JOIN mounts m ON m.id = 'personal-default'
+WHERE pd.account_id = ?
+  AND pd.state = 'ready'
+  AND pd.relative_path = pd.account_id
+  AND m.purpose = 'personal_default'
+  AND m.storage_kind = 'managed'
+  AND m.status = 'active'
+`, accountID).Scan(&authorized)
+		case contentref.SourceCommonMount:
+			err = s.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM mount_grants mg
+JOIN mounts m ON m.id = mg.mount_id
+WHERE mg.account_id = ?
+  AND mg.mount_id = ?
+  AND mg.permission IN ('viewer', 'editor')
+  AND m.purpose = 'common'
+  AND m.storage_kind = 'external'
+  AND m.status = 'active'
+`, accountID, boundary.MountID).Scan(&authorized)
+		case SourceAllAccountContent:
+			continue
+		default:
+			return ErrInvalidInput
+		}
+		if err != nil {
+			return err
+		}
+		if authorized != 1 {
+			return ErrInvalidInput
 		}
 	}
-	return cleaned, nil
+	return nil
+}
+
+func boundaryMountArgument(boundary DirectoryBoundary) any {
+	if boundary.Source == contentref.SourceCommonMount {
+		return boundary.MountID
+	}
+	return nil
 }
 
 func marshalScopes(scopes []Scope) (string, error) {

@@ -311,6 +311,7 @@ func TestWebGroupUnknownAssetsReturnNotFound(t *testing.T) {
 }
 
 func TestEnabledRESTRouteRequiresSessionForSpaces(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	routes := map[domain.RouteGroup]bool{
 		domain.RouteGroupREST: true,
 	}

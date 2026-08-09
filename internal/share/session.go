@@ -13,7 +13,6 @@ import (
 type SessionPrincipal struct {
 	ShareID       string
 	SessionID     string
-	SpaceID       string
 	MountID       string
 	RelativePath  string
 	AllowPreview  bool
@@ -46,11 +45,23 @@ func (s *Service) VerifySession(ctx context.Context, token string) (SessionPrinc
 	// session, the same way it already invalidates identity sessions.
 	err := s.db.QueryRowContext(ctx, `
 SELECT ss.share_id, ss.id, ss.generation, ss.expires_at, ss.revoked_at,
-       sh.space_id, sh.mount_id, sh.relative_path, sh.allow_preview, sh.allow_download,
+       sh.mount_id, sh.relative_path, sh.allow_preview, sh.allow_download,
        sh.max_downloads, sh.used_downloads, sh.expires_at, sh.revoked_at, sh.generation
 FROM share_sessions ss
 JOIN shares sh ON sh.id = ss.share_id
+JOIN accounts creator ON creator.id = sh.creator_account_id AND creator.status = 'active'
+JOIN mounts m ON m.id = sh.mount_id AND m.status = 'active' AND m.share_enabled = 1
 WHERE ss.session_hash = ?
+  AND (
+    (m.purpose = 'personal_default'
+      AND (sh.relative_path = sh.creator_account_id OR sh.relative_path LIKE sh.creator_account_id || '/%')
+      AND EXISTS (SELECT 1 FROM personal_directories pd WHERE pd.account_id = sh.creator_account_id AND pd.state = 'ready'))
+    OR
+    (m.purpose = 'common' AND EXISTS (
+      SELECT 1 FROM mount_grants mg
+      WHERE mg.mount_id = sh.mount_id AND mg.account_id = sh.creator_account_id AND mg.permission = 'editor'
+    ))
+  )
   AND ss.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
 `, hash).Scan(
 		&principal.ShareID,
@@ -58,7 +69,6 @@ WHERE ss.session_hash = ?
 		&sessionGeneration,
 		&sessionExpiresAt,
 		&sessionRevokedAt,
-		&principal.SpaceID,
 		&principal.MountID,
 		&principal.RelativePath,
 		&allowPreview,
@@ -119,6 +129,24 @@ WHERE id = ?
   AND expires_at > ?
   AND generation = ?
   AND credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
+  AND EXISTS (
+    SELECT 1 FROM accounts creator
+    JOIN mounts m ON m.id = shares.mount_id
+    WHERE creator.id = shares.creator_account_id
+      AND creator.status = 'active'
+      AND m.status = 'active'
+      AND m.share_enabled = 1
+      AND (
+        (m.purpose = 'personal_default'
+          AND (shares.relative_path = shares.creator_account_id OR shares.relative_path LIKE shares.creator_account_id || '/%')
+          AND EXISTS (SELECT 1 FROM personal_directories pd WHERE pd.account_id = shares.creator_account_id AND pd.state = 'ready'))
+        OR
+        (m.purpose = 'common' AND EXISTS (
+          SELECT 1 FROM mount_grants mg
+          WHERE mg.mount_id = shares.mount_id AND mg.account_id = shares.creator_account_id AND mg.permission = 'editor'
+        ))
+      )
+  )
   AND (max_downloads IS NULL OR used_downloads < max_downloads)
 `, formatSQLiteTime(now), shareID, formatSQLiteTime(now), generation)
 	if err != nil {

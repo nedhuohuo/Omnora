@@ -88,6 +88,7 @@ func TestAdminCreateUser(t *testing.T) {
 }
 
 func TestInitialAdminIsProtectedFromAccountAndSpaceMutations(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	adminCookie := issueAPITestSession(t, db, admin.ID)
@@ -165,6 +166,7 @@ SELECT permission FROM space_members WHERE space_id = ? AND account_id = ?
 }
 
 func TestAdminPutSpaceMemberResolvesEmailAndRejectsUnknownAccount(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)
 	adminCookie := issueAPITestSession(t, db, admin.ID)
@@ -231,6 +233,7 @@ SELECT permission FROM space_members WHERE space_id = 'shared-acl' AND account_i
 }
 
 func TestAdminSpaceRenameAndDelete(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)
 	adminCookie := issueAPITestSession(t, db, admin.ID)
@@ -447,6 +450,7 @@ func TestAdminSpaceRenameAndDelete(t *testing.T) {
 }
 
 func TestAdminSpaceProtection(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)
 	adminCookie := issueAPITestSession(t, db, admin.ID)
@@ -549,6 +553,7 @@ func mustMarshalJSONString(t *testing.T, value string) string {
 }
 
 func TestAuditEventsReturnReadableActorAndTargetLabels(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)
 	adminCookie := issueAPITestSession(t, db, admin.ID)

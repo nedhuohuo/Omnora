@@ -12,9 +12,10 @@ import (
 
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
+	"omnora/internal/contentref"
 	"omnora/internal/domain"
-	"omnora/internal/files"
 	"omnora/internal/fileops"
+	"omnora/internal/files"
 	"omnora/internal/storage"
 	"omnora/internal/transfer"
 )
@@ -33,7 +34,7 @@ var (
 // ShareInvalidator is deliberately narrow. Member file mutations invalidate
 // old-path shares only after the filesystem mutation has succeeded.
 type ShareInvalidator interface {
-	RevokePath(ctx context.Context, spaceID, mountID, relativePath string) error
+	RevokePath(ctx context.Context, mountID, storageRelativePath string) error
 }
 
 // WithShareInvalidator connects the member-file service to authenticated share
@@ -50,9 +51,11 @@ type MutationResult struct {
 }
 
 type UploadRequest struct {
-	Locator      access.Locator `json:"locator"`
-	ExpectedSize int64          `json:"expectedSize"`
-	Checksum     string         `json:"checksum,omitempty"`
+	Locator                   access.Locator `json:"locator"`
+	ExpectedSize              int64          `json:"expectedSize"`
+	Checksum                  string         `json:"checksum,omitempty"`
+	Overwrite                 bool           `json:"overwrite,omitempty"`
+	ExpectedObjectFingerprint string         `json:"expectedObjectFingerprint,omitempty"`
 }
 
 type UploadResult struct {
@@ -88,17 +91,19 @@ type TrashListResult struct {
 }
 
 type uploadRecord struct {
-	ID           string
-	AccountID    string
-	SpaceID      string
-	MountID      string
-	TargetPath   string
-	ExpectedSize int64
-	PartSize     int
-	Checksum     string
-	TempDir      string
-	ExpiresAt    time.Time
-	Mount        access.AuthorizedMount
+	ID                        string
+	AccountID                 string
+	Source                    contentref.Source
+	MountID                   string
+	TargetPath                string
+	StorageTargetPath         string
+	ExpectedSize              int64
+	PartSize                  int
+	Checksum                  string
+	TempDir                   string
+	ExpiresAt                 time.Time
+	ExpectedTargetFingerprint string
+	Mount                     access.AuthorizedMount
 }
 
 func (s *Service) CreateDirectory(ctx context.Context, subject access.Subject, locator access.Locator, name string) (MutationResult, error) {
@@ -130,18 +135,40 @@ func (s *Service) PrepareUpload(ctx context.Context, subject access.Subject, req
 	}
 	mount, err := s.guard.Authorize(ctx, access.CheckRequest{
 		Subject: subject, Scope: aitoken.ScopeUploadsCreate,
-		Locator:            access.Locator{SpaceID: req.Locator.SpaceID, MountID: req.Locator.MountID, Path: parent},
-		RequiredPermission: domain.SpacePermissionEditor, Write: true,
+		Locator:            access.Locator{Source: req.Locator.Source, MountID: req.Locator.MountID, Path: parent},
+		RequiredPermission: domain.ContentPermissionEditor, Write: true,
 	})
 	if err != nil {
 		return UploadResult{}, err
 	}
-	if err := s.files.ValidateWritableTarget(toFilesMount(mount), target); err != nil {
+	if req.Overwrite {
+		if strings.TrimSpace(req.ExpectedObjectFingerprint) == "" {
+			return UploadResult{}, ErrInvalidInput
+		}
+		entry, statErr := s.files.Stat(toFilesMount(mount), target)
+		if statErr != nil {
+			return UploadResult{}, statErr
+		}
+		if entry.Kind != files.EntryKindFile {
+			return UploadResult{}, files.ErrNotFile
+		}
+		if entry.ObjectFingerprint != req.ExpectedObjectFingerprint {
+			return UploadResult{}, ErrMutationConflict
+		}
+	} else if err := s.files.ValidateWritableTarget(toFilesMount(mount), target); err != nil {
 		return UploadResult{}, err
 	}
 	checksum, err := normalizeChecksum(req.Checksum)
 	if err != nil {
 		return UploadResult{}, err
+	}
+	if req.Overwrite {
+		// Replacement invalidates shares before any upload bytes are written;
+		// a stale share must never survive a confirmed content update or a
+		// later filesystem failure that leaves the result ambiguous.
+		if err := s.invalidatePath(ctx, mount.ID, storagePathFor(mount, subject.AccountID, target)); err != nil {
+			return UploadResult{}, err
+		}
 	}
 	transferService, err := transfer.NewService(transfer.Options{
 		MountRoot: mount.Root,
@@ -153,6 +180,7 @@ func (s *Service) PrepareUpload(ctx context.Context, subject access.Subject, req
 	defer transferService.Close()
 	upload, err := transferService.CreateUploadSession(transfer.CreateUploadSessionRequest{
 		TargetPath: target, ExpectedSize: req.ExpectedSize, Checksum: checksum,
+		Overwrite: req.Overwrite, ExpectedTargetFingerprint: req.ExpectedObjectFingerprint,
 	})
 	if err != nil {
 		return UploadResult{}, mapTransferError(err)
@@ -162,13 +190,13 @@ func (s *Service) PrepareUpload(ctx context.Context, subject access.Subject, req
 	// not shorten the resumable session itself.
 	expires := s.now().UTC().Add(24 * time.Hour)
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO upload_sessions(id, account_id, space_id, mount_id, target_relative_path,
-    declared_size, part_size, temp_dir, expires_at, credential_generation)
+	INSERT INTO upload_sessions(id, account_id, mount_id, target_relative_path,
+	    declared_size, part_size, temp_dir, expires_at, expected_target_identity, credential_generation)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
-    CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER))
-`, upload.ID, subject.AccountID, req.Locator.SpaceID, req.Locator.MountID,
-		upload.TargetPath, upload.ExpectedSize, 32*1024,
-		filepathJoin(mount.Root, storage.ReservedNamespace, "tmp", "uploads"), formatMemberTime(expires))
+	    CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER))
+	`, upload.ID, subject.AccountID, mount.ID, storagePathFor(mount, subject.AccountID, upload.TargetPath),
+		upload.ExpectedSize, 32*1024,
+		filepathJoin(mount.Root, storage.ReservedNamespace, "tmp", "uploads"), formatMemberTime(expires), req.ExpectedObjectFingerprint)
 	if err != nil {
 		_ = transferService.CancelUpload(upload.ID)
 		return UploadResult{}, fmt.Errorf("%w: %v", ErrUploadConflict, err)
@@ -182,9 +210,11 @@ func (s *Service) UploadStatus(ctx context.Context, subject access.Subject, uplo
 	if err != nil {
 		return UploadStatusResult{}, err
 	}
-	if err := s.authorizeUploadMount(ctx, subject, record); err != nil {
+	mount, err := s.authorizeUploadMount(ctx, subject, record)
+	if err != nil {
 		return UploadStatusResult{}, err
 	}
+	record.Mount = mount
 	transferService, err := s.newTransferService(record.Mount)
 	if err != nil {
 		return UploadStatusResult{}, fmt.Errorf("%w: %v", ErrUploadConflict, err)
@@ -210,9 +240,11 @@ func (s *Service) WriteUploadPart(ctx context.Context, subject access.Subject, u
 	if err != nil {
 		return err
 	}
-	if err := s.authorizeUploadMount(ctx, subject, record); err != nil {
+	mount, err := s.authorizeUploadMount(ctx, subject, record)
+	if err != nil {
 		return err
 	}
+	record.Mount = mount
 	transferService, err := s.newTransferService(record.Mount)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrUploadConflict, err)
@@ -238,8 +270,19 @@ func (s *Service) CompleteUpload(ctx context.Context, subject access.Subject, up
 	if err != nil {
 		return MutationResult{}, err
 	}
-	if err := s.authorizeUploadMount(ctx, subject, record); err != nil {
+	mount, err := s.authorizeUploadMount(ctx, subject, record)
+	if err != nil {
 		return MutationResult{}, err
+	}
+	record.Mount = mount
+	if record.ExpectedTargetFingerprint != "" {
+		entry, statErr := s.files.Stat(toFilesMount(record.Mount), record.TargetPath)
+		if statErr != nil {
+			return MutationResult{}, statErr
+		}
+		if entry.ObjectFingerprint != record.ExpectedTargetFingerprint {
+			return MutationResult{}, ErrMutationConflict
+		}
 	}
 	if err := s.claimUpload(ctx, record.ID); err != nil {
 		return MutationResult{}, err
@@ -279,9 +322,11 @@ func (s *Service) CancelUpload(ctx context.Context, subject access.Subject, uplo
 	if err != nil {
 		return err
 	}
-	if err := s.authorizeUploadMount(ctx, subject, record); err != nil {
+	mount, err := s.authorizeUploadMount(ctx, subject, record)
+	if err != nil {
 		return err
 	}
+	record.Mount = mount
 	if err := s.claimUpload(ctx, record.ID); err != nil {
 		return err
 	}
@@ -346,7 +391,7 @@ func (s *Service) Rename(ctx context.Context, subject access.Subject, source acc
 	if entry, statErr := s.files.Stat(toFilesMount(src), cleaned); statErr == nil {
 		result.ObjectFingerprint = entry.ObjectFingerprint
 	}
-	if err := s.invalidatePath(ctx, source, src.RelativePath); err != nil {
+	if err := s.invalidatePath(ctx, src.ID, src.StorageRelativePath); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -366,7 +411,7 @@ func (s *Service) RenameSecure(ctx context.Context, subject access.Subject, sour
 		return MutationResult{}, err
 	}
 	result := MutationResult{RelativePath: cleaned}
-	if _, err := s.fileOps.Rename(ctx, toFilesMount(src), source.SpaceID, source.MountID, src.RelativePath, cleaned, auditWriter); err != nil {
+	if _, err := s.fileOps.Rename(ctx, toStorageFilesMount(src), src.ID, src.StorageRelativePath, storagePathFor(src, subject.AccountID, cleaned), auditWriter); err != nil {
 		return MutationResult{}, mapMutationError(err)
 	}
 	if entry, statErr := s.files.Stat(toFilesMount(src), cleaned); statErr == nil {
@@ -408,7 +453,7 @@ func (s *Service) Copy(ctx context.Context, subject access.Subject, source, dest
 	}
 	created, err := s.files.CopyAcrossMounts(toFilesMount(src), toFilesMount(dest), src.RelativePath, dest.RelativePath)
 	if err != nil {
-		return MutationResult{}, mapMutationError(err)
+		return MutationResult{RelativePath: created}, mapMutationError(err)
 	}
 	result := MutationResult{RelativePath: created}
 	if entry, statErr := s.files.Stat(toFilesMount(dest), created); statErr == nil {
@@ -435,7 +480,7 @@ func (s *Service) CrossMountCopy(ctx context.Context, subject access.Subject, so
 	}
 	created, err := s.files.CopyAcrossMounts(toFilesMount(src), toFilesMount(dest), src.RelativePath, dest.RelativePath)
 	if err != nil {
-		return MutationResult{}, mapMutationError(err)
+		return MutationResult{RelativePath: created}, mapMutationError(err)
 	}
 	result := MutationResult{RelativePath: created}
 	if entry, statErr := s.files.Stat(toFilesMount(dest), created); statErr == nil {
@@ -456,22 +501,20 @@ func (s *Service) Move(ctx context.Context, subject access.Subject, source, dest
 		created, err = s.files.MoveAcrossMounts(toFilesMount(src), toFilesMount(dest), src.RelativePath, dest.RelativePath)
 	}
 	if err != nil {
-		return MutationResult{}, mapMutationError(err)
+		return MutationResult{RelativePath: created}, mapMutationError(err)
 	}
 	result := MutationResult{RelativePath: created}
 	if entry, statErr := s.files.Stat(toFilesMount(dest), created); statErr == nil {
 		result.ObjectFingerprint = entry.ObjectFingerprint
 	}
-	if err := s.invalidatePath(ctx, source, src.RelativePath); err != nil {
+	if err := s.invalidatePath(ctx, src.ID, src.StorageRelativePath); err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
-// MoveSecure behaves like Move but, for the same-mount case, durably
-// journals the move via fileops when a Coordinator is configured. Cross-mount
-// moves fall back to the legacy path: same-mount journaling does not cover
-// them, and the dedicated cross-mount coordinator is out of scope here.
+// MoveSecure behaves like Move but durably journals both same-mount and
+// cross-mount moves when a Coordinator is configured.
 func (s *Service) MoveSecure(ctx context.Context, subject access.Subject, source, destination access.Locator, auditWriter fileops.AuditWriter) (MutationResult, error) {
 	if s.fileOps == nil {
 		return s.Move(ctx, subject, source, destination)
@@ -481,9 +524,26 @@ func (s *Service) MoveSecure(ctx context.Context, subject access.Subject, source
 		return MutationResult{}, err
 	}
 	if src.ID != dest.ID {
-		return s.Move(ctx, subject, source, destination)
+		createdStorage, moveErr := s.fileOps.MoveAcrossMounts(ctx, toStorageFilesMount(src), toStorageFilesMount(dest),
+			src.ID, dest.ID, src.StorageRelativePath, dest.StorageRelativePath, auditWriter)
+		created, pathErr := clientPathFor(dest, subject.AccountID, createdStorage)
+		if pathErr != nil && moveErr == nil {
+			moveErr = pathErr
+		}
+		result := MutationResult{RelativePath: created}
+		if moveErr != nil {
+			return result, mapMutationError(moveErr)
+		}
+		if entry, statErr := s.files.Stat(toFilesMount(dest), created); statErr == nil {
+			result.ObjectFingerprint = entry.ObjectFingerprint
+		}
+		return result, nil
 	}
-	created, err := s.fileOps.Move(ctx, toFilesMount(src), source.SpaceID, source.MountID, src.RelativePath, dest.RelativePath, auditWriter)
+	createdStorage, err := s.fileOps.Move(ctx, toStorageFilesMount(src), src.ID, src.StorageRelativePath, dest.StorageRelativePath, auditWriter)
+	created, pathErr := clientPathFor(dest, subject.AccountID, createdStorage)
+	if pathErr != nil && err == nil {
+		err = pathErr
+	}
 	if err != nil {
 		return MutationResult{}, mapMutationError(err)
 	}
@@ -526,14 +586,43 @@ func (s *Service) CrossMountMove(ctx context.Context, subject access.Subject, so
 	}
 	created, err := s.files.MoveAcrossMounts(toFilesMount(src), toFilesMount(dest), src.RelativePath, dest.RelativePath)
 	if err != nil {
-		return MutationResult{}, mapMutationError(err)
+		return MutationResult{RelativePath: created}, mapMutationError(err)
 	}
 	result := MutationResult{RelativePath: created}
 	if entry, statErr := s.files.Stat(toFilesMount(dest), created); statErr == nil {
 		result.ObjectFingerprint = entry.ObjectFingerprint
 	}
-	if err := s.invalidatePath(ctx, source, src.RelativePath); err != nil {
+	if err := s.invalidatePath(ctx, src.ID, src.StorageRelativePath); err != nil {
 		return result, err
+	}
+	return result, nil
+}
+
+// CrossMountMoveSecure is the REST-compatible cross-mount entry point backed
+// by the durable file-operation coordinator when configured.
+func (s *Service) CrossMountMoveSecure(ctx context.Context, subject access.Subject, source, destination access.Locator, auditWriter fileops.AuditWriter) (MutationResult, error) {
+	if s.fileOps == nil {
+		return s.CrossMountMove(ctx, subject, source, destination)
+	}
+	src, dest, err := s.prepareMove(ctx, subject, source, destination)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	if src.ID == dest.ID {
+		return MutationResult{}, ErrCrossMountSameMount
+	}
+	createdStorage, err := s.fileOps.MoveAcrossMounts(ctx, toStorageFilesMount(src), toStorageFilesMount(dest),
+		src.ID, dest.ID, src.StorageRelativePath, dest.StorageRelativePath, auditWriter)
+	created, pathErr := clientPathFor(dest, subject.AccountID, createdStorage)
+	if pathErr != nil && err == nil {
+		err = pathErr
+	}
+	result := MutationResult{RelativePath: created}
+	if err != nil {
+		return result, mapMutationError(err)
+	}
+	if entry, statErr := s.files.Stat(toFilesMount(dest), created); statErr == nil {
+		result.ObjectFingerprint = entry.ObjectFingerprint
 	}
 	return result, nil
 }
@@ -543,7 +632,7 @@ func (s *Service) authorizeMutationSource(ctx context.Context, subject access.Su
 		return access.AuthorizedMount{}, err
 	}
 	return s.guard.Authorize(ctx, access.CheckRequest{Subject: subject, Scope: scope, Locator: locator,
-		RequiredPermission: domain.SpacePermissionEditor, Write: true})
+		RequiredPermission: domain.ContentPermissionEditor, Write: true})
 }
 
 func (s *Service) authorizeReadSource(ctx context.Context, subject access.Subject, locator access.Locator, scope aitoken.Scope) (access.AuthorizedMount, error) {
@@ -551,7 +640,7 @@ func (s *Service) authorizeReadSource(ctx context.Context, subject access.Subjec
 		return access.AuthorizedMount{}, err
 	}
 	return s.guard.Authorize(ctx, access.CheckRequest{Subject: subject, Scope: scope, Locator: locator,
-		RequiredPermission: domain.SpacePermissionViewer})
+		RequiredPermission: domain.ContentPermissionViewer})
 }
 
 func (s *Service) authorizeWriteParent(ctx context.Context, subject access.Subject, locator access.Locator, scope aitoken.Scope) (access.AuthorizedMount, error) {
@@ -560,8 +649,8 @@ func (s *Service) authorizeWriteParent(ctx context.Context, subject access.Subje
 		return access.AuthorizedMount{}, ErrInvalidInput
 	}
 	return s.guard.Authorize(ctx, access.CheckRequest{Subject: subject, Scope: scope,
-		Locator:            access.Locator{SpaceID: locator.SpaceID, MountID: locator.MountID, Path: parent},
-		RequiredPermission: domain.SpacePermissionEditor, Write: true})
+		Locator:            access.Locator{Source: locator.Source, MountID: locator.MountID, Path: parent},
+		RequiredPermission: domain.ContentPermissionEditor, Write: true})
 }
 
 func (s *Service) authorizeDestinationParent(ctx context.Context, subject access.Subject, source access.Locator, destination string, scope aitoken.Scope) (access.AuthorizedMount, error) {
@@ -570,13 +659,13 @@ func (s *Service) authorizeDestinationParent(ctx context.Context, subject access
 		return access.AuthorizedMount{}, ErrInvalidInput
 	}
 	return s.guard.Authorize(ctx, access.CheckRequest{Subject: subject, Scope: scope,
-		Locator:            access.Locator{SpaceID: source.SpaceID, MountID: source.MountID, Path: path.Dir(cleaned)},
-		RequiredPermission: domain.SpacePermissionEditor, Write: true})
+		Locator:            access.Locator{Source: source.Source, MountID: source.MountID, Path: path.Dir(cleaned)},
+		RequiredPermission: domain.ContentPermissionEditor, Write: true})
 }
 
 func (s *Service) authorizeDestinationDir(ctx context.Context, subject access.Subject, locator access.Locator, scope aitoken.Scope) (access.AuthorizedMount, error) {
 	return s.guard.Authorize(ctx, access.CheckRequest{Subject: subject, Scope: scope, Locator: locator,
-		RequiredPermission: domain.SpacePermissionEditor, Write: true})
+		RequiredPermission: domain.ContentPermissionEditor, Write: true})
 }
 
 func (s *Service) loadUpload(ctx context.Context, subject access.Subject, uploadID string) (uploadRecord, error) {
@@ -589,30 +678,42 @@ func (s *Service) loadUpload(ctx context.Context, subject access.Subject, upload
 	}
 	var record uploadRecord
 	var expires string
-	var identity, kind string
+	var purpose domain.MountPurpose
 	// The credential_generation check fails an in-flight upload closed the
 	// same way an expired lease does: if the account's credential epoch was
 	// bumped since the upload started (password reset, security event,
 	// ...), the session simply stops resolving instead of letting a stale
 	// upload continue writing into the mount.
 	err := s.db.QueryRowContext(ctx, `
-SELECT u.id, u.account_id, u.space_id, u.mount_id, u.target_relative_path,
-       u.declared_size, u.part_size, u.temp_dir, u.expires_at,
-       m.root_path, m.kind, m.mode, COALESCE(m.mount_identity_json, '')
+	SELECT u.id, u.account_id, u.mount_id, u.target_relative_path,
+	       u.declared_size, u.part_size, u.temp_dir, u.expires_at, COALESCE(u.expected_target_identity, ''),
+       m.purpose
 FROM upload_sessions u
-JOIN mounts m ON m.id = u.mount_id AND m.space_id = u.space_id
+JOIN mounts m ON m.id = u.mount_id
 WHERE u.id = ? AND u.account_id = ? AND u.status = 'active'
   AND u.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
-`, uploadID, subject.AccountID).Scan(&record.ID, &record.AccountID, &record.SpaceID, &record.MountID,
-		&record.TargetPath, &record.ExpectedSize, &record.PartSize, &record.TempDir, &expires,
-		&record.Mount.Root, &kind, &record.Mount.Mode, &identity)
+`, uploadID, subject.AccountID).Scan(&record.ID, &record.AccountID, &record.MountID,
+		&record.StorageTargetPath, &record.ExpectedSize, &record.PartSize, &record.TempDir, &expires, &record.ExpectedTargetFingerprint, &purpose)
 	if errors.Is(err, sql.ErrNoRows) {
 		return uploadRecord{}, ErrUploadNotFound
 	}
 	if err != nil {
 		return uploadRecord{}, err
 	}
-	record.Mount.ID, record.Mount.SpaceID, record.Mount.Kind, record.Mount.IdentityJSON = record.MountID, record.SpaceID, kind, identity
+	switch purpose {
+	case domain.MountPurposePersonalDefault:
+		record.Source = contentref.SourcePersonal
+		prefix := subject.AccountID + "/"
+		if !strings.HasPrefix(record.StorageTargetPath, prefix) {
+			return uploadRecord{}, ErrUploadNotFound
+		}
+		record.TargetPath = strings.TrimPrefix(record.StorageTargetPath, prefix)
+	case domain.MountPurposeCommon:
+		record.Source = contentref.SourceCommonMount
+		record.TargetPath = record.StorageTargetPath
+	default:
+		return uploadRecord{}, ErrUploadNotFound
+	}
 	record.ExpiresAt, err = parseMemberTime(expires)
 	if err != nil {
 		return uploadRecord{}, ErrUploadConflict
@@ -624,29 +725,56 @@ WHERE u.id = ? AND u.account_id = ? AND u.status = 'active'
 	return record, nil
 }
 
-func (s *Service) authorizeUploadMount(ctx context.Context, subject access.Subject, record uploadRecord) error {
+func (s *Service) authorizeUploadMount(ctx context.Context, subject access.Subject, record uploadRecord) (access.AuthorizedMount, error) {
 	parent := path.Dir(record.TargetPath)
 	if parent == "." {
 		parent = "."
 	}
-	_, err := s.guard.Authorize(ctx, access.CheckRequest{Subject: subject, Scope: aitoken.ScopeUploadsCreate,
-		Locator:            access.Locator{SpaceID: record.SpaceID, MountID: record.MountID, Path: parent},
-		RequiredPermission: domain.SpacePermissionEditor, Write: true})
-	return err
+	return s.guard.Authorize(ctx, access.CheckRequest{Subject: subject, Scope: aitoken.ScopeUploadsCreate,
+		Locator:            access.Locator{Source: record.Source, MountID: commonMountID(record.Source, record.MountID), Path: parent},
+		RequiredPermission: domain.ContentPermissionEditor, Write: true})
 }
 
 func (s *Service) newTransferService(mount access.AuthorizedMount) (*transfer.Service, error) {
 	return transfer.NewService(transfer.Options{MountRoot: mount.Root, TempRoot: filepathJoin(mount.Root, storage.ReservedNamespace, "tmp", "uploads")})
 }
 
-func (s *Service) invalidatePath(ctx context.Context, locator access.Locator, relativePath string) error {
+func (s *Service) invalidatePath(ctx context.Context, mountID, storageRelativePath string) error {
 	if s.shares == nil {
 		return nil
 	}
-	if err := s.shares.RevokePath(ctx, locator.SpaceID, locator.MountID, relativePath); err != nil {
+	if err := s.shares.RevokePath(ctx, mountID, storageRelativePath); err != nil {
 		return fmt.Errorf("%w: %v", ErrShareInvalidation, err)
 	}
 	return nil
+}
+
+func storagePathFor(mount access.AuthorizedMount, accountID, clientPath string) string {
+	if mount.Source == contentref.SourcePersonal {
+		return path.Join(accountID, clientPath)
+	}
+	return clientPath
+}
+
+func commonMountID(source contentref.Source, mountID string) string {
+	if source == contentref.SourceCommonMount {
+		return mountID
+	}
+	return ""
+}
+
+func clientPathFor(mount access.AuthorizedMount, accountID, storagePath string) (string, error) {
+	if mount.Source != contentref.SourcePersonal {
+		return storagePath, nil
+	}
+	prefix := accountID + "/"
+	if storagePath == accountID {
+		return ".", nil
+	}
+	if !strings.HasPrefix(storagePath, prefix) {
+		return "", ErrMutationConflict
+	}
+	return strings.TrimPrefix(storagePath, prefix), nil
 }
 
 func cleanMutationPath(value string) (string, error) {
@@ -683,6 +811,8 @@ func mapTransferError(err error) error {
 		return errors.Join(ErrUploadConflict, err)
 	case errors.Is(err, transfer.ErrChecksumMismatch):
 		return ErrChecksumMismatch
+	case errors.Is(err, transfer.ErrTargetChanged):
+		return ErrMutationConflict
 	default:
 		return err
 	}

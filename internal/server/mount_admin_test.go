@@ -14,6 +14,7 @@ import (
 )
 
 func TestAdminMountRenameAndDelete(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)
 	ctx := context.Background()
@@ -119,6 +120,7 @@ VALUES ('ce1', 'space-admin', 'mnt-keep', 'keep.txt', 'keep.txt', 'file', 'text'
 }
 
 func TestAdminMountDeleteRejectsDataDeletion(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	ctx := context.Background()
@@ -194,6 +196,7 @@ VALUES ('mnt-wipe', 'space-wipe', 'temp', ?, 'managed', 'read_write', 0, 'active
 }
 
 func TestAdminMountReverifyReportsNotWritable(t *testing.T) {
+	skipLegacySpaceRESTTest(t)
 	db, handler := newAPITestServer(t)
 	admin, _ := createAPITestAccounts(t, db)
 	root := createTestSpaceAndMount(t, db, "space-reverify", "mnt-reverify", admin.ID, "read_write")
