@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -88,6 +90,172 @@ func TestOpenSQLiteRejectsMigrationNameMismatch(t *testing.T) {
 	}
 }
 
+func TestOpenSQLiteRejectsExistingDatabaseWithoutMigrationHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unmanaged-schema.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE existing_business_table (id INTEGER PRIMARY KEY)`); err != nil {
+		db.Close()
+		t.Fatalf("seed existing schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw sqlite: %v", err)
+	}
+	if _, err := OpenSQLite(context.Background(), SQLiteOptions{Path: path, BusyTimeout: time.Second}); err == nil {
+		t.Fatal("OpenSQLite() accepted an existing schema without migration history")
+	}
+}
+
+func TestOpenSQLitePreflightsOfflineMigrationBeforeConfiguringLiveDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "offline-preflight.db")
+	testFS := fstest.MapFS{
+		"migrations/001_one.sql":     {Data: []byte(`CREATE TABLE one (id INTEGER PRIMARY KEY)`)},
+		"migrations/002_online.sql":  {Data: []byte(`CREATE TABLE online_probe (id INTEGER PRIMARY KEY)`)},
+		"migrations/003_offline.sql": {Data: []byte(`CREATE TABLE offline_probe (id INTEGER PRIMARY KEY)`)},
+	}
+	catalog := []migrationDescriptor{
+		{Version: 1, Name: "001_one.sql", Class: migrationOnlineSafe},
+		{Version: 2, Name: "002_online.sql", Class: migrationOnlineSafe},
+		{Version: 3, Name: "003_offline.sql", Class: migrationOfflineRequired},
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	if _, err := raw.Exec(`
+CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE one (id INTEGER PRIMARY KEY);
+INSERT INTO schema_migrations(version, name) VALUES (1, '001_one.sql');
+`); err != nil {
+		raw.Close()
+		t.Fatalf("seed existing database: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw sqlite: %v", err)
+	}
+
+	_, err = openSQLiteWithMigrationSet(context.Background(), SQLiteOptions{Path: path, BusyTimeout: time.Second}, testFS, catalog, migrationApplyOnlineSafe)
+	if !errors.Is(err, ErrOfflineMigrationRequired) {
+		t.Fatalf("openSQLiteWithMigrationSet() error = %v, want ErrOfflineMigrationRequired", err)
+	}
+
+	raw, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("reopen raw sqlite: %v", err)
+	}
+	defer raw.Close()
+	var journalMode string
+	if err := raw.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatalf("query journal mode: %v", err)
+	}
+	if journalMode != "delete" {
+		t.Fatalf("journal mode = %q, want delete; configure ran before offline preflight", journalMode)
+	}
+	if _, err := os.Stat(path + "-wal"); !os.IsNotExist(err) {
+		t.Fatalf("WAL sidecar exists before migration authorization, stat error = %v", err)
+	}
+	for _, table := range []string{"online_probe", "offline_probe"} {
+		var count int
+		if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+			t.Fatalf("query table %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("table %s exists before offline preflight approval", table)
+		}
+	}
+}
+
+func TestOpenSQLiteValidatedReadonlyDoesNotApplyPendingMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "validated-readonly.db")
+	seedSQLiteAtMigration(t, path, 11)
+
+	db, err := OpenSQLiteValidatedReadonly(context.Background(), path)
+	if err != nil {
+		t.Fatalf("OpenSQLiteValidatedReadonly() error = %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close validated readonly database: %v", err)
+	}
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("reopen raw sqlite: %v", err)
+	}
+	defer raw.Close()
+	var count int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('upload_sessions') WHERE name = 'expected_target_identity'`).Scan(&count); err != nil {
+		t.Fatalf("query pending migration column: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("pending migration column count = %d, want 0", count)
+	}
+	var version int
+	if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatalf("query schema version: %v", err)
+	}
+	if version != 11 {
+		t.Fatalf("schema version = %d, want 11", version)
+	}
+}
+
+func TestOpenSQLiteValidatedReadonlyRejectsFreshDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fresh-readonly.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("create empty sqlite file: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close empty sqlite file: %v", err)
+	}
+
+	if _, err := OpenSQLiteValidatedReadonly(context.Background(), path); err == nil {
+		t.Fatal("OpenSQLiteValidatedReadonly() accepted a fresh database")
+	}
+}
+
+func TestPackagePrivateOfflineMigrationOpenerAppliesPendingMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "offline-staging.db")
+	seedSQLiteAtMigration(t, path, 11)
+
+	db, err := openSQLiteForOfflineMigration(context.Background(), SQLiteOptions{Path: path, BusyTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("openSQLiteForOfflineMigration() error = %v", err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('upload_sessions') WHERE name = 'expected_target_identity'`).Scan(&count); err != nil {
+		t.Fatalf("query migrated column: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("migrated column count = %d, want 1", count)
+	}
+	var name string
+	if err := db.SQL().QueryRow(`SELECT name FROM schema_migrations WHERE version = 12`).Scan(&name); err != nil {
+		t.Fatalf("query migration 012: %v", err)
+	}
+	if name != "012_upload_target_identity.sql" {
+		t.Fatalf("migration 012 name = %q", name)
+	}
+}
+
+func TestApplyOfflineMigrationsToStagingRejectsLiveAndWrongDirectory(t *testing.T) {
+	root := t.TempDir()
+	live := filepath.Join(root, "omnora.db")
+	if err := os.WriteFile(live, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, staging := range []string{
+		live,
+		filepath.Join(t.TempDir(), "omnora.db.offline-migration-test.db"),
+		filepath.Join(root, "arbitrary.db"),
+	} {
+		if _, err := ApplyOfflineMigrationsToStaging(context.Background(), live, staging); err == nil {
+			t.Fatalf("ApplyOfflineMigrationsToStaging(%q) succeeded", staging)
+		}
+	}
+}
 
 func TestOpenSQLiteAppliesMigrationsAndWAL(t *testing.T) {
 	db, err := OpenSQLite(context.Background(), SQLiteOptions{
@@ -107,7 +275,7 @@ func TestOpenSQLiteAppliesMigrationsAndWAL(t *testing.T) {
 		t.Fatalf("journal_mode = %q, want wal", journalMode)
 	}
 
-	for _, table := range []string{"accounts", "spaces", "mounts", "audit_events", "route_groups", "mcp_confirmations", "mcp_transfer_tickets"} {
+	for _, table := range []string{"accounts", "mounts", "personal_directories", "mount_grants", "folder_collaborations", "audit_events", "route_groups", "mcp_confirmations", "mcp_transfer_tickets"} {
 		var count int
 		err := db.SQL().QueryRow("SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&count)
 		if err != nil {
@@ -125,7 +293,7 @@ func TestOpenSQLiteAppliesMigrationsAndWAL(t *testing.T) {
 		},
 		"mcp_transfer_tickets": {
 			"id", "public_id", "secret_hash", "account_id", "ai_token_id", "operation", "required_scope",
-			"space_id", "mount_id", "relative_path", "object_fingerprint", "upload_id", "max_bytes",
+			"mount_id", "relative_path", "object_fingerprint", "upload_id", "max_bytes",
 			"consumed_bytes", "status", "created_at", "expires_at", "closed_at",
 		},
 	} {
@@ -146,6 +314,27 @@ func TestOpenSQLiteAppliesMigrationsAndWAL(t *testing.T) {
 		if primaryKey != 1 {
 			t.Fatalf("column %s.id pk = %d, want 1", table, primaryKey)
 		}
+	}
+
+	for _, removed := range []string{"spaces", "space_members"} {
+		var count int
+		if err := db.SQL().QueryRow("SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = ?", removed).Scan(&count); err != nil {
+			t.Fatalf("query removed table %s: %v", removed, err)
+		}
+		if count != 0 {
+			t.Fatalf("removed table %s still exists", removed)
+		}
+	}
+	var spaceColumns int
+	if err := db.SQL().QueryRow(`
+SELECT COUNT(*)
+FROM sqlite_schema AS schema_object, pragma_table_info(schema_object.name) AS column_info
+WHERE schema_object.type = 'table' AND column_info.name LIKE '%space_id%'
+`).Scan(&spaceColumns); err != nil {
+		t.Fatalf("query removed space_id columns: %v", err)
+	}
+	if spaceColumns != 0 {
+		t.Fatalf("space_id column count = %d, want 0", spaceColumns)
 	}
 
 	for _, index := range []struct {

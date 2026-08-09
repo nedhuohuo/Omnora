@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"omnora/internal/offlinemigration"
 	"omnora/internal/recovery"
 	"omnora/internal/store"
 )
@@ -34,6 +35,8 @@ func main() {
 		runFinalize(os.Args[2:])
 	case "status":
 		runStatus(os.Args[2:])
+	case "migrate-account-mount":
+		runMigrateAccountMount(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -55,6 +58,7 @@ Usage:
   omnora-recovery restore  --db <path> --backup <path> --request <id> [--journal <path>] [--actor <id>]
   omnora-recovery finalize --db <path> --request <id> [--journal <path>] [--actor <id>]
   omnora-recovery status   --db <path> [--journal <path>]
+  omnora-recovery migrate-account-mount --db <path> --config <dir> --data <dir> --managed <dir> --rollback-root <dir>
 
 restore   validates the backup snapshot, stages and forward-migrates a copy
           of it, snapshots the current live database for rollback, atomically
@@ -69,7 +73,54 @@ finalize  completes the restore by moving recovery_control from
           has confirmed the instance is ready to resume normal service.
 
 status    prints the current recovery_control row.
+
+migrate-account-mount
+          runs the fail-closed offline schema coordinator. It creates and
+          validates a complete rollback bundle before migrating a same-directory
+          staging database and atomically replacing the live database. When this
+          binary has no pending offline migration, it exits safely without writes.
 `)
+}
+
+func runMigrateAccountMount(args []string) {
+	fs := flag.NewFlagSet("migrate-account-mount", flag.ExitOnError)
+	dbPath := fs.String("db", "", "path to the live SQLite database")
+	configDir := fs.String("config", "", "persistent config directory")
+	dataDir := fs.String("data", "", "persistent data directory")
+	managedDir := fs.String("managed", "", "persistent managed-content directory")
+	rollbackRoot := fs.String("rollback-root", "", "non-overlapping directory for complete rollback bundles")
+	_ = fs.Parse(args)
+	request := offlinemigration.MigrationRequest{
+		DBPath: *dbPath, ConfigDir: *configDir, DataDir: *dataDir,
+		ManagedDir: *managedDir, RollbackRoot: *rollbackRoot,
+	}
+	if strings.TrimSpace(request.DBPath) == "" || strings.TrimSpace(request.ConfigDir) == "" ||
+		strings.TrimSpace(request.DataDir) == "" || strings.TrimSpace(request.ManagedDir) == "" ||
+		strings.TrimSpace(request.RollbackRoot) == "" {
+		fmt.Fprintln(os.Stderr, "omnora-recovery migrate-account-mount: --db, --config, --data, --managed, and --rollback-root are required")
+		fs.Usage()
+		os.Exit(2)
+	}
+	result, err := doMigrateAccountMount(context.Background(), request)
+	if err != nil {
+		fatal("offline account-mount migration", err)
+	}
+	if result.NoPendingMigration {
+		fmt.Println("no pending offline account-mount migration; database was not replaced")
+		return
+	}
+	fmt.Printf("offline account-mount migration complete: target=%d/%s rollback_bundle=%s journal=%s\n",
+		result.Target.Version, result.Target.Name, result.RollbackBundlePath, result.JournalPath)
+}
+
+func doMigrateAccountMount(ctx context.Context, request offlinemigration.MigrationRequest) (offlinemigration.MigrationResult, error) {
+	return offlinemigration.NewMigrationCoordinator().Run(ctx, accountMountMigrationRequest(request))
+}
+
+func accountMountMigrationRequest(request offlinemigration.MigrationRequest) offlinemigration.MigrationRequest {
+	mandatory := offlinemigration.AccountMountInvariants()
+	request.Invariants = append(mandatory, request.Invariants...)
+	return request
 }
 
 func runRestore(args []string) {

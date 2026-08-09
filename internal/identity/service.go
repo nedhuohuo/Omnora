@@ -8,19 +8,22 @@ import (
 	"time"
 
 	"omnora/internal/domain"
+	"omnora/internal/personalstorage"
 )
 
 const timestampLayout = time.RFC3339Nano
 
 type Service struct {
-	db     *sql.DB
-	clock  func() time.Time
-	hasher PasswordHasher
+	db              *sql.DB
+	clock           func() time.Time
+	hasher          PasswordHasher
+	personalStorage *personalstorage.Service
 }
 
 type Options struct {
 	Clock              func() time.Time
 	PasswordIterations int
+	ManagedDir         string
 }
 
 func New(db *sql.DB, opts Options) *Service {
@@ -29,9 +32,10 @@ func New(db *sql.DB, opts Options) *Service {
 		clock = time.Now
 	}
 	return &Service{
-		db:     db,
-		clock:  clock,
-		hasher: PasswordHasher{Iterations: opts.PasswordIterations},
+		db:              db,
+		clock:           clock,
+		hasher:          PasswordHasher{Iterations: opts.PasswordIterations},
+		personalStorage: personalstorage.New(db, opts.ManagedDir),
 	}
 }
 
@@ -94,23 +98,26 @@ WHERE identity_initialization.consumed_at IS NULL
 	return InitializationSecret{Token: token, TokenHash: tokenHash, ExpiresAt: expiresAt}, nil
 }
 
-func (s *Service) Initialize(ctx context.Context, req InitializationRequest) (AccountWithPersonalSpace, error) {
+func (s *Service) Initialize(ctx context.Context, req InitializationRequest) (AccountWithPersonalDirectory, error) {
 	return s.InitializeSecure(ctx, req, nil)
 }
 
-func (s *Service) InitializeSecure(ctx context.Context, req InitializationRequest, auditWriter AccountAuditWriter) (AccountWithPersonalSpace, error) {
+func (s *Service) InitializeSecure(ctx context.Context, req InitializationRequest, auditWriter AccountAuditWriter) (AccountWithPersonalDirectory, error) {
+	if _, err := s.personalStorage.EnsureDefaultMount(ctx); err != nil {
+		return AccountWithPersonalDirectory{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	defer tx.Rollback()
 
 	var accountCount int
 	if err := tx.QueryRowContext(ctx, "SELECT COUNT(1) FROM accounts WHERE status <> 'deleted'").Scan(&accountCount); err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	if accountCount != 0 {
-		return AccountWithPersonalSpace{}, ErrAlreadyInitialized
+		return AccountWithPersonalDirectory{}, ErrAlreadyInitialized
 	}
 
 	var tokenHash, expiresAtText string
@@ -121,18 +128,18 @@ FROM identity_initialization
 WHERE id = 1
 `).Scan(&tokenHash, &expiresAtText, &consumedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return AccountWithPersonalSpace{}, ErrInitializationUnavailable
+		return AccountWithPersonalDirectory{}, ErrInitializationUnavailable
 	}
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	expiresAt, err := parseTime(expiresAtText)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	now := s.now()
 	if consumedAt.Valid || !now.Before(expiresAt) || !secretMatches(req.Token, tokenHash) {
-		return AccountWithPersonalSpace{}, ErrInvalidCredential
+		return AccountWithPersonalDirectory{}, ErrInvalidCredential
 	}
 
 	result, err := tx.ExecContext(ctx, `
@@ -142,60 +149,69 @@ WHERE id = 1
   AND consumed_at IS NULL
 `, formatTime(now))
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	if rows != 1 {
-		return AccountWithPersonalSpace{}, ErrInitializationUnavailable
+		return AccountWithPersonalDirectory{}, ErrInitializationUnavailable
 	}
 
-	created, err := s.createAccountTx(ctx, tx, CreateAccountRequest{
+	prepared, err := s.createAccountTx(ctx, tx, CreateAccountRequest{
 		Email:       req.Email,
 		DisplayName: req.DisplayName,
 		Password:    req.Password,
 		Role:        domain.AccountRoleAdmin,
 	})
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
+	created := prepared.result
 	if auditWriter != nil {
 		if err := auditWriter(ctx, tx, created); err != nil {
-			return AccountWithPersonalSpace{}, err
+			prepared.cleanup()
+			return AccountWithPersonalDirectory{}, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return AccountWithPersonalSpace{}, err
+		prepared.cleanup()
+		return AccountWithPersonalDirectory{}, err
 	}
 	return created, nil
 }
 
-func (s *Service) CreateAccount(ctx context.Context, req CreateAccountRequest) (AccountWithPersonalSpace, error) {
+func (s *Service) CreateAccount(ctx context.Context, req CreateAccountRequest) (AccountWithPersonalDirectory, error) {
 	return s.CreateAccountSecure(ctx, req, nil)
 }
 
-// CreateAccountSecure creates the account and personal space and optionally
+// CreateAccountSecure creates the account and personal directory and optionally
 // records its success audit event before committing the same transaction.
-func (s *Service) CreateAccountSecure(ctx context.Context, req CreateAccountRequest, auditWriter AccountAuditWriter) (AccountWithPersonalSpace, error) {
+func (s *Service) CreateAccountSecure(ctx context.Context, req CreateAccountRequest, auditWriter AccountAuditWriter) (AccountWithPersonalDirectory, error) {
+	if _, err := s.personalStorage.EnsureDefaultMount(ctx); err != nil {
+		return AccountWithPersonalDirectory{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	defer tx.Rollback()
 
-	created, err := s.createAccountTx(ctx, tx, req)
+	prepared, err := s.createAccountTx(ctx, tx, req)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
+	created := prepared.result
 	if auditWriter != nil {
 		if err := auditWriter(ctx, tx, created); err != nil {
-			return AccountWithPersonalSpace{}, err
+			prepared.cleanup()
+			return AccountWithPersonalDirectory{}, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return AccountWithPersonalSpace{}, err
+		prepared.cleanup()
+		return AccountWithPersonalDirectory{}, err
 	}
 	return created, nil
 }
@@ -429,31 +445,36 @@ func (s *Service) VerifyPassword(password, encodedHash string) bool {
 	return s.hasher.Verify(password, encodedHash)
 }
 
-func (s *Service) createAccountTx(ctx context.Context, tx *sql.Tx, req CreateAccountRequest) (AccountWithPersonalSpace, error) {
+type preparedAccount struct {
+	result  AccountWithPersonalDirectory
+	cleanup func()
+}
+
+func (s *Service) createAccountTx(ctx context.Context, tx *sql.Tx, req CreateAccountRequest) (preparedAccount, error) {
 	email, err := normalizeEmail(req.Email)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 	displayName, err := normalizeDisplayName(req.DisplayName)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 	if err := validatePassword(req.Password); err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 	role, err := normalizeRole(req.Role)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 	passwordHash, err := s.hasher.Hash(req.Password)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 
 	now := s.now()
 	accountID, err := newID("acct")
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 	account := Account{
 		ID:           accountID,
@@ -471,40 +492,23 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `, account.ID, account.Email, account.DisplayName, account.Role, account.Status, account.PasswordHash, formatTime(now), formatTime(now))
 	if err != nil {
 		if isUniqueViolation(err) {
-			return AccountWithPersonalSpace{}, ErrAccountExists
+			return preparedAccount{}, ErrAccountExists
 		}
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
-
-	spaceID, err := newID("spc")
+	directory, cleanup, err := s.personalStorage.ProvisionAccount(ctx, tx, account.ID)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
-	space := Space{
-		ID:             spaceID,
-		Kind:           "personal",
-		Name:           displayName + "'s space",
-		OwnerAccountID: account.ID,
-		Status:         "active",
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO spaces (id, kind, name, owner_account_id, status, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-`, space.ID, space.Kind, space.Name, space.OwnerAccountID, space.Status, formatTime(now), formatTime(now))
-	if err != nil {
-		return AccountWithPersonalSpace{}, err
-	}
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO space_members (space_id, account_id, permission, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?)
-`, space.ID, account.ID, domain.SpacePermissionManager, formatTime(now), formatTime(now))
-	if err != nil {
-		return AccountWithPersonalSpace{}, err
-	}
-
-	return AccountWithPersonalSpace{Account: account, PersonalSpace: space}, nil
+	return preparedAccount{
+		result: AccountWithPersonalDirectory{
+			Account: account,
+			PersonalDirectory: PersonalDirectory{
+				AccountID: directory.AccountID, RelativePath: directory.RelativePath, State: directory.State,
+			},
+		},
+		cleanup: cleanup,
+	}, nil
 }
 
 func (s *Service) now() time.Time {

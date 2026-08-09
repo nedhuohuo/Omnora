@@ -11,6 +11,7 @@ import (
 
 	"omnora/internal/config"
 	"omnora/internal/identity"
+	"omnora/internal/offlinemigration"
 	"omnora/internal/recovery"
 	"omnora/internal/server"
 	"omnora/internal/store"
@@ -47,6 +48,13 @@ func main() {
 	var db *store.DB
 	recoveryOnly := false
 	if cfg.Database.Path != "" {
+		databaseLock, err := acquireDatabaseLifecycle(cfg.Database.Path)
+		if err != nil {
+			slog.Error("database offline-migration gate failed", "error", err)
+			os.Exit(1)
+		}
+		defer databaseLock.Close()
+
 		db, err = store.OpenSQLite(ctx, store.SQLiteOptions{
 			Path:        cfg.Database.Path,
 			BusyTimeout: cfg.Database.BusyTimeout,
@@ -142,4 +150,16 @@ func main() {
 		slog.Error("http shutdown failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+func acquireDatabaseLifecycle(dbPath string) (*offlinemigration.Lock, error) {
+	lock, err := offlinemigration.AcquireLock(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := offlinemigration.EnsureNoUnfinishedJournal(dbPath); err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	return lock, nil
 }

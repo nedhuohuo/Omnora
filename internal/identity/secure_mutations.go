@@ -38,7 +38,7 @@ type TxAuditWriter func(context.Context, *sql.Tx) error
 
 // AccountAuditWriter receives the account created inside the open transaction
 // so callers can bind the audit target without querying through *sql.DB.
-type AccountAuditWriter func(context.Context, *sql.Tx, AccountWithPersonalSpace) error
+type AccountAuditWriter func(context.Context, *sql.Tx, AccountWithPersonalDirectory) error
 
 // LoadCredentialMaterial reads the current credential state for an active
 // account. Callers must perform password/TOTP verification before starting a
@@ -285,6 +285,54 @@ WHERE share_id IN (SELECT id FROM shares WHERE creator_account_id = ?)
 		if err := auditWriter(ctx, tx); err != nil {
 			return err
 		}
+	}
+	return tx.Commit()
+}
+
+// DeleteAccountSecure irreversibly tombstones an identity while preserving its
+// personal directory binding and every physical file. All account-scoped
+// credentials and live content grants are revoked in the same DB transaction.
+func (s *Service) DeleteAccountSecure(ctx context.Context, accountID string, auditWriter TxAuditWriter) error {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return fieldError("account_id", "is required")
+	}
+	now := formatTime(s.now())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var status string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM accounts WHERE id = ?`, accountID).Scan(&status); err != nil || status == "deleted" {
+		return ErrInvalidCredential
+	}
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE identity_sessions SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL`, []any{now, accountID}},
+		{`UPDATE browser_sessions SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL`, []any{now, accountID}},
+		{`UPDATE ai_tokens SET revoked_at = ?, updated_at = ? WHERE account_id = ? AND revoked_at IS NULL`, []any{now, now, accountID}},
+		{`UPDATE shares SET revoked_at = ?, invalidated_at = ?, invalidated_reason = 'account_deleted', generation = generation + 1, updated_at = ? WHERE creator_account_id = ? AND revoked_at IS NULL`, []any{now, now, now, accountID}},
+		{`UPDATE share_sessions SET revoked_at = ? WHERE share_id IN (SELECT id FROM shares WHERE creator_account_id = ?) AND revoked_at IS NULL`, []any{now, accountID}},
+		{`UPDATE share_download_tickets SET status = 'canceled', canceled_at = ? WHERE share_id IN (SELECT id FROM shares WHERE creator_account_id = ?) AND status IN ('issued', 'streaming')`, []any{now, accountID}},
+		{`UPDATE folder_collaborations SET revoked_at = ?, updated_at = ? WHERE (owner_account_id = ? OR recipient_account_id = ?) AND revoked_at IS NULL`, []any{now, now, accountID, accountID}},
+		{`DELETE FROM mount_grants WHERE account_id = ?`, []any{accountID}},
+		{`UPDATE upload_sessions SET status = 'canceled', canceled_at = ? WHERE account_id = ? AND status = 'active'`, []any{now, accountID}},
+		{`UPDATE mcp_transfer_tickets SET status = 'canceled', closed_at = ? WHERE account_id = ? AND status = 'active'`, []any{now, accountID}},
+	} {
+		if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			return err
+		}
+	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if err := s.personalStorage.RetainAccount(ctx, tx, accountID); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

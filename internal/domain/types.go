@@ -64,9 +64,59 @@ const (
 	SpacePermissionManager SpacePermission = "manager"
 )
 
+type ContentPermission string
+
+const (
+	ContentPermissionNone   ContentPermission = ""
+	ContentPermissionViewer ContentPermission = "viewer"
+	ContentPermissionEditor ContentPermission = "editor"
+)
+
+func (p ContentPermission) Valid() bool {
+	return p == ContentPermissionViewer || p == ContentPermissionEditor
+}
+
+func (p ContentPermission) Allows(required ContentPermission) bool {
+	if !p.Valid() || !required.Valid() {
+		return false
+	}
+	return p == ContentPermissionEditor || required == ContentPermissionViewer
+}
+
 type MountMode string
 
 const (
 	MountModeReadOnly  MountMode = "read_only"
 	MountModeReadWrite MountMode = "read_write"
 )
+
+type MountPurpose string
+
+const (
+	MountPurposePersonalDefault MountPurpose = "personal_default"
+	MountPurposeCommon          MountPurpose = "common"
+)
+
+type StorageKind string
+
+const (
+	StorageKindManaged  StorageKind = "managed"
+	StorageKindExternal StorageKind = "external"
+)
+
+type MountGovernance string
+
+const (
+	MountGovernanceSystem     MountGovernance = "system"
+	MountGovernanceNormal     MountGovernance = "normal"
+	MountGovernanceRestricted MountGovernance = "restricted"
+)
+
+func ValidMountClassification(purpose MountPurpose, storageKind StorageKind, governance MountGovernance) bool {
+	return purpose == MountPurposePersonalDefault &&
+		storageKind == StorageKindManaged &&
+		governance == MountGovernanceSystem ||
+		purpose == MountPurposeCommon &&
+			storageKind == StorageKindExternal &&
+			(governance == MountGovernanceNormal || governance == MountGovernanceRestricted)
+}

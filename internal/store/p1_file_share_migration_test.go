@@ -142,7 +142,7 @@ VALUES ('upload-legacy', 'acct-upload', 'space-upload', 'mount-upload', 'file.tx
 	if err := raw.Close(); err != nil {
 		t.Fatalf("close legacy sqlite: %v", err)
 	}
-	db, err := OpenSQLite(context.Background(), SQLiteOptions{Path: path, BusyTimeout: time.Second})
+	db, err := openSQLiteThroughMigration(t, SQLiteOptions{Path: path, BusyTimeout: time.Second}, 8)
 	if err != nil {
 		t.Fatalf("OpenSQLite() error = %v", err)
 	}

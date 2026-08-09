@@ -5,12 +5,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"omnora/internal/domain"
+	"omnora/internal/personalstorage"
 
 	_ "modernc.org/sqlite"
 )
@@ -60,12 +63,38 @@ CREATE TABLE space_members (
 	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (space_id, account_id)
 );
+
+CREATE TABLE mounts (
+	id TEXT PRIMARY KEY,
+	display_name TEXT NOT NULL UNIQUE,
+	root_path TEXT NOT NULL UNIQUE,
+	purpose TEXT NOT NULL CHECK (purpose IN ('personal_default', 'common')),
+	storage_kind TEXT NOT NULL CHECK (storage_kind IN ('managed', 'external')),
+	governance TEXT NOT NULL CHECK (governance IN ('system', 'normal', 'restricted')),
+	mode TEXT NOT NULL CHECK (mode IN ('read_only', 'read_write')),
+	index_enabled INTEGER NOT NULL DEFAULT 0 CHECK (index_enabled IN (0, 1)),
+	status TEXT NOT NULL,
+	mount_identity_json TEXT,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX mounts_single_personal_default_idx
+	ON mounts(purpose) WHERE purpose = 'personal_default';
+
+CREATE TABLE personal_directories (
+	account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE RESTRICT,
+	relative_path TEXT NOT NULL UNIQUE,
+	state TEXT NOT NULL CHECK (state IN ('ready', 'retained')),
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `
 
-func TestInitializeConsumesTokenOnceAndCreatesAdminSpace(t *testing.T) {
+func TestInitializeConsumesTokenOnceAndCreatesAdminPersonalDirectory(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
-	svc := newTestService(db)
+	svc := newTargetTestService(t, db)
 
 	secret, err := svc.PrepareInitialization(ctx, time.Hour)
 	if err != nil {
@@ -96,21 +125,21 @@ func TestInitializeConsumesTokenOnceAndCreatesAdminSpace(t *testing.T) {
 	if !svc.VerifyPassword("CorrectHorse1!", created.Account.PasswordHash) {
 		t.Fatalf("stored password hash did not verify")
 	}
-	if created.PersonalSpace.Kind != "personal" || created.PersonalSpace.OwnerAccountID != created.Account.ID {
-		t.Fatalf("personal space not tied to account: %#v", created.PersonalSpace)
+	if created.PersonalDirectory.AccountID != created.Account.ID || created.PersonalDirectory.RelativePath != created.Account.ID || created.PersonalDirectory.State != "ready" {
+		t.Fatalf("personal directory not tied to account: %#v", created.PersonalDirectory)
 	}
 
-	var permission string
+	var state string
 	err = db.QueryRowContext(ctx, `
-SELECT permission
-FROM space_members
-WHERE account_id = ? AND space_id = ?
-`, created.Account.ID, created.PersonalSpace.ID).Scan(&permission)
+SELECT state
+FROM personal_directories
+WHERE account_id = ? AND relative_path = ?
+`, created.Account.ID, created.Account.ID).Scan(&state)
 	if err != nil {
-		t.Fatalf("query space membership: %v", err)
+		t.Fatalf("query personal directory: %v", err)
 	}
-	if permission != string(domain.SpacePermissionManager) {
-		t.Fatalf("permission = %q, want manager", permission)
+	if state != "ready" {
+		t.Fatalf("state = %q, want ready", state)
 	}
 
 	_, err = svc.Initialize(ctx, InitializationRequest{
@@ -127,7 +156,7 @@ WHERE account_id = ? AND space_id = ?
 func TestInitializeWrongTokenDoesNotConsume(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
-	svc := newTestService(db)
+	svc := newTargetTestService(t, db)
 
 	secret, err := svc.PrepareInitialization(ctx, time.Hour)
 	if err != nil {
@@ -157,7 +186,7 @@ func TestInitializeWrongTokenDoesNotConsume(t *testing.T) {
 func TestConcurrentInitializeAllowsAtMostOneSuccess(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
-	svc := newTestService(db)
+	svc := newTargetTestService(t, db)
 
 	secret, err := svc.PrepareInitialization(ctx, time.Hour)
 	if err != nil {
@@ -208,7 +237,7 @@ func TestConcurrentInitializeAllowsAtMostOneSuccess(t *testing.T) {
 func TestCreateAccountValidationAndDuplicateEmail(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
-	svc := newTestService(db)
+	svc := newTargetTestService(t, db)
 
 	_, err := svc.CreateAccount(ctx, CreateAccountRequest{
 		Email:       "not an email",
@@ -553,7 +582,7 @@ func TestDisabledAccountInvalidatesSession(t *testing.T) {
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 
-	db, err := sql.Open("sqlite", "file:identity-test?mode=memory&cache=shared")
+	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -580,10 +609,30 @@ ALTER TABLE identity_sessions ADD COLUMN credential_generation INTEGER;
 }
 
 func newTestService(db *sql.DB) *Service {
+	managedDir, err := os.MkdirTemp("", "omnora-identity-test-")
+	if err != nil {
+		panic(err)
+	}
+	managedDir, err = filepath.EvalSymlinks(managedDir)
+	if err != nil {
+		panic(err)
+	}
 	return New(db, Options{
 		Clock: func() time.Time {
 			return time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 		},
 		PasswordIterations: 2,
+		ManagedDir:         managedDir,
 	})
+}
+
+func newTargetTestService(t *testing.T, db *sql.DB) *Service {
+	t.Helper()
+	svc := newTestService(db)
+	managedDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.personalStorage = personalstorage.New(db, managedDir)
+	return svc
 }

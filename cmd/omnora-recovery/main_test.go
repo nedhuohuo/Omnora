@@ -4,11 +4,53 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"omnora/internal/offlinemigration"
 	"omnora/internal/recovery"
 	"omnora/internal/store"
 )
+
+func TestAccountMountMigrationRequestAddsMandatoryInvariants(t *testing.T) {
+	request := accountMountMigrationRequest(offlinemigration.MigrationRequest{})
+	if len(request.Invariants) == 0 {
+		t.Fatal("account-mount migration request has no domain invariants")
+	}
+}
+
+func TestDoMigrateAccountMountSafelyExitsWhenProductionHasNoOfflineMigration(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := offlinemigration.MigrationRequest{
+		DBPath: filepath.Join(root, "data", "omnora.db"), ConfigDir: filepath.Join(root, "config"),
+		DataDir: filepath.Join(root, "data"), ManagedDir: filepath.Join(root, "managed"), RollbackRoot: filepath.Join(root, "rollback"),
+	}
+	for _, dir := range []string{request.ConfigDir, request.DataDir, request.ManagedDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".omnora-instance-id"), []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := store.OpenSQLite(context.Background(), store.SQLiteOptions{Path: request.DBPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := doMigrateAccountMount(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.NoPendingMigration {
+		t.Fatalf("result = %#v, want safe no-op", result)
+	}
+}
 
 // TestDoRestoreAndDoFinalizeEndToEnd exercises the full offline recovery
 // path: a live database with a restore request in 'preparing' (as BeginRestore

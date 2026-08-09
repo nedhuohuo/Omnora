@@ -102,7 +102,7 @@ VALUES ('acct-legacy', 'legacy@example.com', 'Legacy', 'admin', 'active', 'hash'
 	if err := raw.Close(); err != nil {
 		t.Fatalf("close legacy sqlite: %v", err)
 	}
-	db, err := OpenSQLite(context.Background(), SQLiteOptions{Path: path, BusyTimeout: time.Second})
+	db, err := openSQLiteThroughMigration(t, SQLiteOptions{Path: path, BusyTimeout: time.Second}, 11)
 	if err != nil {
 		t.Fatalf("OpenSQLite() error = %v", err)
 	}

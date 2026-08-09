@@ -85,7 +85,7 @@ func TestOpenSQLiteBackfillsLegacyAuditResult(t *testing.T) {
 	if err := raw.Close(); err != nil {
 		t.Fatalf("close legacy sqlite: %v", err)
 	}
-	db, err := OpenSQLite(context.Background(), SQLiteOptions{Path: path, BusyTimeout: time.Second})
+	db, err := openSQLiteThroughMigration(t, SQLiteOptions{Path: path, BusyTimeout: time.Second}, 7)
 	if err != nil {
 		t.Fatalf("OpenSQLite() error = %v", err)
 	}

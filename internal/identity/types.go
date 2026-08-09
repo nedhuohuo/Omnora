@@ -96,9 +96,15 @@ type CreateAccountRequest struct {
 	Role        domain.AccountRole
 }
 
-type AccountWithPersonalSpace struct {
-	Account       Account
-	PersonalSpace Space
+type AccountWithPersonalDirectory struct {
+	Account           Account
+	PersonalDirectory PersonalDirectory
+}
+
+type PersonalDirectory struct {
+	AccountID    string `json:"accountId"`
+	RelativePath string `json:"relativePath"`
+	State        string `json:"state"`
 }
 
 type SessionRequest struct {
