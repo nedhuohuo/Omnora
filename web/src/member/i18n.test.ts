@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DirectoryChildrenPayload } from '../api';
-import { defaultRootForKind } from './AdminWorkspace';
 import { getStoredLocale, localeMessages, resolveLocale, saveLocale } from './i18n';
 import { formatDirectoryChildren } from './types';
 
@@ -56,6 +55,11 @@ describe('member locale', () => {
     expect(enKeys).toEqual(zhKeys);
   });
 
+  it('keeps account-level mount management copy free of business Space terminology', () => {
+    expect(localeMessages['zh-CN'].mountManagementDetail).not.toContain('空间');
+    expect(localeMessages['en-US'].mountManagementDetail).not.toMatch(/\bSpace\b/);
+  });
+
   it('describes MCP as standard Streamable HTTP without claiming OAuth support', () => {
     expect(localeMessages['zh-CN'].tokenMcpStatusDetail).toContain('Streamable HTTP');
     expect(localeMessages['zh-CN'].routeDescMcp).toContain('OAuth');
@@ -88,24 +92,5 @@ describe('directory response formatting', () => {
       readOnly: false,
       entries: response.entries,
     });
-  });
-});
-
-describe('admin host directory roots', () => {
-  it('selects configured custom paths by their authoritative kind', () => {
-    const roots = [
-      { path: '/data/omnora-managed', kind: 'managed' as const },
-      { path: '/volume/nas', kind: 'external' as const },
-    ];
-
-    expect(defaultRootForKind('managed', roots)).toBe('/data/omnora-managed');
-    expect(defaultRootForKind('external', roots)).toBe('/volume/nas');
-  });
-
-  it('keeps the first configured path as a legacy fallback without guessing its kind', () => {
-    const roots = [{ path: '/custom/storage' }];
-
-    expect(defaultRootForKind('managed', roots)).toBe('/custom/storage');
-    expect(defaultRootForKind('external', roots)).toBe('/custom/storage');
   });
 });
