@@ -251,10 +251,11 @@ func TestEnabledProductGroupFallbacksStayJSONErrors(t *testing.T) {
 		group      domain.RouteGroup
 		path       string
 		wantStatus int
+		wantCode   string
 	}{
-		{group: domain.RouteGroupREST, path: "/api/v1/unknown", wantStatus: http.StatusNotImplemented},
+		{group: domain.RouteGroupREST, path: "/api/v1/unknown", wantStatus: http.StatusNotFound, wantCode: "not_found"},
 		{group: domain.RouteGroupMCP, path: "/mcp/unknown", wantStatus: http.StatusNotFound},
-		{group: domain.RouteGroupOpenAPI, path: "/openapi/unknown", wantStatus: http.StatusNotImplemented},
+		{group: domain.RouteGroupOpenAPI, path: "/openapi/unknown", wantStatus: http.StatusNotImplemented, wantCode: "not_implemented"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			handler := New(config.Config{Routes: map[domain.RouteGroup]bool{tc.group: true}}, nil)
@@ -277,8 +278,8 @@ func TestEnabledProductGroupFallbacksStayJSONErrors(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 				t.Fatalf("decode error response: %v", err)
 			}
-			if body.Error.Code != "not_implemented" {
-				t.Fatalf("error code = %q, want not_implemented", body.Error.Code)
+			if body.Error.Code != tc.wantCode {
+				t.Fatalf("error code = %q, want %s", body.Error.Code, tc.wantCode)
 			}
 			if strings.Contains(rec.Body.String(), `<div id="root">`) {
 				t.Fatal("product fallback must not return the SPA")

@@ -24,6 +24,7 @@ import (
 	"omnora/internal/httpx"
 	"omnora/internal/memberfiles"
 	"omnora/internal/membershare"
+	"omnora/internal/mountadmin"
 	"omnora/internal/personalstorage"
 	"omnora/internal/ratelimit"
 	"omnora/internal/store"
@@ -46,6 +47,7 @@ type Server struct {
 	memberFiles       *memberfiles.Service
 	memberShares      *membershare.Service
 	personalStorage   *personalstorage.Service
+	mountAdmin        *mountadmin.Service
 	routesMu          sync.RWMutex
 	listeners         *ListenerManager
 	shutdownOnce      sync.Once
@@ -90,6 +92,7 @@ func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 		s.auditRecorder = audit.NewRecorder(db.SQL())
 		s.memberShares = membershare.NewService(db.SQL(), s.guard, membershare.WithAITokenService(s.tokens))
 		s.personalStorage = personalstorage.New(db.SQL(), cfg.Storage.ManagedDir)
+		s.mountAdmin = mountadmin.New(db.SQL(), cfg.Storage.PredeclaredMountRoot)
 		if strings.TrimSpace(cfg.Storage.ManagedDir) != "" {
 			if _, err := s.personalStorage.EnsureDefaultMount(context.Background()); err != nil {
 				s.startupErr = err
@@ -235,7 +238,7 @@ func (s *Server) routes() {
 	s.handleWebGroup(domain.RouteGroupMemberWeb, "/app")
 	s.handleWebGroup(domain.RouteGroupAdminWeb, "/admin")
 	s.handleWebGroup(domain.RouteGroupShare, "/share")
-	s.handleProductGroup(domain.RouteGroupREST, "/api/v1")
+	s.handleRESTFallback()
 	s.mcpRoutes()
 	s.handleProductGroup(domain.RouteGroupOpenAPI, "/openapi")
 	s.mux.Handle("/", s.memberRoot())
@@ -323,6 +326,20 @@ func (s *Server) handleProductGroup(group domain.RouteGroup, routePath string) {
 	}))
 	s.mux.Handle(routePath, handler)
 	s.mux.Handle(routePath+"/", handler)
+}
+
+func (s *Server) handleRESTFallback() {
+	handler := s.gate(domain.RouteGroupREST, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clean := path.Clean(r.URL.Path)
+		if clean == "/api/v1/spaces" || strings.HasPrefix(clean, "/api/v1/spaces/") ||
+			clean == "/api/v1/admin/spaces" || strings.HasPrefix(clean, "/api/v1/admin/spaces/") {
+			httpx.WriteError(w, r, http.StatusGone, "space_api_removed", "Space-scoped REST APIs were removed; use account content sources")
+			return
+		}
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "route was not found")
+	}))
+	s.mux.Handle("/api/v1", handler)
+	s.mux.Handle("/api/v1/", handler)
 }
 
 func (s *Server) gate(group domain.RouteGroup, next http.Handler) http.Handler {

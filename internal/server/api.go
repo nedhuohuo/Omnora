@@ -178,6 +178,18 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("POST /api/v1/admin/backups", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createBackup)))
 	s.mux.Handle("GET /api/v1/admin/recovery", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.recoveryStatus)))
 	s.mux.Handle("POST /api/v1/admin/backups/{backupId}/restore", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.restoreBackup)))
+	s.mux.Handle("GET /api/v1/admin/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.adminListMounts)))
+	s.mux.Handle("POST /api/v1/admin/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.adminCreateMount)))
+	s.mux.Handle("PATCH /api/v1/admin/mounts/{mountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.adminUpdateMount)))
+	s.mux.Handle("DELETE /api/v1/admin/mounts/{mountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.adminDeleteMount)))
+	s.mux.Handle("POST /api/v1/admin/mounts/{mountId}/reverify", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.adminReverifyMount)))
+	s.mux.Handle("GET /api/v1/admin/mounts/{mountId}/grants", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.adminListMountGrants)))
+	s.mux.Handle("PUT /api/v1/admin/mounts/{mountId}/grants/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.adminPutMountGrant)))
+	s.mux.Handle("DELETE /api/v1/admin/mounts/{mountId}/grants/{accountId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.adminDeleteMountGrant)))
+	s.mux.Handle("GET /api/v1/admin/host-directories", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAdminHostDirectories)))
+	s.mux.Handle("GET /api/v1/admin/index-jobs", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listIndexJobs)))
+	s.mux.Handle("POST /api/v1/admin/index-jobs", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.enqueueIndexJob)))
+	s.mux.Handle("POST /api/v1/admin/index-jobs/{jobId}/run", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.runIndexJob)))
 	s.registerOpenAPIRoutes()
 	s.mux.Handle("GET /api/v1/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAITokens)))
 	s.mux.Handle("POST /api/v1/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createAIToken)))
@@ -356,6 +368,11 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	if !s.recordAuditMutation(w, r, "login", "account", account.ID, "{}") {
 		return
 	}
+	initialAdminID, err := s.initialAdminID(r.Context())
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	if s.httpPolicy != nil {
 		if _, err := SetCSRFCookie(w, s.cookieNames(r).CSRF, isSecureRequest(r), time.Now().UTC()); err != nil {
 			writeDBError(w, r, err)
@@ -367,6 +384,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		"userId":                   account.ID,
 		"expiresAt":                issued.Session.ExpiresAt,
 		"isAdmin":                  s.isAdmin(r, account.ID),
+		"isInitialAdmin":           initialAdminID == account.ID,
 		"purpose":                  issued.Session.Purpose,
 		"requiresTotpEnrollment":   issued.Session.Purpose == identity.SessionPurposeTOTPEnrollment,
 		"passwordResetRecommended": account.PasswordResetRequired,
@@ -379,10 +397,16 @@ func (s *Server) currentSession(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 		return
 	}
+	initialAdminID, err := s.initialAdminID(r.Context())
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"userId":                 session.AccountID,
 		"expiresAt":              session.ExpiresAt,
 		"isAdmin":                s.isAdmin(r, session.AccountID),
+		"isInitialAdmin":         initialAdminID == session.AccountID,
 		"purpose":                session.Purpose,
 		"requiresTotpEnrollment": session.Purpose == identity.SessionPurposeTOTPEnrollment,
 	})

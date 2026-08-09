@@ -24,13 +24,14 @@ func TestSessionResponsesIncludeCurrentAdminStatus(t *testing.T) {
 	admin, member := createAPITestAccounts(t, db)
 
 	for _, tc := range []struct {
-		name      string
-		email     string
-		wantAdmin bool
-		wantID    string
+		name             string
+		email            string
+		wantAdmin        bool
+		wantInitialAdmin bool
+		wantID           string
 	}{
-		{name: "admin", email: admin.Email, wantAdmin: true, wantID: admin.ID},
-		{name: "member", email: member.Email, wantAdmin: false, wantID: member.ID},
+		{name: "admin", email: admin.Email, wantAdmin: true, wantInitialAdmin: true, wantID: admin.ID},
+		{name: "member", email: member.Email, wantAdmin: false, wantInitialAdmin: false, wantID: member.ID},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body, err := json.Marshal(map[string]string{"login": tc.email, "password": apiTestPassword})
@@ -49,7 +50,7 @@ func TestSessionResponsesIncludeCurrentAdminStatus(t *testing.T) {
 			if err := json.Unmarshal(loginRec.Body.Bytes(), &loginResponse); err != nil {
 				t.Fatalf("decode login response: %v", err)
 			}
-			if loginResponse.UserID != tc.wantID || loginResponse.IsAdmin != tc.wantAdmin || loginResponse.ExpiresAt.IsZero() {
+			if loginResponse.UserID != tc.wantID || loginResponse.IsAdmin != tc.wantAdmin || loginResponse.IsInitialAdmin != tc.wantInitialAdmin || loginResponse.ExpiresAt.IsZero() {
 				t.Fatalf("login response = %#v", loginResponse)
 			}
 			cookies := loginRec.Result().Cookies()
@@ -68,7 +69,7 @@ func TestSessionResponsesIncludeCurrentAdminStatus(t *testing.T) {
 			if err := json.Unmarshal(currentRec.Body.Bytes(), &currentResponse); err != nil {
 				t.Fatalf("decode current session response: %v", err)
 			}
-			if currentResponse.UserID != tc.wantID || currentResponse.IsAdmin != tc.wantAdmin || currentResponse.ExpiresAt.IsZero() {
+			if currentResponse.UserID != tc.wantID || currentResponse.IsAdmin != tc.wantAdmin || currentResponse.IsInitialAdmin != tc.wantInitialAdmin || currentResponse.ExpiresAt.IsZero() {
 				t.Fatalf("current session response = %#v", currentResponse)
 			}
 		})
@@ -490,6 +491,7 @@ type sessionResponse struct {
 	UserID                 string                  `json:"userId"`
 	ExpiresAt              time.Time               `json:"expiresAt"`
 	IsAdmin                bool                    `json:"isAdmin"`
+	IsInitialAdmin         bool                    `json:"isInitialAdmin"`
 	Purpose                identity.SessionPurpose `json:"purpose"`
 	RequiresTOTPEnrollment bool                    `json:"requiresTotpEnrollment"`
 }

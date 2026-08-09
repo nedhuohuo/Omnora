@@ -71,10 +71,10 @@ type UpdateRequest struct {
 }
 
 type Deletion struct {
-	ID          string
-	Deleted     bool
-	DeleteData  bool
-	DataDeleted bool
+	ID          string `json:"id"`
+	Deleted     bool   `json:"deleted"`
+	DeleteData  bool   `json:"deleteData"`
+	DataDeleted bool   `json:"dataDeleted"`
 }
 
 type AuditEvent struct {
