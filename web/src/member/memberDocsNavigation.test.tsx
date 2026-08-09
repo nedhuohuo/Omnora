@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import MemberDocsNavigation from './MemberDocsNavigation';
+import MemberDocsPanel from './MemberDocsPanel';
 
 describe('member docs navigation', () => {
   it('renders semantic desktop directory and mobile select', () => {
@@ -25,5 +26,15 @@ describe('member docs navigation', () => {
     expect(html).toContain('REST contract');
     expect(html).toContain('aria-current="page"');
     expect(html).toContain('value="openapi"');
+  });
+
+  it('keeps MCP as the default docs section without the legacy segmented control', () => {
+    const html = renderToStaticMarkup(<MemberDocsPanel locale="zh-CN" />);
+
+    expect(html).toContain('MCP 标准服务');
+    expect(html).toContain('MCP 接入');
+    expect(html).toContain('REST 契约');
+    expect(html).toContain('项目问答');
+    expect(html).not.toContain('member-admin-subnav');
   });
 });
