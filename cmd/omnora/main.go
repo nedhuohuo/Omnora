@@ -100,11 +100,10 @@ func main() {
 				slog.Error("session purpose rollout failed", "error", err)
 				os.Exit(1)
 			}
-			if cfg.Initialization.Token != "" {
-				if _, err := identityService.PrepareInitializationWithToken(ctx, cfg.Initialization.Token, cfg.Initialization.TTL); err != nil && !errors.Is(err, identity.ErrAlreadyInitialized) {
-					slog.Error("prepare initialization token", "error", err)
-					os.Exit(1)
-				}
+			initializationLogger := newLogger(cfg.Log.Format, slog.LevelWarn, os.Stdout)
+			if err := prepareInitialization(ctx, identityService, cfg.Initialization, initializationLogger); err != nil {
+				slog.Error("prepare initialization token", "error", err)
+				os.Exit(1)
 			}
 		}
 	}
@@ -149,6 +148,24 @@ func main() {
 	if err := listeners.Shutdown(shutdownCtx); err != nil {
 		slog.Error("http shutdown failed", "error", err)
 		os.Exit(1)
+	}
+}
+
+func prepareInitialization(ctx context.Context, svc *identity.Service, cfg config.InitializationConfig, logger *slog.Logger) error {
+	if cfg.Token == "" {
+		return nil
+	}
+	_, err := svc.PrepareInitializationWithToken(ctx, cfg.Token, cfg.TTL)
+	switch {
+	case err == nil:
+		if cfg.LogToken {
+			logger.Warn("initialization token logging explicitly enabled", "initialization_token", cfg.Token)
+		}
+		return nil
+	case errors.Is(err, identity.ErrAlreadyInitialized):
+		return nil
+	default:
+		return err
 	}
 }
 
