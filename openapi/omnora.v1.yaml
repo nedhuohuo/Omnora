@@ -644,27 +644,32 @@ paths:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminMount"
         "401":
           $ref: "#/components/responses/Unauthorized"
     post:
       tags: [Admin]
-      summary: Register a predeclared container path as an account-level mount.
-      description: Only system administrators can register mounts; unverifiable identity returns mount_identity_unverifiable.
+      summary: Register a predeclared external directory as an account-level mount.
+      description: Only system administrators can register external mounts. A restricted mount is visible and governable only by the initial administrator.
       x-omnora-route-group: rest
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CreateMountRequest"
+              $ref: "#/components/schemas/CreateAdminMountRequest"
       responses:
         "201":
           description: Mount registered.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Mount"
+                $ref: "#/components/schemas/AdminMount"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -675,6 +680,79 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /admin/mounts/{mountId}/grants:
+    get:
+      tags: [Admin]
+      summary: List account grants for one governable common mount.
+      x-omnora-route-group: rest
+      parameters:
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/OpaqueId"
+      responses:
+        "200":
+          description: Mount grants.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MountGrantList"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/mounts/{mountId}/grants/{accountId}:
+    put:
+      tags: [Admin]
+      summary: Set one viewer/editor grant for a common mount.
+      x-omnora-route-group: rest
+      parameters:
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/OpaqueId"
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/OpaqueId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutMountGrantRequest"
+      responses:
+        "200":
+          description: Grant set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MountGrant"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Admin]
+      summary: Revoke one mount grant.
+      x-omnora-route-group: rest
+      parameters:
+        - name: mountId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/OpaqueId"
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/OpaqueId"
+      responses:
+        "204":
+          description: Grant revoked.
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /admin/index-jobs:
     get:
       tags: [Admin]
@@ -1307,7 +1385,13 @@ paths:
           in: path
           required: true
           schema:
-            type: string
+            $ref: "#/components/schemas/OpaqueId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteAdminMountRequest"
       responses:
         "200":
           description: Mount registration deleted; host data was retained.
@@ -1323,58 +1407,48 @@ paths:
           $ref: "#/components/responses/NotFound"
     patch:
       tags: [Admin]
-      summary: Implemented endpoint PATCH /admin/mounts/mountId.
+      summary: Update mutable account-level mount settings.
       x-omnora-route-group: rest
       parameters:
         - name: mountId
           in: path
           required: true
           schema:
-            type: string
+            $ref: "#/components/schemas/OpaqueId"
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: "#/components/schemas/UpdateAdminMountRequest"
       responses:
         "200":
-          description: Success.
+          description: Updated mount.
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/AdminMount"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
   /admin/mounts/{mountId}/reverify:
     post:
       tags: [Admin]
-      summary: Implemented endpoint POST /admin/mounts/mountId/reverify.
+      summary: Re-verify mount identity and restore an unavailable mount.
       x-omnora-route-group: rest
       parameters:
         - name: mountId
           in: path
           required: true
           schema:
-            type: string
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: true
+            $ref: "#/components/schemas/OpaqueId"
       responses:
         "200":
-          description: Success.
+          description: Re-verified mount.
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/AdminMount"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -1981,6 +2055,105 @@ components:
         kind:
           type: string
           enum: [managed, external]
+    DeleteAdminMountRequest:
+      type: object
+      additionalProperties: false
+      required: [displayName]
+      properties:
+        displayName:
+          type: string
+    AdminMount:
+      type: object
+      required: [id, displayName, rootPath, governance, mode, indexEnabled, shareEnabled, status, grantCount]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        displayName:
+          type: string
+        rootPath:
+          type: string
+        governance:
+          type: string
+          enum: [normal, restricted]
+        mode:
+          type: string
+          enum: [read_only, read_write]
+        indexEnabled:
+          type: boolean
+        shareEnabled:
+          type: boolean
+        status:
+          type: string
+          enum: [pending, active, disabled, unavailable]
+        grantCount:
+          type: integer
+          minimum: 0
+    CreateAdminMountRequest:
+      type: object
+      additionalProperties: false
+      required: [displayName, rootPath, governance, mode, indexEnabled, grants]
+      properties:
+        displayName:
+          type: string
+        rootPath:
+          type: string
+        governance:
+          type: string
+          enum: [normal, restricted]
+        mode:
+          type: string
+          enum: [read_only, read_write]
+        indexEnabled:
+          type: boolean
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/PutMountGrantRequest"
+    UpdateAdminMountRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        displayName:
+          type: string
+        mode:
+          type: string
+          enum: [read_only, read_write]
+        indexEnabled:
+          type: boolean
+        shareEnabled:
+          type: boolean
+    MountGrant:
+      type: object
+      required: [accountId, email, displayName, permission]
+      properties:
+        accountId:
+          $ref: "#/components/schemas/OpaqueId"
+        email:
+          type: string
+          format: email
+        displayName:
+          type: string
+        permission:
+          type: string
+          enum: [viewer, editor]
+    PutMountGrantRequest:
+      type: object
+      additionalProperties: false
+      required: [permission]
+      properties:
+        accountId:
+          $ref: "#/components/schemas/OpaqueId"
+        permission:
+          type: string
+          enum: [viewer, editor]
+    MountGrantList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MountGrant"
     Mount:
       type: object
       required: [id, name, mode, indexMode, status]

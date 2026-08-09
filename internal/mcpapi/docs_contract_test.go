@@ -135,6 +135,34 @@ func TestOpenAPIUsesAccountMountTokenContract(t *testing.T) {
 	}
 }
 
+func TestOpenAPIDefinesAdminMountGovernanceContract(t *testing.T) {
+	root := docsRoot(t)
+	source := readContractDoc(t, root, "openapi/omnora.v1.yaml")
+	embedded := readContractDoc(t, root, "internal/server/openapi_assets/omnora.v1.yaml")
+	if source != embedded {
+		t.Fatal("embedded OpenAPI differs from source")
+	}
+	for _, required := range []string{
+		"  /admin/mounts/{mountId}/grants:",
+		"  /admin/mounts/{mountId}/grants/{accountId}:",
+		"grantCount:", "shareEnabled:",
+		"enum: [normal, restricted]", "enum: [viewer, editor]",
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("OpenAPI missing %q", required)
+		}
+	}
+	if !strings.Contains(source, "    AdminMount:") {
+		t.Error("OpenAPI is missing AdminMount schema")
+	}
+	if !strings.Contains(source, "    CreateAdminMountRequest:") {
+		t.Error("OpenAPI is missing CreateAdminMountRequest schema")
+	}
+	if strings.Contains(source, "spaceId") || strings.Contains(source, "space_id") {
+		t.Error("OpenAPI still contains Space selectors")
+	}
+}
+
 func TestOpenAPIRemovesLegacySpaceBusinessContract(t *testing.T) {
 	root := docsRoot(t)
 	for _, name := range []string{
