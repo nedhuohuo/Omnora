@@ -8,7 +8,7 @@
 
 账号—挂载模型已经通过[账号、挂载与内容授权设计](2026-08-08-account-mount-access-design.md)冻结，并由离线迁移 013 建立 `mounts`、`personal_directories`、`mount_grants` 与 `folder_collaborations`。然而当前实现只完成了部分迁移：
 
-- 成员端已经新增“我的文件 / 共用存储 / 协作”读取入口，但旧 Space 文件工作区仍保留在同一应用中；
+- 成员端已经新增“个人空间 / 团队空间 / 协作”读取入口，但旧 Space 文件工作区仍保留在同一应用中；
 - 管理端导航隐藏了 Space 页面，但挂载表单仍要求选择 Space；
 - 前端继续请求旧 `/api/v1/admin/spaces`、`/api/v1/admin/mounts` 和 `/api/v1/admin/host-directories`；
 - 后端已取消这些旧路由的注册，请求最终落入 `/api/v1/` 占位处理器并返回 HTTP 501；
@@ -46,13 +46,13 @@
 
 | 区域 | 当前残留 | 目标阶段 |
 | --- | --- | --- |
-| `web/src/member/MemberFilesApp.tsx` | `spaces/activeSpaceId` 状态、个人/团队空间分支、Space 权限判断、Space 版文件操作、跨挂载目标空间 | 阶段 2 |
-| `MemberSpaceDirectory.tsx`、`spaceNavigation.ts` | 个人空间、团队空间和 Space 角色目录 | 阶段 2 删除 |
+| `web/src/member/MemberFilesApp.tsx` | `spaces/activeSpaceId` 状态、旧 Space 权限判断、Space 版文件操作、跨挂载目标空间；“个人空间 / 团队空间”展示名保留 | 阶段 2 |
+| `MemberSpaceDirectory.tsx`、`spaceNavigation.ts` | 旧 Space 角色目录和 Space 坐标导航 | 阶段 2 删除 |
 | `web/src/api.ts` | `/spaces/{spaceId}` 浏览、下载、搜索、写入、回收站和跨挂载操作 | 阶段 2 |
 | `web/src/member/MemberSharesPanel.tsx` | 分享创建和选择器仍要求 `spaceId`，位置显示 `spaceName` | 阶段 3 |
 | `web/src/member/uploadQueue.ts` | 上传恢复键包含 `spaceId` | 阶段 2 |
 | `web/src/member/MemberDocsPanel.tsx` | 展示已移除的 Space REST 路径 | 阶段 2/4 |
-| `web/src/member/i18n.ts` | 个人空间、团队空间、当前空间搜索、目标空间等文案 | 阶段 2/4 |
+| `web/src/member/i18n.ts` | 当前空间、目标空间、Space 坐标等旧业务文案；“个人空间 / 团队空间”作为成员端展示名保留 | 阶段 2/4 |
 
 ### 3.3 服务端与协议
 
@@ -65,7 +65,7 @@
 | OpenAPI | 当前主规范已基本使用新资源，但管理挂载 schema 仍过于宽松，需冻结准确字段 | 阶段 1 |
 | REST catch-all | 所有未注册 `/api/v1/*` 请求返回通用 501 | 阶段 1 |
 
-CSS 中的 `--space-*` 设计令牌和表示布局间距的 `.member-space-*` 历史类名不属于业务 Space 实体。`personal_files.go`、MCP 输入校验和离线迁移不变量中对 `spaceId/space_id` 的显式拒绝或残留检测也是目标安全守卫，不得作为残留误删。最终零残留检查只禁止有效业务模型、成功 API 和用户文案中的 Space，不机械删除 spacing 令牌或负向兼容拒绝；历史业务类名可在相关组件删除时自然清理。
+CSS 中的 `--space-*` 设计令牌和表示布局间距的 `.member-space-*` 历史类名不属于业务 Space 实体。`personal_files.go`、MCP 输入校验和离线迁移不变量中对 `spaceId/space_id` 的显式拒绝或残留检测也是目标安全守卫，不得作为残留误删。成员端可见的“个人空间 / 团队空间”是产品展示名，也不属于旧 Space 实体。最终零残留检查只禁止有效业务模型、成功 API 和用户文案中的旧 Space 坐标、空间成员、空间 ACL、空间目录等概念，不机械删除 spacing 令牌、负向兼容拒绝或已确认的展示名；历史业务类名可在相关组件删除时自然清理。
 
 ## 4. 阶段 1 范围
 

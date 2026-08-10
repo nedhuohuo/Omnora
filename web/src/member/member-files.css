@@ -5,18 +5,22 @@
 .member-search button, .member-account, .member-toolbar button, .member-nav, .member-space, .member-mount, .member-view-toggle button, .member-file-grid button, .member-file-grid a, .member-transfers button, .member-modal button { border: 0; background: none; color: inherit; cursor: pointer; }
 .member-search button { display: inline-flex; align-items: center; padding: 0 var(--control-padding-inline); border-left: 1px solid var(--border-strong); color: var(--accent-text); font-size: var(--text-md); }
 .member-top-actions { display: flex; align-items: center; gap: var(--space-3); margin-left: auto; }
+.member-top-actions button { min-height: var(--control-sm); padding: 0 var(--control-padding-inline-compact); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-muted); cursor: pointer; font-size: var(--text-md); }
+.member-top-actions button:hover { border-color: var(--accent); color: var(--accent-text); background: var(--surface-hover); }
 .member-account { min-height: var(--control-sm); padding: 0 var(--control-padding-inline-compact); color: var(--text-muted); font-size: var(--text-md); }
 .member-layout { display: grid; grid-template-columns: 228px minmax(0, 1fr); min-height: calc(100vh - var(--shell-topbar-height)); }
 .member-sidebar { padding: var(--space-4) var(--space-3); border-right: 1px solid var(--border); background: var(--surface-2); }
-.member-nav, .member-space, .member-mount { display: flex; width: 100%; align-items: center; justify-content: space-between; min-height: var(--control-md); padding: 0 var(--control-padding-inline); border-radius: var(--radius-sm); color: var(--text-muted); text-align: left; font-size: var(--text-lg); }
+.member-sidebar nav, .member-admin-nav { display: grid; gap: var(--space-1); }
+.member-nav, .member-space, .member-mount { display: flex; width: 100%; align-items: center; justify-content: space-between; min-height: var(--control-md); padding: 0 var(--control-padding-inline); border-radius: var(--radius-sm); color: var(--text-muted); text-align: left; font-size: var(--text-md); }
 .member-nav.active, .member-space.selected, .member-mount.selected { background: var(--accent-soft); color: var(--accent-text); font-weight: 700; }
 .member-nav:disabled { opacity: 0.45; cursor: not-allowed; }
 .member-admin-subnav { display: inline-flex; max-width: 100%; overflow-x: auto; margin: 0 0 var(--space-4); padding: var(--layout-micro); border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-2); }
 .member-admin-subnav button { flex: 0 0 auto; min-height: var(--control-sm); padding: 0 var(--control-padding-inline-compact); border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--text-soft); cursor: pointer; font-size: var(--text-md); white-space: nowrap; }
 .member-admin-subnav button:hover { color: var(--accent-text); }
 .member-admin-subnav button[aria-selected="true"] { background: var(--surface); color: var(--text-strong); font-weight: 700; box-shadow: var(--shadow-sm); }
-.member-sidebar-section { margin-top: var(--space-6); }
-.member-sidebar-section p { margin: 0 var(--layout-inline) var(--layout-inline); color: var(--text-faint); font-size: var(--text-xs); }
+.member-sidebar-section { margin-top: var(--space-5); }
+.member-sidebar-section:first-child { margin-top: 0; }
+.member-sidebar-section p { margin: 0 var(--layout-inline) var(--layout-inline); color: var(--text-faint); font-size: var(--text-xs); font-weight: 600; }
 .member-space small, .member-mount small { color: var(--text-faint); font-size: var(--text-xs); font-weight: 500; }
 .member-content { min-width: 0; padding: var(--layout-page-block-start) var(--layout-page-inline) var(--layout-content-bottom-reserve); }
 .member-heading { display: flex; justify-content: space-between; gap: var(--layout-component); align-items: flex-start; margin: var(--layout-group) 0 var(--layout-section-compact); }.member-heading h1 { margin: 0; color: var(--text-strong); font-size: var(--text-4xl); }.member-heading p { margin: var(--layout-inline) 0 0; color: var(--text-soft); font-size: var(--text-md); line-height: 1.5; }.member-admin-subnav + .member-admin-workspace > .member-heading { margin-top: 0; }
