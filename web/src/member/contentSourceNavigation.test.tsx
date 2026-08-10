@@ -5,6 +5,7 @@ import type { MemberContentSourcesPayload } from '../api';
 import MemberContentSourceDirectory from './MemberContentSourceDirectory';
 import MemberCollaborationsDirectory from './MemberCollaborationsDirectory';
 import MemberContentNavigation from './MemberContentNavigation';
+import MemberSharesPanel from './MemberSharesPanel';
 
 const sources: MemberContentSourcesPayload = {
   personal: { source: 'personal', label: '我的文件' },
@@ -45,6 +46,17 @@ describe('member content source directory', () => {
 
     expect(html).not.toContain('defaultMountId');
     expect(html).not.toContain('默认挂载');
+  });
+});
+
+describe('member sharing and collaboration panel', () => {
+  it('separates public links from incoming collaborations without Space labels', () => {
+    const html = renderToStaticMarkup(<MemberSharesPanel locale="zh-CN" />);
+    expect(html).toContain('我的分享');
+    expect(html).toContain('共享给我');
+    expect(html).toContain('发出的协作');
+    expect(html).not.toContain('空间');
+    expect(html).not.toContain('spaceId');
   });
 });
 

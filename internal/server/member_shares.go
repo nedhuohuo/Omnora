@@ -16,9 +16,10 @@ type shareRecordDTO struct {
 	ID                 string `json:"id"`
 	PublicID           string `json:"publicId"`
 	Fragment           string `json:"fragment,omitempty"`
-	SpaceID            string `json:"spaceId"`
-	SpaceName          string `json:"spaceName,omitempty"`
-	MountID            string `json:"mountId"`
+	Source             string `json:"source"`
+	MountID            string `json:"mountId,omitempty"`
+	SpaceID            string `json:"-"`
+	SpaceName          string `json:"-"`
 	MountName          string `json:"mountName,omitempty"`
 	RelativePath       string `json:"relativePath"`
 	CreatorEmail       string `json:"creatorEmail,omitempty"`
@@ -34,8 +35,8 @@ type shareRecordDTO struct {
 	Status             string `json:"status"`
 }
 
-// listShares returns shares created by the current account, plus shares in
-// any space where the current account is currently a manager.
+// listShares returns shares visible to the current account under account-level
+// content and share governance rules.
 func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 	session, err := s.requireSession(r)
 	if err != nil {
@@ -54,8 +55,8 @@ func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": legacy})
 }
 
-// revokeShare revokes a share if the current account is the creator or a
-// manager of the space the share belongs to.
+// revokeShare revokes a share if the current account is allowed by the
+// account-level share governance service.
 func (s *Server) revokeShare(w http.ResponseWriter, r *http.Request) {
 	session, err := s.requireSession(r)
 	if err != nil {
@@ -81,7 +82,7 @@ func memberShareDTO(item membershare.Share) shareRecordDTO {
 	}
 	result := shareRecordDTO{
 		ID: item.ID, PublicID: item.PublicID,
-		MountID: item.MountID, MountName: item.MountName, RelativePath: item.RelativePath,
+		Source: string(item.Source), MountID: item.MountID, MountName: item.MountName, RelativePath: item.RelativePath,
 		CreatorEmail: item.CreatorEmail, CreatorDisplayName: item.CreatorDisplayName,
 		AllowPreview: item.AllowPreview, AllowDownload: item.AllowDownload,
 		MaxVisits: item.MaxVisits, UsedVisits: int(item.UsedVisits), MaxDownloads: item.MaxDownloads,
@@ -98,7 +99,7 @@ func writeMemberShareError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, membershare.ErrNotFound):
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "share was not found")
 	case errors.Is(err, membershare.ErrForbidden):
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "only the creator or a space manager can revoke this share")
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "the account is not allowed to manage this share")
 	case errors.Is(err, access.ErrForbidden):
 		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "creating shares requires manager permission")
 	case errors.Is(err, membershare.ErrUnauthorized):

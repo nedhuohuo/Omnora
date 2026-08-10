@@ -66,7 +66,7 @@ function shareStatusLabel(status: string | undefined, text: LocaleText) {
 }
 
 function shareLocationLabel(share: SharePayload) {
-  return joinReadableLabels([share.spaceName, share.mountName]);
+  return joinReadableLabels([share.source === 'personal' ? 'Personal files' : '', share.mountName]);
 }
 
 function shareCreatorLabel(share: SharePayload, text: LocaleText) {

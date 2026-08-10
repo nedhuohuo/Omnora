@@ -170,7 +170,10 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("PUT /api/v1/member/uploads/{uploadId}/parts/{partNumber}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.uploadPart)))
 	s.mux.Handle("POST /api/v1/member/uploads/{uploadId}/complete", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.completeUpload)))
 	s.mux.Handle("DELETE /api/v1/member/uploads/{uploadId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.cancelUpload)))
-	s.mux.Handle("GET /api/v1/member/collaborations", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMemberCollaborations)))
+	s.mux.Handle("GET /api/v1/member/collaborations", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMemberCollaborationsV2)))
+	s.mux.Handle("POST /api/v1/member/collaborations", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createMemberCollaboration)))
+	s.mux.Handle("PATCH /api/v1/member/collaborations/{collaborationId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.updateMemberCollaboration)))
+	s.mux.Handle("DELETE /api/v1/member/collaborations/{collaborationId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeMemberCollaboration)))
 	s.mux.Handle("GET /api/v1/account", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.getAccount)))
 	s.mux.Handle("PATCH /api/v1/account/password", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.changeAccountPassword)))
 	s.mux.Handle("GET /api/v1/account/sessions", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAccountSessions)))
@@ -179,6 +182,7 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("GET /api/v1/account/preferences", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.getAccountPreferences)))
 	s.mux.Handle("PUT /api/v1/account/preferences", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putAccountPreferences)))
 	s.mux.Handle("GET /api/v1/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listShares)))
+	s.mux.Handle("POST /api/v1/shares", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createShare)))
 	s.mux.Handle("DELETE /api/v1/shares/{shareId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeShare)))
 	s.mux.Handle("GET /api/v1/share/current", s.gate(domain.RouteGroupShare, http.HandlerFunc(s.shareCurrent)))
 	s.mux.Handle("GET /api/v1/share/children", s.gate(domain.RouteGroupShare, http.HandlerFunc(s.shareChildren)))
@@ -1427,10 +1431,9 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		SpaceID         string `json:"spaceId"`
-		SpaceIDAlt      string `json:"space_id"`
+		Source          string `json:"source"`
 		MountID         string `json:"mountId"`
-		MountIDAlt      string `json:"mount_id"`
+		CollaborationID string `json:"collaborationId"`
 		RelativePath    string `json:"relativePath"`
 		RelativePathAlt string `json:"relative_path"`
 		Password        string `json:"password"`
@@ -1446,14 +1449,9 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.SpaceID == "" {
-		req.SpaceID = req.SpaceIDAlt
-	}
-	if req.MountID == "" {
-		req.MountID = req.MountIDAlt
-	}
-	if req.RelativePath == "" {
-		req.RelativePath = req.RelativePathAlt
+	if strings.TrimSpace(req.Source) == "" {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "source is required")
+		return
 	}
 	if req.MaxVisits == nil {
 		req.MaxVisits = req.MaxVisitsAlt
@@ -1482,8 +1480,12 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		value := int64(*req.MaxDownloads)
 		maxDownloads = &value
 	}
+	locator := access.Locator{Source: contentref.Source(req.Source), MountID: req.MountID, Path: req.RelativePath}
+	if req.Source == string(contentref.SourceCollaboration) {
+		locator.CollaborationID = req.CollaborationID
+	}
 	issued, err := s.memberShares.CreateSecure(r.Context(), access.Subject{AccountID: session.AccountID}, membershare.CreateRequest{
-		Locator:  access.Locator{Source: contentref.SourceCommonMount, MountID: req.MountID, Path: req.RelativePath},
+		Locator:  locator,
 		Password: req.Password, AllowPreview: req.AllowPreview, AllowDownload: req.AllowDownload,
 		MaxVisits: maxVisits, MaxDownloads: maxDownloads, ExpiresAt: expiresAt,
 	}, func(ctx context.Context, tx *sql.Tx, issued membershare.IssuedShare) error {

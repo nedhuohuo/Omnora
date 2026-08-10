@@ -121,7 +121,11 @@ export type MemberContentSourcesPayload = {
 
 export type MemberCollaboration = {
   id: string;
+  source?: 'collaboration';
+  collaborationId?: string;
   displayName?: string;
+  folderName?: string;
+  rootRelativePath?: string;
   path?: string;
   ownerName?: string;
   recipientName?: string;
@@ -139,8 +143,9 @@ export type CreateDirectoryPayload = {
 };
 
 export type CreateSharePayload = {
-  spaceId: string;
-  mountId: string;
+  source: 'personal' | 'common_mount' | 'collaboration';
+  mountId?: string;
+  collaborationId?: string;
   relativePath: string;
   password?: string;
   allowPreview: boolean;
@@ -326,9 +331,8 @@ export type SharePayload = {
   id: string;
   publicId: string;
   fragment?: string;
-  spaceId: string;
-  spaceName?: string;
-  mountId: string;
+  source: 'personal' | 'common_mount';
+  mountId?: string;
   mountName?: string;
   relativePath: string;
   creatorEmail?: string;
@@ -877,6 +881,24 @@ export function emptyMemberTrash(locator: MemberContentLocator, signal?: AbortSi
 export function listMemberCollaborations(direction: 'incoming' | 'outgoing', signal?: AbortSignal) {
   const params = new URLSearchParams({ direction });
   return requestJson<MemberCollaborationsPayload>(`/api/v1/member/collaborations?${params.toString()}`, { signal });
+}
+
+export type CreateMemberCollaborationPayload = {
+  recipientId: string;
+  rootRelativePath: string;
+  permission: 'viewer' | 'editor';
+};
+
+export function createMemberCollaboration(payload: CreateMemberCollaborationPayload, signal?: AbortSignal) {
+  return requestJson<MemberCollaboration>('/api/v1/member/collaborations', { method: 'POST', body: JSON.stringify(payload), signal });
+}
+
+export function updateMemberCollaboration(collaborationId: string, permission: 'viewer' | 'editor', signal?: AbortSignal) {
+  return requestJson<MemberCollaboration>(`/api/v1/member/collaborations/${encodeURIComponent(collaborationId)}`, { method: 'PATCH', body: JSON.stringify({ permission }), signal });
+}
+
+export function deleteMemberCollaboration(collaborationId: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/member/collaborations/${encodeURIComponent(collaborationId)}`, { method: 'DELETE', signal });
 }
 
 export function listSpaces(signal?: AbortSignal) {
