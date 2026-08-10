@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"omnora/internal/config"
 	"omnora/internal/domain"
@@ -211,6 +212,38 @@ VALUES ('restricted-overview', 'Restricted Overview', ?, 'common', 'external', '
 	}
 	if body.CommonMounts != 0 || body.MountsByHealth["active"] != 0 {
 		t.Fatalf("restricted mount leaked in overview: %#v", body)
+	}
+}
+
+func TestAdminOverviewCountsIndexJobsWithoutBlockingOnMountLookup(t *testing.T) {
+	db, handler := newAPITestServer(t)
+	admin, _ := createAPITestAccounts(t, db)
+	createTestMount(t, db, "overview-job-mount", admin.ID, "read_write")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.SQL().Exec(`
+INSERT INTO jobs(id, kind, priority, status, payload_json, checkpoint_json, attempts, max_attempts, created_at, updated_at)
+VALUES ('overview-job', 'index_mount', 100, 'queued', '{"mount_id":"overview-job-mount"}', '{}', 0, 3, ?, ?)
+`, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/overview", nil).WithContext(ctx)
+	req.AddCookie(issueAPITestSession(t, db, admin.ID))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		JobsByStatus map[string]int `json:"jobsByStatus"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.JobsByStatus["queued"] != 1 {
+		t.Fatalf("jobsByStatus = %#v, want queued job counted", body.JobsByStatus)
 	}
 }
 

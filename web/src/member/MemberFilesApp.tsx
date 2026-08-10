@@ -22,6 +22,13 @@ type SessionState = 'checking' | 'signed-out' | 'enrollment' | 'ready';
 
 type Props = { entry?: 'member' | 'admin' };
 
+export function adminTopbarTitle(entry: Props['entry'], activeTab: MemberTab | AdminTab, adminItems: readonly AdminNavGroupItem[], signInLabel: string) {
+  if (entry !== 'admin') return signInLabel;
+  if (adminItems.length === 0) return signInLabel;
+  const activeAdminGroupId = typeof activeTab === 'string' && ['overview', 'users', 'mounts', 'index-jobs', 'route-groups', 'share-governance', 'token-governance', 'audit', 'backups'].includes(activeTab) ? adminGroupForTab(activeTab as AdminTab) : 'overview';
+  return adminItems.find((group) => group.id === activeAdminGroupId)?.label ?? adminItems[0].label;
+}
+
 const defaultAdminGroupTabs: Record<AdminNavGroup, AdminTab> = {
   overview: 'overview',
   identity: 'users',
@@ -185,7 +192,7 @@ export default function MemberFilesApp({ entry = 'member' }: Props) {
   const adminView = isAdmin && (entry === 'admin' || activeTab === 'overview' || activeTab === 'users' || activeTab === 'mounts' || activeTab === 'index-jobs' || activeTab === 'route-groups' || activeTab === 'share-governance' || activeTab === 'token-governance' || activeTab === 'backups' || activeTab === 'audit');
 
   return <RecentReauthProvider locale={locale}>
-    <main className="member-app-shell"><header className="member-topbar"><strong>{entry === 'admin' ? text.adminAccessSecurity : text.signIn}</strong><div className="member-topbar-actions"><button type="button" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}>{locale === 'zh-CN' ? 'EN' : '中文'}</button><button type="button" onClick={() => void onLogout()}>{text.signOut}</button></div></header><div className="member-layout"><aside className="member-sidebar">
+    <main className="member-app-shell"><header className="member-topbar"><strong>{adminTopbarTitle(entry, activeTab, adminItems, text.signIn)}</strong><div className="member-topbar-actions"><button type="button" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}>{locale === 'zh-CN' ? 'EN' : '中文'}</button><button type="button" onClick={() => void onLogout()}>{text.signOut}</button></div></header><div className="member-layout"><aside className="member-sidebar">
       {entry === 'member' && <><MemberContentNavigation locale={locale} active={activeTab === 'personal' || activeTab === 'team-folders' || activeTab === 'collaborations' ? activeTab : null} onSelect={setActiveTab} /><button className={`member-nav ${activeTab === 'shares' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('shares')}>{text.navShares}</button><button className={`member-nav ${activeTab === 'tokens' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('tokens')}>{text.navTokens}</button><button className={`member-nav ${activeTab === 'docs' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('docs')}>{text.navDocs}</button><button className={`member-nav ${activeTab === 'account' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('account')}>{text.account}</button></>}
       {isAdmin && <>{adminItems.map((group) => <button className={`member-nav ${activeAdminGroupId === group.id ? 'active' : ''}`} type="button" onClick={() => setActiveTab(adminGroupTabs[group.id])} key={group.id}>{group.label}</button>)}</>}
     </aside><section className="member-main-content">{adminView ? <>

@@ -120,24 +120,43 @@ func (s *Server) countAdminJobs(ctx context.Context, accountID string) (map[stri
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	counts := map[string]int{}
+	type jobStatusEntry struct {
+		status  string
+		mountID string
+	}
+	entries := []jobStatusEntry{}
 	for rows.Next() {
 		var status, payload string
 		if err := rows.Scan(&status, &payload); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
-		if mountID := indexJobMountID(payload); mountID != "" {
-			if _, err := s.mountAdmin.LoadMount(ctx, accountID, mountID); err != nil {
+		entries = append(entries, jobStatusEntry{
+			status:  status,
+			mountID: indexJobMountID(payload),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	counts := map[string]int{}
+	for _, entry := range entries {
+		if entry.mountID != "" {
+			if _, err := s.mountAdmin.LoadMount(ctx, accountID, entry.mountID); err != nil {
 				if errors.Is(err, mountadmin.ErrNotFound) {
 					continue
 				}
 				return nil, err
 			}
 		}
-		counts[status]++
+		counts[entry.status]++
 	}
-	return counts, rows.Err()
+	return counts, nil
 }
 
 func countGroupedBy(r *http.Request, db *sql.DB, query string) (map[string]int, error) {
