@@ -2,8 +2,8 @@ const uploadStoragePrefix = 'omnora.member.upload.';
 
 export type UploadFileIdentity = Pick<File, 'name' | 'size' | 'lastModified'>;
 
-export function uploadStorageKey(spaceId: string, mountId: string, path: string, file: UploadFileIdentity) {
-  return `${uploadStoragePrefix}${spaceId}.${mountId}.${path}.${file.name}.${file.size}.${file.lastModified}`;
+export function uploadStorageKey(sourceKey: string, path: string, file: UploadFileIdentity) {
+  return `${uploadStoragePrefix}${sourceKey}.${path}.${file.name}.${file.size}.${file.lastModified}`;
 }
 
 export function resumedUploadProgress(parts: Array<{ Number?: number; number?: number; Size?: number; size?: number }>, totalSize: number) {

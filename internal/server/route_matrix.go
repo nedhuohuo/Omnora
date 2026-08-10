@@ -72,6 +72,12 @@ var routeMatrix = []RouteRule{
 	// Admin user creation grants a full new credential, so it requires a recent
 	// reauthentication like other control-plane mutations.
 	{Method: "POST", Pattern: "/api/v1/admin/users", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "POST", Pattern: "/api/v1/admin/mounts", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "PATCH", Pattern: "/api/v1/admin/mounts/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "DELETE", Pattern: "/api/v1/admin/mounts/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "POST", Pattern: "/api/v1/admin/mounts/*/reverify", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "PUT", Pattern: "/api/v1/admin/mounts/*/grants/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "DELETE", Pattern: "/api/v1/admin/mounts/*/grants/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "GET", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie},
 	{Method: "HEAD", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie},
 	{Method: "*", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie, CSRF: true},

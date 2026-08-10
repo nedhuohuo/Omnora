@@ -11,12 +11,7 @@ import (
 	"omnora/internal/store"
 )
 
-func skipLegacySpaceRESTTest(t *testing.T) {
-	t.Helper()
-	t.Skip("legacy Space REST/admin routes and Space tables were removed; MCP focused coverage is authoritative")
-}
-
-// createTestSpaceAndMount creates an active common mount with an editor grant
+// createTestMount creates an active common mount with an editor grant
 // for ownerAccountID, rooted at a fresh temp directory whose
 // identity has already been captured and stored so verifyLoadedMountIdentity
 // succeeds immediately.
@@ -25,9 +20,8 @@ func skipLegacySpaceRESTTest(t *testing.T) {
 // t.TempDir, which on macOS resolves under a symlinked /var) because
 // mountid.Capture rejects mount roots that resolve through a symlink
 // component.
-func createTestSpaceAndMount(t *testing.T, db *store.DB, spaceID, mountID, ownerAccountID, mode string) string {
+func createTestMount(t *testing.T, db *store.DB, mountID, ownerAccountID, mode string) string {
 	t.Helper()
-	_ = spaceID
 	ctx := context.Background()
 	workspace, err := filepath.Abs(".")
 	if err != nil {
@@ -59,16 +53,4 @@ VALUES (?, ?, 'editor')
 		t.Fatalf("insert mount grant: %v", err)
 	}
 	return root
-}
-
-func addSpaceMember(t *testing.T, db *store.DB, spaceID, accountID, permission string) {
-	t.Helper()
-	_, err := db.SQL().ExecContext(context.Background(), `
-INSERT INTO space_members(space_id, account_id, permission)
-VALUES (?, ?, ?)
-ON CONFLICT(space_id, account_id) DO UPDATE SET permission = excluded.permission
-`, spaceID, accountID, permission)
-	if err != nil {
-		t.Fatalf("add space member: %v", err)
-	}
 }

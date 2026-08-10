@@ -171,9 +171,9 @@ func (s *Service) promotePendingTOTP(ctx context.Context, accountID, expectedCip
 	now = now.UTC().Round(0)
 	rotate := current.ID != ""
 	var (
-		token          string
-		newSession     Session
-		err            error
+		token      string
+		newSession Session
+		err        error
 	)
 	if rotate {
 		if current.AccountID != accountID || current.TokenHash == "" || current.ExpiresAt.IsZero() || !now.Before(current.ExpiresAt) {

@@ -264,7 +264,9 @@ func TestAuthorizeRejectsCollaborationAndDamagedTokenPrincipal(t *testing.T) {
 	ctx := context.Background()
 
 	collaboration := Locator{Source: contentref.SourceCollaboration, CollaborationID: "collab-1", Path: "."}
-	if _, err := guard.Authorize(ctx, check("acct-owner", collaboration, domain.ContentPermissionViewer, false)); !errors.Is(err, ErrInvalidRequest) {
+	automation := check("acct-owner", collaboration, domain.ContentPermissionViewer, false)
+	automation.Subject.Principal = &aitoken.Principal{AccountID: "acct-owner", TokenID: "token-1"}
+	if _, err := guard.Authorize(ctx, automation); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("automation collaboration error = %v, want invalid request", err)
 	}
 	allContent := Locator{Source: aitoken.SourceAllAccountContent, Path: "."}
@@ -328,7 +330,7 @@ func TestAuthorizeRejectsSymlinksAndIdentityDriftForPersonalAndCommon(t *testing
 	})
 }
 
-func TestLoadMountIdentityUsesMountIDWithoutSpaceCoordinates(t *testing.T) {
+func TestLoadMountIdentityUsesMountIDWithoutLegacyCoordinates(t *testing.T) {
 	f := newGuardFixture(t)
 	mount, err := NewGuard(f.db).LoadMountIdentity(context.Background(), "common-rw")
 	if err != nil {

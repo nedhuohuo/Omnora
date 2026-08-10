@@ -2,20 +2,21 @@ import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
   buildShareURL,
-  type CreateShareResponse,
+  createMemberCollaboration,
   createShare,
+  deleteMemberCollaboration,
   deleteShare,
-  listDirectoryChildren,
+  listMemberCollaborations,
   listShares,
+  type CreateShareResponse,
+  type MemberCollaboration,
+  type MemberContentLocator,
   type SharePayload,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
-import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount } from './types';
 import { copyText } from './clipboard';
-import { joinReadableLabels } from './displayLabels';
-import FileTypeIcon from './FileTypeIcon';
 
-type LocaleText = (typeof localeMessages)[MemberLocale];
+ type LocaleText = (typeof localeMessages)[MemberLocale];
 
 function describeError(error: unknown) {
   if (error instanceof ApiError) {
@@ -40,8 +41,6 @@ function shareStatusLabel(status: string | undefined, text: LocaleText) {
     expired: text.shareStatusExpired,
     revoked: text.shareStatusRevoked,
     exhausted: text.shareStatusExhausted,
-    creator_lost_manager: text.shareStatusCreatorLostManager,
-    target_moved_or_replaced: text.shareStatusTargetMoved,
   };
   return status ? (labels[status] ?? status) : text.shareStatusActive;
 }
@@ -57,14 +56,8 @@ function displaySharePath(path: string, text: LocaleText) {
   return normalized === '.' ? text.shareBrowseRoot : normalized;
 }
 
-function shareLocationLabel(share: SharePayload) {
-  return joinReadableLabels([share.spaceName, share.mountName]);
-}
-
-function browseCrumbs(path: string) {
-  const normalized = normalizeSharePath(path);
-  if (normalized === '.') return [];
-  return normalized.split('/').filter(Boolean);
+function shareLocationLabel(share: SharePayload, text: LocaleText) {
+  return share.source === 'personal' ? text.myFiles : share.mountName ?? text.commonStorage;
 }
 
 export type ShareOptionsState = {
@@ -81,35 +74,29 @@ export const defaultShareOptions: ShareOptionsState = {
   allowDownload: true,
 };
 
-export function ShareOptionFields({
-  text,
-  value,
-  onChange,
-}: {
-  text: LocaleText;
-  value: ShareOptionsState;
-  onChange: (next: ShareOptionsState) => void;
-}) {
-  return (
-    <>
-      <label>{text.sharePasswordOptional}<input type="password" value={value.password} onChange={(event) => onChange({ ...value, password: event.target.value })} autoComplete="new-password" /></label>
-      <label>{text.shareExpiresAt}<input type="datetime-local" value={value.expiresAt} onChange={(event) => onChange({ ...value, expiresAt: event.target.value })} /><small className="member-path-hint">{text.shareNeverExpires}</small></label>
-      <label className="member-admin-checkbox"><input type="checkbox" checked={value.allowPreview} onChange={(event) => onChange({ ...value, allowPreview: event.target.checked })} />{text.shareAllowPreview}</label>
-      <label className="member-admin-checkbox"><input type="checkbox" checked={value.allowDownload} onChange={(event) => onChange({ ...value, allowDownload: event.target.checked })} />{text.shareAllowDownload}</label>
-    </>
-  );
+export function ShareOptionFields({ text, value, onChange }: { text: LocaleText; value: ShareOptionsState; onChange: (next: ShareOptionsState) => void }) {
+  return <>
+    <label>{text.sharePasswordOptional}<input type="password" value={value.password} onChange={(event) => onChange({ ...value, password: event.target.value })} autoComplete="new-password" /></label>
+    <label>{text.shareExpiresAt}<input type="datetime-local" value={value.expiresAt} onChange={(event) => onChange({ ...value, expiresAt: event.target.value })} /><small className="member-path-hint">{text.shareNeverExpires}</small></label>
+    <label className="member-admin-checkbox"><input type="checkbox" checked={value.allowPreview} onChange={(event) => onChange({ ...value, allowPreview: event.target.checked })} />{text.shareAllowPreview}</label>
+    <label className="member-admin-checkbox"><input type="checkbox" checked={value.allowDownload} onChange={(event) => onChange({ ...value, allowDownload: event.target.checked })} />{text.shareAllowDownload}</label>
+  </>;
 }
 
-export function buildCreateSharePayload(spaceId: string, mountId: string, relativePath: string, options: ShareOptionsState) {
-  const expiresAtIso = options.expiresAt ? new Date(options.expiresAt).toISOString() : undefined;
+export function buildCreateSharePayload(locator: MemberContentLocator, options: ShareOptionsState) {
+  const expiresAt = options.expiresAt ? new Date(options.expiresAt).toISOString() : undefined;
+  const base = locator.source === 'personal'
+    ? { source: 'personal' as const }
+    : locator.source === 'common_mount'
+      ? { source: 'common_mount' as const, mountId: locator.mountId }
+      : { source: 'collaboration' as const, collaborationId: locator.collaborationId };
   return {
-    spaceId,
-    mountId,
-    relativePath: normalizeSharePath(relativePath),
+    ...base,
+    relativePath: normalizeSharePath(locator.path),
     password: options.password.trim() || undefined,
     allowPreview: options.allowPreview,
     allowDownload: options.allowDownload,
-    expiresAt: expiresAtIso,
+    expiresAt,
   };
 }
 
@@ -119,283 +106,84 @@ export function resolveShareFragment(result: CreateShareResponse) {
   return '';
 }
 
-function ShareTargetPicker({
-  text,
-  spaceId,
-  mountId,
-  selectedPath,
-  onSelect,
-}: {
-  text: LocaleText;
-  spaceId: string;
-  mountId: string;
-  selectedPath: string;
-  onSelect: (path: string) => void;
-}) {
-  const [browsePath, setBrowsePath] = useState('.');
-  const [entries, setEntries] = useState<MemberDirectoryEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    if (!spaceId || !mountId) {
-      setEntries([]);
-      return;
-    }
-    const controller = new AbortController();
-    setLoading(true);
-    setError('');
-    void listDirectoryChildren(spaceId, mountId, browsePath, controller.signal)
-      .then((payload) => {
-        const listing = formatDirectoryChildren(payload);
-        setEntries(listing.entries);
-      })
-      .catch((caught: unknown) => {
-        if (controller.signal.aborted) return;
-        setEntries([]);
-        setError(describeError(caught));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [spaceId, mountId, browsePath]);
-
-  const crumbs = browseCrumbs(browsePath);
-  const selected = normalizeSharePath(selectedPath);
-
-  return (
-    <div className="member-share-picker member-admin-form-wide">
-      <span>{text.shareTargetPath}</span>
-      <div className="member-share-picker-toolbar">
-        <div className="member-share-picker-crumbs">
-          <button type="button" onClick={() => setBrowsePath('.')}>{text.shareBrowseRoot}</button>
-          {crumbs.map((part, index) => {
-            const path = crumbs.slice(0, index + 1).join('/');
-            const isLast = index === crumbs.length - 1;
-            return (
-              <span key={path}>
-                <b>/</b>
-                {isLast ? <strong>{part}</strong> : <button type="button" onClick={() => setBrowsePath(path)}>{part}</button>}
-              </span>
-            );
-          })}
-        </div>
-        <div className="member-share-picker-actions">
-          <button type="button" onClick={() => onSelect(browsePath)}>{text.shareSelectCurrentFolder}</button>
-        </div>
-      </div>
-      <p className="member-path-hint">{text.shareBrowseHint}</p>
-      <p className="member-share-picker-selected">{text.shareSelectedTarget}: {displaySharePath(selected, text)}</p>
-      <div className="member-share-picker-list" role="listbox" aria-label={text.shareTargetPath}>
-        {loading ? <div className="member-share-picker-loading">{text.loading}</div> : error ? <div className="member-share-picker-empty">{error}</div> : entries.length === 0 ? <div className="member-share-picker-empty">{text.shareBrowseEmpty}</div> : entries.map((entry) => {
-          const entryPath = normalizeSharePath(entry.relativePath);
-          const isSelected = selected === entryPath;
-          if (entry.kind === 'dir') {
-            return (
-              <div key={`dir-${entryPath}`} className={`member-share-picker-row${isSelected ? ' selected' : ''}`}>
-                <button type="button" className="member-share-picker-item" onClick={() => setBrowsePath(entryPath)}>
-                  <FileTypeIcon kind="dir" name={entry.name} className="member-file-icon dir" />
-                  <span>{entry.name}</span>
-                </button>
-                <button type="button" className="member-share-picker-select" onClick={() => onSelect(entryPath)}>{text.shareSelectItem}</button>
-              </div>
-            );
-          }
-          return (
-            <button
-              key={`file-${entryPath}`}
-              type="button"
-              className={`member-share-picker-item${isSelected ? ' selected' : ''}`}
-              role="option"
-              aria-selected={isSelected}
-              onClick={() => onSelect(entryPath)}
-            >
-              <FileTypeIcon kind="file" name={entry.name} className="member-file-icon file" />
-              <span>{entry.name}</span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 export function ShareCreatedResult({ text, result, onClose }: { text: LocaleText; result: CreateShareResponse; onClose: () => void }) {
   const fragment = resolveShareFragment(result);
   const url = fragment ? buildShareURL(fragment) : '';
   const [copied, setCopied] = useState<'url' | 'secret' | 'failed' | null>(null);
-
-  return (
-    <div className="member-modal-backdrop">
-      <div className="member-modal member-share-result">
-        <h2>{text.shareCreatedTitle}</h2>
-        <p className="member-modal-hint">{text.shareCreatedHint}</p>
-        <code className="member-share-url">{url}</code>
-        <div className="member-share-result-actions">
-          <button type="button" onClick={() => void copyText(url).then((ok) => setCopied(ok ? 'url' : 'failed'))}>{text.shareCopyUrl}</button>
-          {result.secret && <button type="button" onClick={() => void copyText(result.secret ?? '').then((ok) => setCopied(ok ? 'secret' : 'failed'))}>{text.shareCopySecret}</button>}
-        </div>
-        {copied === 'url' || copied === 'secret' ? <p className="member-admin-notice">{text.shareUrlCopied}</p> : copied === 'failed' ? <p className="member-error">{text.shareCopyFailed}</p> : null}
-        <div className="member-modal-actions"><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
-      </div>
-    </div>
-  );
-}
-
-function ShareLinkViewer({ text, share, onClose }: { text: LocaleText; share: SharePayload; onClose: () => void }) {
-  const url = share.fragment ? buildShareURL(share.fragment) : '';
-  const [copied, setCopied] = useState<'url' | 'failed' | null>(null);
-
-  return (
-    <div className="member-modal-backdrop">
-      <div className="member-modal member-share-result">
-        <h2>{text.shareLinkTitle}</h2>
-        <p className="member-modal-hint"><strong>{displaySharePath(share.relativePath, text)}</strong></p>
-        {url ? (
-          <>
-            <p className="member-modal-hint">{text.shareLinkHint}</p>
-            <code className="member-share-url">{url}</code>
-            <div className="member-share-result-actions">
-              <button type="button" onClick={() => void copyText(url).then((ok) => setCopied(ok ? 'url' : 'failed'))}>{text.shareCopyUrl}</button>
-            </div>
-            {copied === 'url' ? <p className="member-admin-notice">{text.shareUrlCopied}</p> : copied === 'failed' ? <p className="member-error">{text.shareCopyFailed}</p> : null}
-          </>
-        ) : (
-          <p className="member-error">{text.shareLinkUnavailable}</p>
-        )}
-        <div className="member-modal-actions"><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
-      </div>
-    </div>
-  );
+  return <div className="member-modal-backdrop"><div className="member-modal member-share-result">
+    <h2>{text.shareCreatedTitle}</h2><p className="member-modal-hint">{text.shareCreatedHint}</p><code className="member-share-url">{url}</code>
+    <div className="member-share-result-actions"><button type="button" onClick={() => void copyText(url).then((ok) => setCopied(ok ? 'url' : 'failed'))}>{text.shareCopyUrl}</button>{result.secret && <button type="button" onClick={() => void copyText(result.secret ?? '').then((ok) => setCopied(ok ? 'secret' : 'failed'))}>{text.shareCopySecret}</button>}</div>
+    {copied === 'url' || copied === 'secret' ? <p className="member-admin-notice">{text.shareUrlCopied}</p> : copied === 'failed' ? <p className="member-error">{text.shareCopyFailed}</p> : null}
+    <div className="member-modal-actions"><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
+  </div></div>;
 }
 
 type ShareCreateModalProps = {
   text: LocaleText;
-  spaceId: string;
-  mountId: string;
-  relativePath: string;
+  locator: MemberContentLocator;
   targetLabel: string;
   onCancel: () => void;
   onCreated: (result: CreateShareResponse) => void;
 };
 
-export function ShareCreateModal({ text, spaceId, mountId, relativePath, targetLabel, onCancel, onCreated }: ShareCreateModalProps) {
+export function ShareCreateModal({ text, locator, targetLabel, onCancel, onCreated }: ShareCreateModalProps) {
   const [options, setOptions] = useState<ShareOptionsState>(defaultShareOptions);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setLoading(true);
-    setError('');
-    try {
-      const result = await createShare(buildCreateSharePayload(spaceId, mountId, relativePath, options));
-      onCreated(result);
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setLoading(false);
-    }
+    event.preventDefault(); setLoading(true); setError('');
+    try { onCreated(await createShare(buildCreateSharePayload(locator, options))); } catch (caught) { setError(describeError(caught)); } finally { setLoading(false); }
   }
+  return <div className="member-modal-backdrop"><form className="member-modal member-admin-form" onSubmit={onSubmit}>
+    <h2 className="member-admin-form-wide">{text.shareCreateTitle}</h2><p className="member-admin-form-wide member-modal-hint"><strong>{targetLabel}</strong></p><ShareOptionFields text={text} value={options} onChange={setOptions} />
+    {error && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {error}</div>}
+    <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={onCancel}>{text.cancel}</button><button className="member-primary" type="submit" disabled={loading}>{text.shareSubmit}</button></div>
+  </form></div>;
+}
 
-  return (
-    <div className="member-modal-backdrop">
-      <form className="member-modal member-admin-form" onSubmit={onSubmit}>
-        <h2 className="member-admin-form-wide">{text.shareCreateTitle}</h2>
-        <p className="member-admin-form-wide member-modal-hint"><strong>{targetLabel}</strong></p>
-        <ShareOptionFields text={text} value={options} onChange={setOptions} />
-        {error && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {error}</div>}
-        <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={onCancel}>{text.cancel}</button><button className="member-primary" type="submit" disabled={loading}>{text.shareSubmit}</button></div>
-      </form>
-    </div>
-  );
+function CollaborationRow({ item, incoming, text, onRevoke }: { item: MemberCollaboration; incoming: boolean; text: LocaleText; onRevoke?: () => void }) {
+  return <li className="member-collaboration-row"><strong>{item.folderName ?? item.displayName ?? item.path ?? text.myFiles}</strong><small>{incoming ? item.ownerName : item.recipientName} · {item.permission === 'viewer' ? text.readOnly : text.readWrite}</small>{!incoming && onRevoke && <button type="button" onClick={onRevoke}>{text.collaborationRevoke}</button>}</li>;
 }
 
 export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
   const [shares, setShares] = useState<SharePayload[]>([]);
+  const [incoming, setIncoming] = useState<MemberCollaboration[]>([]);
+  const [outgoing, setOutgoing] = useState<MemberCollaboration[]>([]);
+  const [recipientID, setRecipientID] = useState('');
+  const [rootPath, setRootPath] = useState('.');
+  const [permission, setPermission] = useState<'viewer' | 'editor'>('viewer');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [revokeTarget, setRevokeTarget] = useState<SharePayload | null>(null);
-  const [linkTarget, setLinkTarget] = useState<SharePayload | null>(null);
+  const [shareLink, setShareLink] = useState<CreateShareResponse | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError('');
+    setLoading(true); setError('');
     try {
-      const shareResponse = await listShares();
-      setShares(shareResponse.items ?? []);
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setLoading(false);
-    }
+      const [shareResponse, received, sent] = await Promise.all([listShares(), listMemberCollaborations('incoming'), listMemberCollaborations('outgoing')]);
+      setShares(shareResponse.items ?? []); setIncoming(received.items ?? []); setOutgoing(sent.items ?? []);
+    } catch (caught) { setError(describeError(caught)); } finally { setLoading(false); }
   }, []);
+  useEffect(() => { void load(); }, [load]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  async function onRevoke() {
-    if (!revokeTarget) return;
-    setLoading(true);
-    setError('');
-    try {
-      await deleteShare(revokeTarget.id);
-      setRevokeTarget(null);
-      await load();
-    } catch (caught) {
-      setError(describeError(caught));
-      setLoading(false);
-    }
+  async function createCollaboration(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setLoading(true); setError('');
+    try { await createMemberCollaboration({ recipientId: recipientID.trim(), rootRelativePath: normalizeSharePath(rootPath), permission }); setRecipientID(''); setRootPath('.'); await load(); }
+    catch (caught) { setError(describeError(caught)); setLoading(false); }
   }
 
-  return (
-    <div className="member-admin-workspace">
-      <div className="member-heading">
-        <div><h1>{text.sharesTitle}</h1><p>{text.sharesTitleDetail}</p></div>
-        <div className="member-admin-table-actions">
-          <button className="member-secondary-action" type="button" onClick={() => void load()} disabled={loading}>{text.refresh}</button>
-        </div>
-      </div>
+  async function revokeCollaboration(id: string) {
+    if (!window.confirm(text.collaborationRevoke)) return;
+    setLoading(true); setError('');
+    try { await deleteMemberCollaboration(id); await load(); } catch (caught) { setError(describeError(caught)); setLoading(false); }
+  }
 
-      {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
-
-      {loading ? <div className="member-loading">{text.loading}</div> : shares.length === 0 ? <div className="member-empty">{text.shareListEmpty}</div> : (
-        <table className="member-admin-table">
-          <thead><tr><th>{text.shareColumnTarget}</th><th>{text.shareColumnStatus}</th><th>{text.shareColumnExpires}</th><th>{text.shareColumnVisits}</th><th>{text.shareColumnDownloads}</th><th>{text.actions}</th></tr></thead>
-          <tbody>{shares.map((share) => {
-            const location = shareLocationLabel(share);
-            return (
-              <tr key={share.id}>
-                <td><strong>{displaySharePath(share.relativePath, text)}</strong>{location && <small>{location}</small>}</td>
-                <td>{shareStatusLabel(share.status, text)}</td>
-                <td>{formatDate(share.expiresAt, locale, text)}</td>
-                <td>{share.usedVisits ?? 0}{share.maxVisits ? ` / ${share.maxVisits}` : ''}</td>
-                <td>{share.usedDownloads ?? 0}{share.maxDownloads ? ` / ${share.maxDownloads}` : ''}</td>
-                <td><div className="member-admin-table-actions">
-                  <button className="member-table-action" type="button" onClick={() => setLinkTarget(share)} disabled={loading}>{text.shareViewLink}</button>
-                  <button className="member-table-action member-table-danger" type="button" onClick={() => setRevokeTarget(share)} disabled={loading}>{text.shareRevoke}</button>
-                </div></td>
-              </tr>
-            );
-          })}</tbody>
-        </table>
-      )}
-
-      {linkTarget && <ShareLinkViewer text={text} share={linkTarget} onClose={() => setLinkTarget(null)} />}
-
-      {revokeTarget && (
-        <div className="member-modal-backdrop">
-          <div className="member-modal">
-            <h2>{text.shareRevokeConfirmTitle}</h2>
-            <p className="member-modal-hint">{text.shareRevokeConfirmDetail}</p>
-            <p className="member-modal-hint"><strong>{revokeTarget.relativePath}</strong></p>
-            <div className="member-modal-actions"><button type="button" onClick={() => setRevokeTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onRevoke()} disabled={loading}>{text.shareRevoke}</button></div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+  return <div className="member-admin-workspace">
+    <div className="member-heading"><div><h1>{text.sharesTitle}</h1><p>{text.sharesTitleDetail}</p></div><button className="member-secondary-action" type="button" onClick={() => void load()} disabled={loading}>{text.refresh}</button></div>
+    {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
+    <section aria-labelledby="public-shares"><h2 id="public-shares">{text.sharesTitle}</h2>{loading && shares.length === 0 ? <div className="member-loading">{text.loading}</div> : shares.length === 0 ? <div className="member-empty">{text.shareListEmpty}</div> : <table className="member-admin-table"><thead><tr><th>{text.shareColumnTarget}</th><th>{text.shareColumnStatus}</th><th>{text.shareColumnExpires}</th><th>{text.actions}</th></tr></thead><tbody>{shares.map((share) => <tr key={share.id}><td><strong>{displaySharePath(share.relativePath, text)}</strong><small>{shareLocationLabel(share, text)}</small></td><td>{shareStatusLabel(share.status, text)}</td><td>{formatDate(share.expiresAt, locale, text)}</td><td><button className="member-table-action member-table-danger" type="button" onClick={() => void deleteShare(share.id).then(load)} disabled={loading}>{text.shareRevoke}</button></td></tr>)}</tbody></table>}</section>
+    <section aria-labelledby="incoming-collaborations"><h2 id="incoming-collaborations">{text.sharedWithMe}</h2>{incoming.length === 0 ? <div className="member-empty">{text.noIncomingCollaborations}</div> : <ul className="member-collaboration-list">{incoming.map((item) => <CollaborationRow item={item} incoming text={text} key={item.id} />)}</ul>}</section>
+    <section aria-labelledby="outgoing-collaborations"><h2 id="outgoing-collaborations">{text.outgoingCollaborations}</h2><form className="member-admin-inline-form" onSubmit={createCollaboration}><label>{text.collaborationRecipient}<input value={recipientID} onChange={(event) => setRecipientID(event.target.value)} required /></label><label>{text.collaborationRoot}<input value={rootPath} onChange={(event) => setRootPath(event.target.value)} required /></label><label>{text.collaborationPermission}<select value={permission} onChange={(event) => setPermission(event.target.value as 'viewer' | 'editor')}><option value="viewer">{text.readOnly}</option><option value="editor">{text.readWrite}</option></select></label><button className="member-primary" type="submit" disabled={loading}>{text.collaborationCreate}</button></form>{outgoing.length === 0 ? <div className="member-empty">{text.noOutgoingCollaborations}</div> : <ul className="member-collaboration-list">{outgoing.map((item) => <CollaborationRow item={item} incoming={false} text={text} key={item.id} onRevoke={() => void revokeCollaboration(item.id)} />)}</ul>}</section>
+    {shareLink && <ShareCreatedResult text={text} result={shareLink} onClose={() => setShareLink(null)} />}
+  </div>;
 }

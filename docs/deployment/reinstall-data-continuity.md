@@ -67,8 +67,8 @@ The original config and data host directories must be mounted to
 
 Do not reinitialize Omnora with an empty database if you expect previous
 accounts, personal-directory mappings, mounts, mount grants, collaborations,
-shares, Tokens, audit events, or upload sessions to remain. Space records only
-belong to the pre-migration schema and receive no compatibility guarantee.
+shares, Tokens, audit events, or upload sessions to remain. Legacy control-plane
+records are intentionally not restored; external mount data is never deleted.
 
 ## Verification Command Sketch
 

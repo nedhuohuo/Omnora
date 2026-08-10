@@ -3,7 +3,7 @@
 状态：目标设计基线，待实施
 日期：2026-08-08
 
-> 本文描述移除 Space 后的目标领域模型。当前数据库和接口仍使用 `space` 的部分属于待迁移实现；迁移设计以[账号、挂载与内容授权设计](../superpowers/specs/2026-08-08-account-mount-access-design.md)为准。
+> 本文描述账号—挂载模型的现行领域模型；迁移边界和授权决策以[账号、挂载与内容授权设计](../superpowers/specs/2026-08-08-account-mount-access-design.md)为准。
 
 ## 1. 概念速查
 

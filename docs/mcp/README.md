@@ -4,7 +4,7 @@
 
 ## 账号—挂载资源模型
 
-MCP 以 AI Token 所属账号为认证主体，不存在 Space 资源层：
+MCP 以 AI Token 所属账号为认证主体，不存在额外业务容器层：
 
 - `mounts.list` 无输入，只返回当前账号实时获权的共用挂载；默认个人挂载永不暴露。
 - 文件工具必须显式使用 locator：个人文件为 `{source: "personal", path}`，共用挂载为

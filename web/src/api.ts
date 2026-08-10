@@ -1,5 +1,14 @@
-import type { AppBootstrap } from './types';
-import type { MemberDirectoryEntry, MemberMount, MemberSearchResult, MemberSpace } from './member/types';
+type AppBootstrap = {
+  initializationAvailable?: boolean;
+  routeGroups?: Array<{
+    id: string;
+    exposed: boolean;
+    entry?: string;
+    risk?: string;
+    tone?: string;
+  }>;
+};
+import type { MemberDirectoryEntry, MemberSearchResult } from './member/types';
 
 export type HealthPayload = {
   status?: string;
@@ -24,6 +33,7 @@ export type SessionPayload = {
   userId?: string;
   expiresAt?: string;
   isAdmin?: boolean;
+  isInitialAdmin?: boolean;
   purpose?: 'full' | 'totp_enrollment';
   requiresTotpEnrollment?: boolean;
 };
@@ -51,13 +61,21 @@ export type ReauthenticateResponse = {
   reauthenticatedUntil?: string;
 };
 
+export type MountGovernance = 'normal' | 'restricted';
+export type MountGrantPermission = 'viewer' | 'editor';
+
+export type AdminMountGrantInput = {
+  accountId: string;
+  permission: MountGrantPermission;
+};
+
 export type AdminMountPayload = {
-  spaceId: string;
   displayName: string;
   rootPath: string;
-  kind: 'external' | 'managed';
+  governance: MountGovernance;
   mode: 'read_only' | 'read_write';
   indexEnabled: boolean;
+  grants: AdminMountGrantInput[];
 };
 
 export type DirectoryChildrenPayload = {
@@ -91,6 +109,11 @@ export type MemberContentLocator =
   | CommonMountContentLocator
   | CollaborationContentLocator;
 
+export type MemberContentSourceLocator =
+  | { source: 'personal' }
+  | { source: 'common_mount'; mountId: string }
+  | { source: 'collaboration'; collaborationId: string };
+
 export type MemberContentSourcesPayload = {
   personal: {
     source: 'personal';
@@ -107,7 +130,11 @@ export type MemberContentSourcesPayload = {
 
 export type MemberCollaboration = {
   id: string;
+  source?: 'collaboration';
+  collaborationId?: string;
   displayName?: string;
+  folderName?: string;
+  rootRelativePath?: string;
   path?: string;
   ownerName?: string;
   recipientName?: string;
@@ -119,14 +146,10 @@ export type MemberCollaborationsPayload = {
   items: MemberCollaboration[];
 };
 
-export type CreateDirectoryPayload = {
-  parentPath: string;
-  name: string;
-};
-
 export type CreateSharePayload = {
-  spaceId: string;
-  mountId: string;
+  source: 'personal' | 'common_mount' | 'collaboration';
+  mountId?: string;
+  collaborationId?: string;
   relativePath: string;
   password?: string;
   allowPreview: boolean;
@@ -184,8 +207,9 @@ export type CreateAiTokenResponse = {
 };
 
 export type CreateUploadPayload = {
-  spaceId: string;
-  mountId: string;
+  source: 'personal' | 'common_mount' | 'collaboration';
+  mountId?: string;
+  collaborationId?: string;
   parentPath: string;
   fileName: string;
   size: number;
@@ -216,7 +240,6 @@ export type JobPayload = {
   id?: string;
   status?: string;
   kind?: string;
-  spaceName?: string;
   mountName?: string;
   priority?: number;
   payload?: Record<string, unknown>;
@@ -231,27 +254,21 @@ export type JobPayload = {
   completedAt?: string;
 };
 
-export type AdminSpacePayload = {
-  id: string;
-  type: string;
-  name: string;
-};
-
-export type SpaceDeletionPayload = {
-  id: string;
-  deleted: boolean;
-  deleteData: boolean;
-  dataDeleted: boolean;
+export type AdminMountGrant = AdminMountGrantInput & {
+  email: string;
+  displayName: string;
 };
 
 export type AdminMountListItem = {
   id: string;
-  name: string;
-  space: string;
-  mode: string;
-  index: string;
-  health: string;
-  tone: string;
+  displayName: string;
+  rootPath: string;
+  governance: MountGovernance;
+  mode: 'read_only' | 'read_write';
+  indexEnabled: boolean;
+  shareEnabled: boolean;
+  status: 'pending' | 'active' | 'disabled' | 'unavailable';
+  grantCount: number;
 };
 
 export type AdminRouteGroupItem = {
@@ -305,9 +322,8 @@ export type SharePayload = {
   id: string;
   publicId: string;
   fragment?: string;
-  spaceId: string;
-  spaceName?: string;
-  mountId: string;
+  source: 'personal' | 'common_mount';
+  mountId?: string;
   mountName?: string;
   relativePath: string;
   creatorEmail?: string;
@@ -389,17 +405,6 @@ export type PreferencesPayload = {
   theme: ThemePreference;
 };
 
-export type RenameObjectPayload = {
-  from: string;
-  toName?: string;
-  toPath?: string;
-};
-
-export type MoveObjectPayload = {
-  from: string;
-  toDir: string;
-};
-
 export type SharePortalCurrentPayload = {
   path?: string;
   kind?: 'dir' | 'file';
@@ -456,21 +461,6 @@ export type CreateAdminUserPayload = {
 
 export type CreateAdminUserResponse = {
   user: { id: string; email: string; displayName: string; role: string; status: string };
-  space: { id: string; type: string; name: string; role: string };
-};
-
-export type CreateAdminSpacePayload = {
-  name: string;
-};
-
-export type SpaceMemberRole = 'viewer' | 'editor' | 'manager';
-
-export type AdminSpaceMemberPayload = {
-  accountId: string;
-  email?: string;
-  displayName?: string;
-  permission: SpaceMemberRole;
-  protected?: boolean;
 };
 
 export type BackupPayload = {
@@ -649,26 +639,36 @@ export function confirmTOTP(code: string, signal?: AbortSignal) {
 }
 
 export function registerAdminMount(payload: AdminMountPayload, signal?: AbortSignal) {
-  return requestJson<unknown>('/api/v1/admin/mounts', {
+  return requestJson<AdminMountListItem>('/api/v1/admin/mounts', {
     method: 'POST',
     body: JSON.stringify(payload),
     signal,
   });
 }
 
-export function renameAdminMount(mountId: string, displayName: string, signal?: AbortSignal) {
+export function updateAdminMount(mountId: string, payload: {
+  displayName?: string;
+  mode?: 'read_only' | 'read_write';
+  indexEnabled?: boolean;
+  shareEnabled?: boolean;
+}, signal?: AbortSignal) {
   return requestJson<AdminMountListItem>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}`, {
     method: 'PATCH',
-    body: JSON.stringify({ displayName }),
+    body: JSON.stringify(payload),
     signal,
   });
 }
 
-export function deleteAdminMount(mountId: string, signal?: AbortSignal) {
-  return requestJson<{ id?: string; deleted?: boolean }>(
+export function renameAdminMount(mountId: string, displayName: string, signal?: AbortSignal) {
+  return updateAdminMount(mountId, { displayName }, signal);
+}
+
+export function deleteAdminMount(mountId: string, displayName: string, signal?: AbortSignal) {
+  return requestJson<{ id: string; deleted: boolean; deleteData: boolean; dataDeleted: boolean }>(
     `/api/v1/admin/mounts/${encodeURIComponent(mountId)}`,
     {
       method: 'DELETE',
+      body: JSON.stringify({ displayName }),
       signal,
     },
   );
@@ -681,12 +681,27 @@ export function reverifyAdminMount(mountId: string, signal?: AbortSignal) {
   });
 }
 
-export function listAdminSpaces(signal?: AbortSignal) {
-  return requestJson<{ items: AdminSpacePayload[] }>('/api/v1/admin/spaces', { signal });
-}
-
 export function listAdminMounts(signal?: AbortSignal) {
   return requestJson<{ items: AdminMountListItem[] }>('/api/v1/admin/mounts', { signal });
+}
+
+export function listAdminMountGrants(mountId: string, signal?: AbortSignal) {
+  return requestJson<{ items: AdminMountGrant[] }>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}/grants`, { signal });
+}
+
+export function putAdminMountGrant(mountId: string, accountId: string, permission: MountGrantPermission, signal?: AbortSignal) {
+  return requestJson<AdminMountGrant>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}/grants/${encodeURIComponent(accountId)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ permission }),
+    signal,
+  });
+}
+
+export function deleteAdminMountGrant(mountId: string, accountId: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}/grants/${encodeURIComponent(accountId)}`, {
+    method: 'DELETE',
+    signal,
+  });
 }
 
 export function listAdminRouteGroups(signal?: AbortSignal) {
@@ -710,20 +725,6 @@ export function listAdminHostDirectories(path: string, signal?: AbortSignal) {
   return requestJson<HostDirectorySuggestions>(`/api/v1/admin/host-directories${query ? `?${query}` : ''}`, { signal });
 }
 
-export function listDirectoryChildren(spaceId: string, mountId: string, path: string, signal?: AbortSignal) {
-  const params = new URLSearchParams();
-  if (path) {
-    params.set('path', path);
-  }
-  const query = params.toString();
-  const suffix = query ? `?${query}` : '';
-
-  return requestJson<DirectoryChildrenPayload>(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/children${suffix}`,
-    { signal },
-  );
-}
-
 export function listMemberContentSources(signal?: AbortSignal) {
   return requestJson<MemberContentSourcesPayload>('/api/v1/member/content-sources', { signal });
 }
@@ -737,126 +738,113 @@ export function listMemberDirectoryChildren(locator: MemberContentLocator, signa
   return requestJson<DirectoryChildrenPayload>(`/api/v1/member/files/children?${params.toString()}`, { signal });
 }
 
-export type MemberMutationLocator = Extract<MemberContentLocator, { source: 'personal' | 'common_mount' }>;
-
-function memberLocatorPayload(locator: MemberMutationLocator) {
-  return locator.source === 'common_mount'
-    ? { source: locator.source, mountId: locator.mountId, path: locator.path }
-    : { source: locator.source, path: locator.path };
+function memberLocatorBody(locator: MemberContentLocator) {
+  return locator.source === 'personal'
+    ? { source: locator.source, path: locator.path }
+    : locator.source === 'common_mount'
+      ? { source: locator.source, mountId: locator.mountId, path: locator.path }
+      : { source: locator.source, collaborationId: locator.collaborationId, path: locator.path };
 }
 
-export function createMemberDirectory(locator: MemberMutationLocator, name: string, signal?: AbortSignal) {
-  return requestJson<{ relativePath: string }>('/api/v1/member/files/directories', {
-    method: 'POST', body: JSON.stringify({ ...memberLocatorPayload(locator), parentPath: locator.path, name }), signal,
-  });
-}
-
-export function renameMemberObject(locator: MemberMutationLocator, toName: string, signal?: AbortSignal) {
-  return requestJson<{ relativePath: string }>('/api/v1/member/files/rename', {
-    method: 'POST', body: JSON.stringify({ ...memberLocatorPayload(locator), toName }), signal,
-  });
-}
-
-export function copyMemberObject(source: MemberMutationLocator, destination: MemberMutationLocator, signal?: AbortSignal) {
-  return requestJson<{ relativePath: string }>('/api/v1/member/files/copy', {
-    method: 'POST', body: JSON.stringify({ ...memberLocatorPayload(source), destination: memberLocatorPayload(destination) }), signal,
-  });
-}
-
-export function moveMemberObject(source: MemberMutationLocator, destination: MemberMutationLocator, signal?: AbortSignal) {
-  return requestJson<{ relativePath: string }>('/api/v1/member/files/move', {
-    method: 'POST', body: JSON.stringify({ ...memberLocatorPayload(source), destination: memberLocatorPayload(destination) }), signal,
-  });
-}
-
-export function deleteMemberObject(locator: MemberMutationLocator, permanent = false, signal?: AbortSignal) {
-  const params = new URLSearchParams(memberLocatorPayload(locator) as Record<string, string>);
-  if (permanent) params.set('permanent', 'true');
-  return requestJson<void>(`/api/v1/member/files/object?${params.toString()}`, { method: 'DELETE', signal });
-}
-
-export function createMemberUpload(locator: MemberMutationLocator, fileName: string, size: number, signal?: AbortSignal) {
-  return requestJson<UploadSessionPayload>('/api/v1/member/uploads', {
-    method: 'POST', body: JSON.stringify({ ...memberLocatorPayload(locator), parentPath: locator.path, fileName, size }), signal,
-  });
-}
-
-export function memberDownloadURL(locator: MemberMutationLocator) {
-  const params = new URLSearchParams(memberLocatorPayload(locator) as Record<string, string>);
+export function memberDownloadURL(locator: MemberContentLocator, options?: { inline?: boolean }) {
+  const params = new URLSearchParams();
+  params.set('source', locator.source);
+  params.set('path', locator.path);
+  if (locator.source === 'common_mount') params.set('mountId', locator.mountId);
+  if (locator.source === 'collaboration') params.set('collaborationId', locator.collaborationId);
+  if (options?.inline) params.set('inline', '1');
   return `/api/v1/member/files/download?${params.toString()}`;
 }
 
+export function searchMemberFiles(locator: MemberContentSourceLocator, query: string, limit = 50, cursor?: string, signal?: AbortSignal) {
+  const params = new URLSearchParams();
+  params.set('source', locator.source);
+  if (locator.source === 'common_mount') params.set('mountId', locator.mountId);
+  if (locator.source === 'collaboration') params.set('collaborationId', locator.collaborationId);
+  params.set('q', query);
+  params.set('limit', String(limit));
+  if (cursor) params.set('cursor', cursor);
+  return requestJson<SearchPayload>(`/api/v1/member/files/search?${params.toString()}`, { signal });
+}
+
+export function createMemberDirectory(locator: MemberContentLocator, name: string, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/directories', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorBody(locator), name }), signal,
+  });
+}
+
+export function renameMemberObject(locator: MemberContentLocator, toPath: string, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/rename', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorBody(locator), toPath }), signal,
+  });
+}
+
+export function moveMemberObject(source: MemberContentLocator, destination: MemberContentLocator, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/move', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorBody(source), toSource: destination.source, ...(destination.source === 'common_mount' ? { toMountId: destination.mountId } : {}), toPath: destination.path }), signal,
+  });
+}
+
+export function copyMemberObject(source: MemberContentLocator, destination: MemberContentLocator, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/copy', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorBody(source), toSource: destination.source, ...(destination.source === 'common_mount' ? { toMountId: destination.mountId } : {}), toPath: destination.path }), signal,
+  });
+}
+
+export function deleteMemberObject(locator: MemberContentLocator, options?: { permanent?: boolean }, signal?: AbortSignal) {
+  const params = options?.permanent ? '?permanent=1' : '';
+  return requestJson<TrashItemPayload | void>('/api/v1/member/files/object' + params, {
+    method: 'DELETE', body: JSON.stringify(memberLocatorBody(locator)), signal,
+  });
+}
+
+function memberLocatorQuery(locator: MemberContentLocator) {
+  const params = new URLSearchParams();
+  params.set('source', locator.source);
+  params.set('path', locator.path);
+  if (locator.source === 'common_mount') params.set('mountId', locator.mountId);
+  if (locator.source === 'collaboration') params.set('collaborationId', locator.collaborationId);
+  return params;
+}
+
+export function listMemberTrash(locator: MemberContentLocator, signal?: AbortSignal) {
+  return requestJson<{ items: TrashItemPayload[] }>(`/api/v1/member/files/trash?${memberLocatorQuery(locator).toString()}`, { signal });
+}
+
+export function restoreMemberTrash(locator: MemberContentLocator, trashId: string, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>(`/api/v1/member/files/trash/${encodeURIComponent(trashId)}/restore`, {
+    method: 'POST', body: JSON.stringify(memberLocatorBody(locator)), signal,
+  });
+}
+
+export function purgeMemberTrash(locator: MemberContentLocator, trashId: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/member/files/trash/${encodeURIComponent(trashId)}?${memberLocatorQuery(locator).toString()}`, { method: 'DELETE', signal });
+}
+
+export function emptyMemberTrash(locator: MemberContentLocator, signal?: AbortSignal) {
+  return requestJson<{ removed: number }>(`/api/v1/member/files/trash?${memberLocatorQuery(locator).toString()}`, { method: 'DELETE', signal });
+}
 export function listMemberCollaborations(direction: 'incoming' | 'outgoing', signal?: AbortSignal) {
   const params = new URLSearchParams({ direction });
   return requestJson<MemberCollaborationsPayload>(`/api/v1/member/collaborations?${params.toString()}`, { signal });
 }
 
-export function listSpaces(signal?: AbortSignal) {
-  return requestJson<{ items: MemberSpace[] }>('/api/v1/spaces', { signal });
+export type CreateMemberCollaborationPayload = {
+  recipientId: string;
+  rootRelativePath: string;
+  permission: 'viewer' | 'editor';
+};
+
+export function createMemberCollaboration(payload: CreateMemberCollaborationPayload, signal?: AbortSignal) {
+  return requestJson<MemberCollaboration>('/api/v1/member/collaborations', { method: 'POST', body: JSON.stringify(payload), signal });
 }
 
-export function listMounts(spaceId: string, signal?: AbortSignal) {
-  return requestJson<{ items: MemberMount[] }>(`/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts`, { signal });
+export function updateMemberCollaboration(collaborationId: string, permission: 'viewer' | 'editor', signal?: AbortSignal) {
+  return requestJson<MemberCollaboration>(`/api/v1/member/collaborations/${encodeURIComponent(collaborationId)}`, { method: 'PATCH', body: JSON.stringify({ permission }), signal });
 }
 
-export function createDirectory(spaceId: string, mountId: string, payload: CreateDirectoryPayload, signal?: AbortSignal) {
-  return requestJson<{ relativePath: string }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/directories`,
-    { method: 'POST', body: JSON.stringify(payload), signal },
-  );
-}
-
-export function downloadURL(spaceId: string, mountId: string, path: string) {
-  const params = new URLSearchParams({ path });
-  return `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/download?${params.toString()}`;
-}
-
-export function previewURL(spaceId: string, mountId: string, path: string) {
-  const params = new URLSearchParams({ path, inline: '1' });
-  return `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/download?${params.toString()}`;
-}
-
-export function searchSpace(spaceId: string, query: string, limit = 50, cursor?: string, signal?: AbortSignal) {
-  const params = new URLSearchParams({ q: query, limit: String(limit) });
-  if (cursor) {
-    params.set('cursor', cursor);
-  }
-  return requestJson<SearchPayload>(`/api/v1/spaces/${encodeURIComponent(spaceId)}/search?${params.toString()}`, { signal });
-}
-
-export async function downloadRange(
-  spaceId: string,
-  mountId: string,
-  path: string,
-  rangeHeader: string,
-  signal?: AbortSignal,
-) {
-  const params = new URLSearchParams({ path });
-  const headers = new Headers({ Accept: 'application/octet-stream' });
-  if (rangeHeader.trim()) {
-    headers.set('Range', rangeHeader.trim());
-  }
-  const response = await fetch(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/download?${params.toString()}`,
-    { credentials: 'same-origin', headers, signal },
-  );
-  const body = await response.text();
-  if (!response.ok) {
-    let parsed: unknown = body;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      // Keep the raw body for non-JSON transfer errors.
-    }
-    throw new ApiError(`Request failed with ${response.status}`, response.status, parsed);
-  }
-  return {
-    status: response.status,
-    contentRange: response.headers.get('Content-Range'),
-    etag: response.headers.get('ETag'),
-    bodyPreview: body.slice(0, 400),
-    bytes: body.length,
-  };
+export function deleteMemberCollaboration(collaborationId: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/member/collaborations/${encodeURIComponent(collaborationId)}`, { method: 'DELETE', signal });
 }
 
 export function createShare(payload: CreateSharePayload, signal?: AbortSignal) {
@@ -889,7 +877,7 @@ export function deleteAiToken(tokenId: string, signal?: AbortSignal) {
 export const revokeAiToken = deleteAiToken;
 
 export function createUpload(payload: CreateUploadPayload, signal?: AbortSignal) {
-  return requestJson<UploadSessionPayload>('/api/v1/uploads', {
+  return requestJson<UploadSessionPayload>('/api/v1/member/uploads', {
     method: 'POST',
     body: JSON.stringify(payload),
     signal,
@@ -897,7 +885,7 @@ export function createUpload(payload: CreateUploadPayload, signal?: AbortSignal)
 }
 
 export function getUpload(uploadId: string, signal?: AbortSignal) {
-  return requestJson<UploadSessionPayload>(`/api/v1/uploads/${encodeURIComponent(uploadId)}`, { signal });
+  return requestJson<UploadSessionPayload>(`/api/v1/member/uploads/${encodeURIComponent(uploadId)}`, { signal });
 }
 
 export async function uploadPart(uploadId: string, partNumber: number, chunk: Blob | string, signal?: AbortSignal) {
@@ -906,7 +894,7 @@ export async function uploadPart(uploadId: string, partNumber: number, chunk: Bl
   if (csrf) {
     headers.set('X-CSRF-Token', csrf);
   }
-  const response = await fetch(`/api/v1/uploads/${encodeURIComponent(uploadId)}/parts/${partNumber}`, {
+  const response = await fetch(`/api/v1/member/uploads/${encodeURIComponent(uploadId)}/parts/${partNumber}`, {
     method: 'PUT',
     body: chunk,
     credentials: 'same-origin',
@@ -939,14 +927,14 @@ function readCsrfCookie(authContext: APIAuthContext = 'account'): string | undef
 }
 
 export function completeUpload(uploadId: string, signal?: AbortSignal) {
-  return requestJson<unknown>(`/api/v1/uploads/${encodeURIComponent(uploadId)}/complete`, {
+  return requestJson<unknown>(`/api/v1/member/uploads/${encodeURIComponent(uploadId)}/complete`, {
     method: 'POST',
     signal,
   });
 }
 
 export function cancelUpload(uploadId: string, signal?: AbortSignal) {
-  return requestJson<void>(`/api/v1/uploads/${encodeURIComponent(uploadId)}`, {
+  return requestJson<void>(`/api/v1/member/uploads/${encodeURIComponent(uploadId)}`, {
     method: 'DELETE',
     signal,
   });
@@ -1090,93 +1078,6 @@ export function updatePreferences(payload: PreferencesPayload, signal?: AbortSig
   });
 }
 
-// -- Member file management --------------------------------------------------
-
-export function renameObject(spaceId: string, mountId: string, payload: RenameObjectPayload, signal?: AbortSignal) {
-  return requestJson<unknown>(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/rename`,
-    { method: 'POST', body: JSON.stringify(payload), signal },
-  );
-}
-
-export function moveObject(spaceId: string, mountId: string, payload: MoveObjectPayload, signal?: AbortSignal) {
-  return requestJson<unknown>(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/move`,
-    { method: 'POST', body: JSON.stringify(payload), signal },
-  );
-}
-
-export function deleteObject(spaceId: string, mountId: string, path: string, options?: { permanent?: boolean }, signal?: AbortSignal) {
-  const params = new URLSearchParams({ path });
-  if (options?.permanent) {
-    params.set('permanent', 'true');
-  }
-  return requestJson<TrashItemPayload | void>(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/object?${params.toString()}`,
-    { method: 'DELETE', signal },
-  );
-}
-
-export function listTrash(spaceId: string, mountId: string, signal?: AbortSignal) {
-  return requestJson<{ items?: TrashItemPayload[] }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/trash`,
-    { signal },
-  );
-}
-
-export function emptyTrash(spaceId: string, mountId: string, signal?: AbortSignal) {
-  return requestJson<{ removed?: number }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/trash`,
-    { method: 'DELETE', signal },
-  );
-}
-
-export function restoreTrashItem(spaceId: string, mountId: string, trashId: string, signal?: AbortSignal) {
-  return requestJson<{ relativePath: string }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/trash/${encodeURIComponent(trashId)}/restore`,
-    { method: 'POST', signal },
-  );
-}
-
-export function purgeTrashItem(spaceId: string, mountId: string, trashId: string, signal?: AbortSignal) {
-  return requestJson<void>(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/trash/${encodeURIComponent(trashId)}`,
-    { method: 'DELETE', signal },
-  );
-}
-
-export function crossMountCopy(
-  spaceId: string,
-  mountId: string,
-  payload: { from: string; toSpaceId: string; toMountId: string; toDir?: string },
-  signal?: AbortSignal,
-) {
-  return requestJson<{ relativePath: string; spaceId: string; mountId: string }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/cross-mount-copy`,
-    {
-      method: 'POST',
-      body: JSON.stringify(payload),
-      signal,
-    },
-  );
-}
-
-export function crossMountMove(
-  spaceId: string,
-  mountId: string,
-  payload: { from: string; toSpaceId: string; toMountId: string; toDir?: string },
-  signal?: AbortSignal,
-) {
-  return requestJson<{ relativePath: string; spaceId: string; mountId: string }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts/${encodeURIComponent(mountId)}/cross-mount-move`,
-    {
-      method: 'POST',
-      body: JSON.stringify(payload),
-      signal,
-    },
-  );
-}
-
 // -- Share portal (anonymous, cookie-scoped) ---------------------------------
 
 export function getSharePortalCurrent(signal?: AbortSignal) {
@@ -1239,53 +1140,6 @@ export function revokeAdminUserSessions(userId: string, signal?: AbortSignal) {
     method: 'POST',
     signal,
   });
-}
-
-// -- Admin: spaces and ACL -------------------------------------------------------
-
-export function createAdminSpace(payload: CreateAdminSpacePayload, signal?: AbortSignal) {
-  return requestJson<AdminSpacePayload>('/api/v1/admin/spaces', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-    signal,
-  });
-}
-
-export function renameAdminSpace(spaceId: string, name: string, signal?: AbortSignal) {
-  return requestJson<AdminSpacePayload>(`/api/v1/admin/spaces/${encodeURIComponent(spaceId)}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ name }),
-    signal,
-  });
-}
-
-export function deleteAdminSpace(spaceId: string, name: string, signal?: AbortSignal) {
-  return requestJson<SpaceDeletionPayload>(`/api/v1/admin/spaces/${encodeURIComponent(spaceId)}`, {
-    method: 'DELETE',
-    body: JSON.stringify({ name }),
-    signal,
-  });
-}
-
-export function listSpaceMembers(spaceId: string, signal?: AbortSignal) {
-  return requestJson<{ items?: AdminSpaceMemberPayload[] }>(
-    `/api/v1/admin/spaces/${encodeURIComponent(spaceId)}/members`,
-    { signal },
-  );
-}
-
-export function putSpaceMember(spaceId: string, accountId: string, permission: SpaceMemberRole, signal?: AbortSignal) {
-  return requestJson<AdminSpaceMemberPayload>(
-    `/api/v1/admin/spaces/${encodeURIComponent(spaceId)}/members/${encodeURIComponent(accountId)}`,
-    { method: 'PUT', body: JSON.stringify({ permission }), signal },
-  );
-}
-
-export function removeSpaceMember(spaceId: string, accountId: string, signal?: AbortSignal) {
-  return requestJson<void>(
-    `/api/v1/admin/spaces/${encodeURIComponent(spaceId)}/members/${encodeURIComponent(accountId)}`,
-    { method: 'DELETE', signal },
-  );
 }
 
 // -- Admin: share and token governance -------------------------------------------

@@ -8,7 +8,7 @@ REST 的机器可读唯一手工契约是 [OpenAPI 3.1](../../openapi/omnora.v1.
 
 ## 账号—挂载契约
 
-现行模型移除 Space：
+现行模型直接以账号、个人目录、共用挂载和协作为业务资源：
 
 - 普通共用挂载使用 `mountId + relativePath`；
 - “我的文件”使用当前账号绑定的虚拟个人根，客户端不能指定其他账号；
@@ -23,6 +23,21 @@ REST 的机器可读唯一手工契约是 [OpenAPI 3.1](../../openapi/omnora.v1.
 REST 使用三个不可混用的资源族：账号作用域“我的文件”、`mountId` 作用域共用挂载、`collaborationId` 作用域收到的协作。客户端不得用可选 `mountId`、默认挂载 ID 或账号 ID 推断资源类型；个人资源永远绑定当前账号，协作资源每次重验接收账号和协作根。管理接口按挂载维护 `mount_grants`，只接受 `viewer/editor`，禁止为默认个人挂载创建授权；普通挂载由任一管理员治理，受限挂载仅初始管理员可发现和治理。
 
 允许 AI Token Bearer 的文件 REST 路由必须在 OpenAPI 中逐条白名单化，并复用与 MCP 相同的 scope 和资源边界；AI Token 不得进入账号、会话或管理员控制面。完整决策见[账号、挂载与内容授权设计](../superpowers/specs/2026-08-08-account-mount-access-design.md)。
+
+## 管理端挂载治理
+
+管理员挂载接口使用账号—挂载模型，不接受 `spaceId`、`space_id` 或旧 `kind` 字段：
+
+- `GET /api/v1/admin/mounts`：列出当前管理员可治理的共用挂载；默认个人挂载不返回；
+- `POST /api/v1/admin/mounts`：注册已映射的外部目录，允许零条初始授权；创建者不会自动获得内容权限；
+- `PATCH /api/v1/admin/mounts/{mountId}`：修改显示名称、只读/读写、索引和公开分享开关；根路径与治理类型不可修改；
+- `GET/PUT/DELETE /api/v1/admin/mounts/{mountId}/grants/{accountId}`：维护 `viewer/editor` 授权；
+- `DELETE /api/v1/admin/mounts/{mountId}`：请求体必须提交当前 `displayName` 精确确认。成功返回 `dataDeleted: false`，只清理 Omnora 控制面和派生能力，不删除 NAS 真实文件；
+- `POST /api/v1/admin/mounts/{mountId}/reverify`：重新验证挂载身份；
+- `GET /api/v1/admin/host-directories`：只返回部署映射的外部根和已绑定插槽；
+- `GET/POST /api/v1/admin/index-jobs`：只针对可治理的共用挂载，响应只含 `mountName`。
+
+普通管理员不能发现受限挂载；直接管理请求和相关索引请求统一表现为 `404`。候选路径或名称与隐藏对象冲突时返回不泄露对象信息的 `mount_unavailable`。
 
 ## 路由与三种认证
 

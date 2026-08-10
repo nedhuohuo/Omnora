@@ -7,7 +7,7 @@
 | 文档 | 读者 | 权威范围 |
 | --- | --- | --- |
 | [产品需求](requirements/product-requirements.md) | 产品、开发、测试 | 用户、场景、功能范围、非功能需求、非目标、成功标准 |
-| [账号、挂载与内容授权设计](superpowers/specs/2026-08-08-account-mount-access-design.md) | 产品、开发、测试、安全 | 移除 Space、默认个人目录、独立挂载授权、目录协作、管理员身份和受限挂载方案 B |
+| [账号、挂载与内容授权设计](superpowers/specs/2026-08-08-account-mount-access-design.md) | 产品、开发、测试、安全 | 默认个人目录、独立挂载授权、目录协作、管理员身份和受限挂载方案 B |
 | [领域模型](design/domain-model.md) | 产品、后端、前端、管理员 | 账号、个人目录、共用挂载、内容授权、协作、文件身份、Token、配额与删除语义 |
 | [技术架构](design/architecture.md) | 开发、运维 | 进程、模块、SQLite、索引、任务、部署、资源与恢复 |
 | [安全模型](security/security-model.md) | 开发、安全、运维 | 信任边界、认证授权、路径安全、网络暴露、凭证和备份恢复 |
@@ -37,8 +37,8 @@
 先按“文档地图”中的权威范围判断冲突，不使用一份文档覆盖所有领域：
 
 1. `LICENSE` 与适用的第三方许可证始终优先。
-2. 涉及 Space、账号、个人目录、挂载授权、目录协作及其资源关系时，以 `superpowers/specs/2026-08-08-account-mount-access-design.md` 的已确认决策为准。
-3. `security/security-model.md` 可以增加不改变上述资源关系的 fail-closed 安全约束；不得借“更严格”重新引入 Space、扩大管理员内容权或取消已确认能力。
+2. 涉及账号、个人目录、挂载授权、目录协作及其资源关系时，以 `superpowers/specs/2026-08-08-account-mount-access-design.md` 的已确认决策为准。
+3. `security/security-model.md` 可以增加不改变上述资源关系的 fail-closed 安全约束；不得扩大管理员内容权或取消已确认能力。
 4. 领域模型、产品需求、技术架构、Web 设计和验收标准分别在文档地图声明的范围内细化权威规格；REST/MCP 的目标机器契约必须在实现时由 OpenAPI、catalog 与协议测试共同冻结。
 5. 明确标注为“迁移前当前实现”或“已被取代”的内容只用于调试或历史追溯，不能覆盖目标模型。
 
@@ -46,4 +46,4 @@
 
 ## 版本状态
 
-当前目标业务模型已确认移除 Space，改为“唯一默认挂载中的个人目录 + 独立授权共用挂载 + 目录协作”，并采用受限挂载方案 B。仓库现有 Go、React、OpenAPI 和 MCP 仍是迁移前实现，不能把新模型文档解读为功能已上线。OAuth 授权配置文件仍为 `NOT IMPLEMENTED`；所有资源与性能数值仍是首版目标或验收门槛。
+当前业务模型为“唯一默认挂载中的个人目录 + 独立授权共用挂载 + 目录协作”，并采用受限挂载方案 B。仓库 Go、React、OpenAPI 和 MCP 已按该模型实现；OAuth 授权配置文件仍为 `NOT IMPLEMENTED`，资源与性能数值仍需按验收门槛验证。

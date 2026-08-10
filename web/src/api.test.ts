@@ -2,8 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createAiToken,
   listMemberCollaborations,
+  putAdminMountGrant,
+  registerAdminMount,
   listMemberContentSources,
   listMemberDirectoryChildren,
+  memberDownloadURL,
+  createMemberDirectory,
+  renameMemberObject,
+  createMemberCollaboration,
+  deleteMemberCollaboration,
   requestJson,
 } from './api';
 
@@ -78,6 +85,39 @@ describe('member content source API contract', () => {
     expect(fetchMock.mock.calls.map(([url]) => String(url)).join('\n')).not.toMatch(/spaceId|accountId|defaultMountId/);
   });
 
+  it('uses account content operation routes without Space coordinates', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ relativePath: 'docs/renamed.txt' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createMemberDirectory({ source: 'personal', path: 'docs' }, 'new-folder');
+    await renameMemberObject({ source: 'common_mount', mountId: 'mount-1', path: 'docs/a.txt' }, 'docs/b.txt');
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      '/api/v1/member/files/directories',
+      '/api/v1/member/files/rename',
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ source: 'personal', path: 'docs', name: 'new-folder' });
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ source: 'common_mount', mountId: 'mount-1', path: 'docs/a.txt', toPath: 'docs/b.txt' });
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toMatch(/spaceId|spaceName|accountId/);
+  });
+
+  it('builds a locator-based download URL', () => {
+    expect(memberDownloadURL({ source: 'personal', path: 'docs/a b.txt' })).toBe('/api/v1/member/files/download?source=personal&path=docs%2Fa+b.txt');
+    expect(memberDownloadURL({ source: 'common_mount', mountId: 'mount / 1', path: 'a.txt' })).toBe('/api/v1/member/files/download?source=common_mount&path=a.txt&mountId=mount+%2F+1');
+  });
+
+  it('uses collaboration CRUD routes without Space fields', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ id: 'collab-1' }), { status: 201, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await createMemberCollaboration({ recipientId: 'acct-2', rootRelativePath: 'docs', permission: 'viewer' });
+    await deleteMemberCollaboration('collab / 1');
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/v1/member/collaborations', '/api/v1/member/collaborations/collab%20%2F%201']);
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toMatch(/spaceId|spaceName|space_id/);
+  });
+
   it('lists incoming and outgoing collaborations on the member route', async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ items: [] }), {
       status: 200,
@@ -92,6 +132,45 @@ describe('member content source API contract', () => {
       '/api/v1/member/collaborations?direction=incoming',
       '/api/v1/member/collaborations?direction=outgoing',
     ]);
+  });
+});
+
+describe('admin mount API contract', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('creates an account-level mount without a Space selector', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ id: 'mount-1' }), {
+      status: 201,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await registerAdminMount({
+      displayName: 'Photos',
+      rootPath: '/mnt/omnora/photos',
+      governance: 'normal',
+      mode: 'read_write',
+      indexEnabled: true,
+      grants: [{ accountId: 'account-1', permission: 'editor' }],
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/admin/mounts');
+    const body = String(fetchMock.mock.calls[0][1]?.body);
+    expect(JSON.parse(body)).toEqual({
+      displayName: 'Photos', rootPath: '/mnt/omnora/photos', governance: 'normal',
+      mode: 'read_write', indexEnabled: true,
+      grants: [{ accountId: 'account-1', permission: 'editor' }],
+    });
+    expect(body).not.toMatch(/spaceId|kind|managed/);
+  });
+
+  it('uses mount-scoped grant routes', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await putAdminMountGrant('mount / 1', 'account / 1', 'viewer');
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/admin/mounts/mount%20%2F%201/grants/account%20%2F%201');
   });
 });
 

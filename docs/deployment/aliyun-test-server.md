@@ -188,8 +188,7 @@ Under the 2026-08-08 account-mount target model, registering a mount uses the
 selected slot or deeper directory itself as the mount root. Omnora must not
 create a per-space or other implicit business subdirectory. Each common mount
 has its own account grants, and overlapping parent/child roots remain invalid.
-The current runtime may still implement the older per-space behavior until the
-breaking migration is complete; see [mount-slots.md](mount-slots.md).
+The current runtime follows this account-mount behavior; see [mount-slots.md](mount-slots.md).
 
 Effective write access is still `Docker volume mode ∩ Omnora mount mode`. If you later switch the Compose bind back to `:ro`, existing `read_write` mounts will fail create/upload until the volume is remounted read-write.
 

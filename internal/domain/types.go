@@ -55,15 +55,6 @@ const (
 	AccountRoleMember AccountRole = "member"
 )
 
-type SpacePermission string
-
-const (
-	SpacePermissionNone    SpacePermission = ""
-	SpacePermissionViewer  SpacePermission = "viewer"
-	SpacePermissionEditor  SpacePermission = "editor"
-	SpacePermissionManager SpacePermission = "manager"
-)
-
 type ContentPermission string
 
 const (
