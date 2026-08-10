@@ -32,7 +32,7 @@ func fileopsDB(t *testing.T) *sql.DB {
 	return handle.SQL()
 }
 
-func TestJournalPersistsMountStorageCoordinatesWithoutSpace(t *testing.T) {
+func TestJournalPersistsMountStorageCoordinates(t *testing.T) {
 	db := fileopsDB(t)
 	spec := OperationSpec{
 		ID: "fop-target", Kind: KindCrossMountMove,

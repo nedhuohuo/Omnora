@@ -52,16 +52,6 @@ type Account struct {
 	UpdatedAt             time.Time
 }
 
-type Space struct {
-	ID             string
-	Kind           string
-	Name           string
-	OwnerAccountID string
-	Status         string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-}
-
 type Session struct {
 	ID                   string
 	AccountID            string

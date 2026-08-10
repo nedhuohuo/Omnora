@@ -45,25 +45,6 @@ CREATE TABLE system_state (
 
 INSERT INTO system_state(key, value) VALUES ('credential_generation', '7');
 
-CREATE TABLE spaces (
-	id TEXT PRIMARY KEY,
-	kind TEXT NOT NULL CHECK (kind IN ('personal', 'shared')),
-	name TEXT NOT NULL,
-	owner_account_id TEXT REFERENCES accounts(id),
-	status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'deleted')),
-	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE space_members (
-	space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
-	account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-	permission TEXT NOT NULL CHECK (permission IN ('viewer', 'editor', 'manager')),
-	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (space_id, account_id)
-);
-
 CREATE TABLE mounts (
 	id TEXT PRIMARY KEY,
 	display_name TEXT NOT NULL UNIQUE,

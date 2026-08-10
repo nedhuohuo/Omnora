@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"omnora/internal/access"
 	"omnora/internal/catalog"
 	"omnora/internal/jobs"
 )
@@ -203,7 +204,7 @@ func (s *Server) runCatalogScanBatch(ctx context.Context, store jobs.Store, job 
 		_ = store.Fail(ctx, job.ID, err)
 		return catalog.ScanResult{}, err
 	}
-	if err := s.verifyLoadedMountIdentity(request, mountForListing{ID: mount.ID, Root: mount.Root, IdentityJSON: mount.IdentityJSON}); err != nil {
+	if err := s.guard.VerifyMountIdentity(ctx, access.AuthorizedMount{ID: mount.ID, Root: mount.Root, MountRoot: mount.Root, IdentityJSON: mount.IdentityJSON}); err != nil {
 		_ = store.Fail(ctx, job.ID, err)
 		return catalog.ScanResult{}, err
 	}

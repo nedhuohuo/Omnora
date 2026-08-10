@@ -1,6 +1,6 @@
 # MCP Inspector / 协议验收清单
 
-> **现行契约：** 账号—挂载模型，24 tools、15 scopes、8 个逐操作 MRTR 工具；不兼容旧 Space MCP。
+> **现行契约：** 账号—挂载模型；工具、scope 和逐操作 MRTR 数量以当前 catalog 为准，不兼容已移除的旧资源工具。
 
 本清单只面向 MCP Inspector v2.1.0 Modern（Streamable HTTP）和仓库内协议测试，
 不绑定任何桌面或第三方客户端。现场验收应保存脱敏后的请求摘要、响应状态和工具目录，
@@ -22,7 +22,7 @@ Redacted evidence: <脱敏后的 Inspector/protocol 摘要>
 - [ ] `initialize` 成功，协商协议版本为 `2026-07-28`。
 - [ ] 使用短期、最小 scope 的 AI Token；OAuth 授权配置显示为 **NOT IMPLEMENTED**。
 - [ ] `tools/list` 只返回该 Token 当前 scope 且属于 24-tool contract 的工具；全 scope Token
-      恰好返回 24 个工具，包含 `files.update` 且不含旧 Space 工具；`mounts.list` 的 input schema
+      返回当前 catalog 中的工具，包含 `files.update` 且不含已移除的旧资源工具；`mounts.list` 的 input schema
       不接受任何字段。
 - [ ] 没有可靠 form Elicitation 能力时，8 个高风险工具不会出现在目录中。
 

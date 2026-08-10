@@ -330,7 +330,7 @@ func TestAuthorizeRejectsSymlinksAndIdentityDriftForPersonalAndCommon(t *testing
 	})
 }
 
-func TestLoadMountIdentityUsesMountIDWithoutSpaceCoordinates(t *testing.T) {
+func TestLoadMountIdentityUsesMountIDWithoutLegacyCoordinates(t *testing.T) {
 	f := newGuardFixture(t)
 	mount, err := NewGuard(f.db).LoadMountIdentity(context.Background(), "common-rw")
 	if err != nil {

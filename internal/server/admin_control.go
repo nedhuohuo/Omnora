@@ -7,20 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
-	"unicode"
-	"unicode/utf8"
-
-	"omnora/internal/audit"
 	"omnora/internal/domain"
 	"omnora/internal/httpx"
 	"omnora/internal/identity"
 	"omnora/internal/mountadmin"
 	"omnora/internal/recovery"
 	"omnora/internal/store"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 )
 
 // requireAdmin resolves the current session and confirms the account is a
@@ -337,608 +333,6 @@ func (s *Server) revokeAdminUserSessions(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ---- Space membership ----
-
-type spaceMemberDTO struct {
-	AccountID   string `json:"accountId"`
-	Email       string `json:"email"`
-	DisplayName string `json:"displayName"`
-	Permission  string `json:"permission"`
-	Protected   bool   `json:"protected"`
-}
-
-func (s *Server) listAdminSpaceMembers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-	initialAdminID, err := s.initialAdminID(r.Context())
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	spaceID := r.PathValue("spaceId")
-	rows, err := s.sqlDB().QueryContext(r.Context(), `
-SELECT sm.account_id, a.email, a.display_name, sm.permission
-FROM space_members sm
-JOIN accounts a ON a.id = sm.account_id
-WHERE sm.space_id = ?
-ORDER BY a.display_name
-`, spaceID)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	defer rows.Close()
-	items := []spaceMemberDTO{}
-	for rows.Next() {
-		var item spaceMemberDTO
-		if err := rows.Scan(&item.AccountID, &item.Email, &item.DisplayName, &item.Permission); err != nil {
-			writeDBError(w, r, err)
-			return
-		}
-		item.Protected = item.AccountID == initialAdminID
-		items = append(items, item)
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
-}
-
-func (s *Server) putAdminSpaceMember(w http.ResponseWriter, r *http.Request) {
-	adminSession, ok := s.requireAdmin(w, r)
-	if !ok {
-		return
-	}
-	spaceID := r.PathValue("spaceId")
-	accountRef := strings.TrimSpace(r.PathValue("accountId"))
-	if accountRef == "" {
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "account id or email is required")
-		return
-	}
-	var req struct {
-		Permission string `json:"permission"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if !s.requireActiveAdminSpace(w, r, spaceID) {
-		return
-	}
-	permission := domain.SpacePermission(req.Permission)
-	switch permission {
-	case domain.SpacePermissionViewer, domain.SpacePermissionEditor, domain.SpacePermissionManager:
-	default:
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "permission must be viewer, editor, or manager")
-		return
-	}
-	member, ok := s.resolveAdminSpaceMemberAccount(w, r, accountRef)
-	if !ok {
-		return
-	}
-	if s.rejectInitialAdminMutation(w, r, member.AccountID, "the initial administrator cannot have a space permission changed") {
-		return
-	}
-	now := nowRFC3339()
-	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	defer tx.Rollback()
-	_, err = tx.ExecContext(r.Context(), `
-INSERT INTO space_members(space_id, account_id, permission, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(space_id, account_id) DO UPDATE SET permission = excluded.permission, updated_at = excluded.updated_at
-`, spaceID, member.AccountID, string(permission), now, now)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if err := s.recordAuditTx(r.Context(), tx, r, adminSession.AccountID, "admin_space_member_set", "space", spaceID, fmt.Sprintf(`{"accountId":%q,"permission":%q}`, member.AccountID, permission)); err != nil {
-		s.markAuditRiskIfNeeded(r.Context(), err)
-		writeDBError(w, r, err)
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	member.Permission = string(permission)
-	httpx.WriteJSON(w, http.StatusOK, member)
-}
-
-func (s *Server) requireActiveAdminSpace(w http.ResponseWriter, r *http.Request, spaceID string) bool {
-	var exists int
-	err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT 1
-FROM spaces
-WHERE id = ? AND status = 'active'
-`, spaceID).Scan(&exists)
-	if errors.Is(err, sql.ErrNoRows) {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "space was not found")
-		return false
-	}
-	if err != nil {
-		writeDBError(w, r, err)
-		return false
-	}
-	return true
-}
-
-func (s *Server) resolveAdminSpaceMemberAccount(w http.ResponseWriter, r *http.Request, accountRef string) (spaceMemberDTO, bool) {
-	var member spaceMemberDTO
-	err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT id, email, display_name
-FROM accounts
-WHERE id = ? OR email = ?
-`, accountRef, strings.ToLower(accountRef)).Scan(&member.AccountID, &member.Email, &member.DisplayName)
-	if errors.Is(err, sql.ErrNoRows) {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "account was not found")
-		return spaceMemberDTO{}, false
-	}
-	if err != nil {
-		writeDBError(w, r, err)
-		return spaceMemberDTO{}, false
-	}
-	return member, true
-}
-
-func (s *Server) deleteAdminSpaceMember(w http.ResponseWriter, r *http.Request) {
-	adminSession, ok := s.requireAdmin(w, r)
-	if !ok {
-		return
-	}
-	spaceID := r.PathValue("spaceId")
-	accountID := r.PathValue("accountId")
-	if s.rejectInitialAdminMutation(w, r, accountID, "the initial administrator cannot be removed from a space") {
-		return
-	}
-	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	defer tx.Rollback()
-	result, err := tx.ExecContext(r.Context(), `
-DELETE FROM space_members WHERE space_id = ? AND account_id = ?
-`, spaceID, accountID)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if affected == 0 {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "membership was not found")
-		return
-	}
-	if err := s.recordAuditTx(r.Context(), tx, r, adminSession.AccountID, "admin_space_member_remove", "space", spaceID, fmt.Sprintf(`{"accountId":%q}`, accountID)); err != nil {
-		s.markAuditRiskIfNeeded(r.Context(), err)
-		writeDBError(w, r, err)
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) createAdminSpace(w http.ResponseWriter, r *http.Request) {
-	session, ok := s.requireAdmin(w, r)
-	if !ok {
-		return
-	}
-	var req struct {
-		Name string `json:"name"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	name, err := normalizeAdminSpaceName(req.Name)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
-		return
-	}
-	spaceID := "spc_" + httpx.NewRequestID()
-	now := nowRFC3339()
-	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(r.Context(), `
-INSERT INTO spaces(id, kind, name, owner_account_id, status, created_at, updated_at)
-VALUES (?, 'shared', ?, ?, 'active', ?, ?)
-`, spaceID, name, session.AccountID, now, now); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if _, err := tx.ExecContext(r.Context(), `
-INSERT INTO space_members(space_id, account_id, permission, created_at, updated_at)
-VALUES (?, ?, 'manager', ?, ?)
-`, spaceID, session.AccountID, now, now); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if err := s.recordAuditTx(r.Context(), tx, r, session.AccountID, "admin_space_create", "space", spaceID, "{}"); err != nil {
-		s.markAuditRiskIfNeeded(r.Context(), err)
-		writeDBError(w, r, err)
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": spaceID, "type": "shared", "name": name})
-}
-
-func normalizeAdminSpaceName(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", fmt.Errorf("name is required")
-	}
-	if utf8.RuneCountInString(value) > 128 {
-		return "", fmt.Errorf("name is too long")
-	}
-	for _, r := range value {
-		if unicode.IsControl(r) {
-			return "", fmt.Errorf("name contains invalid characters")
-		}
-	}
-	return value, nil
-}
-
-func (s *Server) renameAdminSpace(w http.ResponseWriter, r *http.Request) {
-	session, ok := s.requireAdmin(w, r)
-	if !ok {
-		return
-	}
-	var req struct {
-		Name string `json:"name"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	name, err := normalizeAdminSpaceName(req.Name)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
-		return
-	}
-	spaceID := strings.TrimSpace(r.PathValue("spaceId"))
-	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	defer func() { _ = tx.Rollback() }()
-	var kind, oldName string
-	err = tx.QueryRowContext(r.Context(), `
-SELECT kind, name
-FROM spaces
-WHERE id = ? AND status = 'active'
-`, spaceID).Scan(&kind, &oldName)
-	if errors.Is(err, sql.ErrNoRows) {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "space was not found")
-		return
-	}
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if kind != "shared" {
-		httpx.WriteError(w, r, http.StatusConflict, "personal_space_protected", "personal spaces cannot be renamed")
-		return
-	}
-	now := nowRFC3339()
-	result, err := tx.ExecContext(r.Context(), `
-UPDATE spaces
-SET name = ?, updated_at = ?
-WHERE id = ? AND kind = 'shared' AND status = 'active'
-`, name, now, spaceID)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if affected == 0 {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "space was not found")
-		return
-	}
-	metadata := fmt.Sprintf(`{"from":%q,"to":%q}`, oldName, name)
-	if _, err := tx.ExecContext(r.Context(), `
-INSERT INTO audit_events(actor_account_id, route_group, action, target_type, target_id, ip_hash, user_agent_hash, metadata_json)
-VALUES (?, 'rest', 'admin_space_rename', 'space', ?, ?, ?, ?)
-	`, session.AccountID, spaceID, audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainClientIP, clientIPFromRequest(r)), audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainUserAgent, r.UserAgent()), metadata); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": spaceID, "type": "shared", "name": name})
-}
-
-func (s *Server) deleteAdminSpace(w http.ResponseWriter, r *http.Request) {
-	session, ok := s.requireAdmin(w, r)
-	if !ok {
-		return
-	}
-	var req struct {
-		Name string `json:"name"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	spaceID := strings.TrimSpace(r.PathValue("spaceId"))
-	var kind, spaceName string
-	err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT kind, name
-FROM spaces
-WHERE id = ? AND status = 'active'
-`, spaceID).Scan(&kind, &spaceName)
-	if errors.Is(err, sql.ErrNoRows) {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "space was not found")
-		return
-	}
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if kind != "shared" {
-		httpx.WriteError(w, r, http.StatusConflict, "personal_space_protected", "personal spaces cannot be deleted")
-		return
-	}
-	if req.Name != spaceName {
-		httpx.WriteError(w, r, http.StatusConflict, "confirmation_required", "type the current space name to confirm deletion")
-		return
-	}
-
-	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var txKind, txSpaceName string
-	if err := tx.QueryRowContext(r.Context(), `
-SELECT kind, name
-FROM spaces
-WHERE id = ? AND status = 'active'
-`, spaceID).Scan(&txKind, &txSpaceName); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "space was not found")
-			return
-		}
-		writeDBError(w, r, err)
-		return
-	}
-	if txKind != "shared" {
-		httpx.WriteError(w, r, http.StatusConflict, "personal_space_protected", "personal spaces cannot be deleted")
-		return
-	}
-	if req.Name != txSpaceName {
-		httpx.WriteError(w, r, http.StatusConflict, "confirmation_required", "type the current space name to confirm deletion")
-		return
-	}
-
-	rows, err := tx.QueryContext(r.Context(), `SELECT id FROM mounts WHERE space_id = ?`, spaceID)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	mountIDs := make([]string, 0)
-	for rows.Next() {
-		var mountID string
-		if err := rows.Scan(&mountID); err != nil {
-			_ = rows.Close()
-			writeDBError(w, r, err)
-			return
-		}
-		mountIDs = append(mountIDs, mountID)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		writeDBError(w, r, err)
-		return
-	}
-	_ = rows.Close()
-
-	metadata, err := json.Marshal(map[string]any{
-		"spaceName":   txSpaceName,
-		"mountIds":    mountIDs,
-		"deleteData":  false,
-		"dataDeleted": false,
-	})
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if _, err := tx.ExecContext(r.Context(), `
-INSERT INTO audit_events(actor_account_id, route_group, action, target_type, target_id, ip_hash, user_agent_hash, metadata_json)
-VALUES (?, 'rest', 'admin_space_delete', 'space', ?, ?, ?, ?)
-`, session.AccountID, spaceID, audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainClientIP, clientIPFromRequest(r)), audit.HashForAudit([]byte(s.cfg.Secrets.AuditHMACKey), audit.HashDomainUserAgent, r.UserAgent()), string(metadata)); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-
-	if err := cancelAdminSpaceJobs(r.Context(), tx, spaceID, mountIDs, nowRFC3339()); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if _, err := tx.ExecContext(r.Context(), `DELETE FROM catalog_entries WHERE space_id = ?`, spaceID); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if _, err := tx.ExecContext(r.Context(), `DELETE FROM file_objects WHERE space_id = ?`, spaceID); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if _, err := tx.ExecContext(r.Context(), `DELETE FROM ai_token_boundaries WHERE space_id = ?`, spaceID); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if _, err := tx.ExecContext(r.Context(), `DELETE FROM upload_sessions WHERE space_id = ?`, spaceID); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if _, err := tx.ExecContext(r.Context(), `DELETE FROM mounts WHERE space_id = ?`, spaceID); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	result, err := tx.ExecContext(r.Context(), `
-DELETE FROM spaces
-WHERE id = ? AND kind = 'shared' AND status = 'active'
-`, spaceID)
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	if affected == 0 {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "space was not found")
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		writeDBError(w, r, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"id":          spaceID,
-		"deleted":     true,
-		"deleteData":  false,
-		"dataDeleted": false,
-	})
-}
-
-func cancelAdminSpaceJobs(ctx context.Context, tx *sql.Tx, spaceID string, mountIDs []string, now string) error {
-	referencedIDs := make(map[string]struct{}, len(mountIDs)+1)
-	referencedIDs[spaceID] = struct{}{}
-	for _, mountID := range mountIDs {
-		referencedIDs[mountID] = struct{}{}
-	}
-	rows, err := tx.QueryContext(ctx, `
-SELECT id, payload_json
-FROM jobs
-WHERE status IN ('queued', 'running', 'paused')
-`)
-	if err != nil {
-		return err
-	}
-	jobIDs := make([]string, 0)
-	for rows.Next() {
-		var jobID, payload string
-		if err := rows.Scan(&jobID, &payload); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		if adminSpaceJobReferences(payload, referencedIDs) {
-			jobIDs = append(jobIDs, jobID)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	for _, jobID := range jobIDs {
-		if _, err := tx.ExecContext(ctx, `
-UPDATE jobs
-SET status = 'canceled', updated_at = ?, completed_at = COALESCE(completed_at, ?)
-WHERE id = ? AND status IN ('queued', 'running', 'paused')
-`, now, now, jobID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func adminSpaceJobReferences(payload string, referencedIDs map[string]struct{}) bool {
-	var value any
-	if err := json.Unmarshal([]byte(payload), &value); err != nil {
-		return false
-	}
-	return adminSpaceJobValueReferences(value, referencedIDs)
-}
-
-func adminSpaceJobValueReferences(value any, referencedIDs map[string]struct{}) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, child := range typed {
-			if key == "mountId" || key == "mount_id" || key == "spaceId" || key == "space_id" {
-				if id, ok := child.(string); ok {
-					if _, exists := referencedIDs[id]; exists {
-						return true
-					}
-				}
-			}
-			if adminSpaceJobValueReferences(child, referencedIDs) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range typed {
-			if adminSpaceJobValueReferences(child, referencedIDs) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (s *Server) initialAdminID(ctx context.Context) (string, error) {
-	var accountID string
-	err := s.sqlDB().QueryRowContext(ctx, `
-SELECT value
-FROM system_state
-WHERE key = 'initial_admin_account_id'
-`).Scan(&accountID)
-	if err == nil && strings.TrimSpace(accountID) != "" {
-		return accountID, nil
-	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", err
-	}
-
-	err = s.sqlDB().QueryRowContext(ctx, `
-SELECT id
-FROM accounts
-ORDER BY created_at ASC, id ASC
-LIMIT 1
-`).Scan(&accountID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return accountID, err
-}
-
-func (s *Server) rejectInitialAdminMutation(w http.ResponseWriter, r *http.Request, accountID, message string) bool {
-	initialAdminID, err := s.initialAdminID(r.Context())
-	if err != nil {
-		writeDBError(w, r, err)
-		return true
-	}
-	if initialAdminID == "" || initialAdminID != accountID {
-		return false
-	}
-	httpx.WriteError(w, r, http.StatusConflict, "initial_admin_protected", message)
-	return true
-}
-
 // ---- Global shares & AI tokens ----
 
 func (s *Server) listAdminShares(w http.ResponseWriter, r *http.Request) {
@@ -946,15 +340,15 @@ func (s *Server) listAdminShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
-	SELECT sh.id, sh.public_id, COALESCE(sh.fragment_secret, ''), sh.space_id, sh.mount_id, sh.relative_path,
-	       sh.allow_preview, sh.allow_download, sh.max_visits, sh.used_visits,
-	       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, ''),
-	       COALESCE(sp.name, ''), COALESCE(m.display_name, ''), COALESCE(a.email, ''), COALESCE(a.display_name, '')
+SELECT sh.id, sh.public_id, COALESCE(sh.fragment_secret, ''), sh.mount_id,
+       COALESCE(m.display_name, ''), COALESCE(m.purpose, ''), sh.relative_path,
+       sh.allow_preview, sh.allow_download, sh.max_visits, sh.used_visits,
+       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, ''),
+       COALESCE(a.email, ''), COALESCE(a.display_name, '')
 FROM shares sh
-JOIN spaces sp ON sp.id = sh.space_id
 JOIN mounts m ON m.id = sh.mount_id
 JOIN accounts a ON a.id = sh.creator_account_id
-ORDER BY sh.created_at DESC
+ORDER BY sh.created_at DESC, sh.id DESC
 LIMIT ?
 `, parseIntDefault(r.URL.Query().Get("limit"), 200))
 	if err != nil {
@@ -962,16 +356,58 @@ LIMIT ?
 		return
 	}
 	defer rows.Close()
-	items := []shareRecordDTO{}
+	items := make([]shareRecordDTO, 0)
 	for rows.Next() {
-		item, err := scanShareRecordDTO(rows)
-		if err != nil {
+		var item shareRecordDTO
+		var fragmentSecret, mountPurpose, expiresAt, revokedAt string
+		var allowPreview, allowDownload int
+		var maxVisits, maxDownloads sql.NullInt64
+		if err := rows.Scan(&item.ID, &item.PublicID, &fragmentSecret, &item.MountID,
+			&item.MountName, &mountPurpose, &item.RelativePath, &allowPreview, &allowDownload,
+			&maxVisits, &item.UsedVisits, &maxDownloads, &item.UsedDownloads, &expiresAt,
+			&revokedAt, &item.CreatorEmail, &item.CreatorDisplayName); err != nil {
 			writeDBError(w, r, err)
 			return
 		}
+		item.Source = "common_mount"
+		if mountPurpose == string(domain.MountPurposePersonalDefault) {
+			item.Source = "personal"
+			item.MountID = ""
+			item.MountName = ""
+		}
+		if fragmentSecret != "" {
+			item.Fragment = item.PublicID + "." + fragmentSecret
+		}
+		item.AllowPreview = allowPreview == 1
+		item.AllowDownload = allowDownload == 1
+		if maxVisits.Valid {
+			item.MaxVisits = &maxVisits.Int64
+		}
+		if maxDownloads.Valid {
+			item.MaxDownloads = &maxDownloads.Int64
+		}
+		item.ExpiresAt = expiresAt
+		item.RevokedAt = revokedAt
+		item.Status = adminShareStatus(expiresAt, revokedAt)
 		items = append(items, item)
 	}
+	if err := rows.Err(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func adminShareStatus(expiresAt, revokedAt string) string {
+	if revokedAt != "" {
+		return "revoked"
+	}
+	if expiresAt != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, expiresAt); err == nil && !time.Now().UTC().Before(parsed) {
+			return "expired"
+		}
+	}
+	return "active"
 }
 
 func (s *Server) revokeAdminShare(w http.ResponseWriter, r *http.Request) {

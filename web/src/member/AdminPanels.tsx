@@ -2,19 +2,14 @@ import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import {
   type AdminOverviewPayload,
   type AdminRouteGroupItem,
-  type AdminSpaceMemberPayload,
-  type AdminSpacePayload,
   type AdminUserPayload,
   type AiTokenListItem,
   ApiError,
   type BackupPayload,
   type SharePayload,
-  type SpaceMemberRole,
   isReauthenticationCanceled,
   createAdminBackup,
-  createAdminSpace,
   createAdminUser,
-  deleteAdminSpace,
   deleteAdminAiToken,
   disableAdminUser,
   enableAdminUser,
@@ -22,12 +17,7 @@ import {
   listAdminAiTokens,
   listAdminBackups,
   listAdminShares,
-  listAdminSpaces,
   listAdminUsers,
-  listSpaceMembers,
-  putSpaceMember,
-  removeSpaceMember,
-  renameAdminSpace,
   restoreAdminBackup,
   revokeAdminShare,
   revokeAdminUserSessions,
@@ -103,15 +93,6 @@ function backupCreatorLabel(backup: BackupPayload) {
   return {
     primary: label || displayName || email || '--',
     secondary: email && email !== label && email !== displayName ? email : '',
-  };
-}
-
-function spaceMemberLabel(member: AdminSpaceMemberPayload) {
-  const email = readableLabel(member.email);
-  const displayName = readableLabel(member.displayName);
-  return {
-    primary: email || displayName || '--',
-    secondary: email && displayName && displayName !== email ? displayName : '',
   };
 }
 
@@ -347,256 +328,6 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
             <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={closeForm}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.userSubmit}</button></div>
           </form>
         </div>
-      )}
-    </div>
-  );
-}
-
-// -- Spaces and ACL -------------------------------------------------------------------
-
-export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
-  const text = localeMessages[locale];
-  const { runSensitive } = useRecentReauth();
-  const [spaces, setSpaces] = useState<AdminSpacePayload[]>([]);
-  const [selectedSpaceId, setSelectedSpaceId] = useState('');
-  const [members, setMembers] = useState<AdminSpaceMemberPayload[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [spaceName, setSpaceName] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [memberAccountId, setMemberAccountId] = useState('');
-  const [memberPermission, setMemberPermission] = useState<SpaceMemberRole>('viewer');
-  const [renameTarget, setRenameTarget] = useState<AdminSpacePayload | null>(null);
-  const [renameValue, setRenameValue] = useState('');
-  const [deleteTarget, setDeleteTarget] = useState<AdminSpacePayload | null>(null);
-  const [deleteConfirmValue, setDeleteConfirmValue] = useState('');
-  const selectedSpace = spaces.find((space) => space.id === selectedSpaceId);
-
-  const loadSpaces = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const response = await listAdminSpaces();
-      setSpaces(response.items);
-      setSelectedSpaceId((current) => (response.items.some((space) => space.id === current) ? current : (response.items[0]?.id ?? '')));
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const loadMembers = useCallback(async (spaceId: string) => {
-    if (!spaceId) {
-      setMembers([]);
-      return;
-    }
-    try {
-      const response = await listSpaceMembers(spaceId);
-      setMembers(response.items ?? []);
-    } catch (caught) {
-      setError(describeError(caught));
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadSpaces();
-  }, [loadSpaces]);
-
-  useEffect(() => {
-    void loadMembers(selectedSpaceId);
-  }, [loadMembers, selectedSpaceId]);
-
-  async function onCreateSpace(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!spaceName.trim()) return;
-    setCreating(true);
-    setError('');
-    try {
-      await createAdminSpace({ name: spaceName.trim() });
-      setSpaceName('');
-      await loadSpaces();
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  function openRenameSpace(space: AdminSpacePayload) {
-    setError('');
-    setRenameTarget(space);
-    setRenameValue(space.name);
-  }
-
-  function openDeleteSpace(space: AdminSpacePayload) {
-    setError('');
-    setDeleteTarget(space);
-    setDeleteConfirmValue('');
-  }
-
-  async function onRenameSpace(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!renameTarget || !renameValue.trim()) return;
-    setLoading(true);
-    setError('');
-    try {
-      await renameAdminSpace(renameTarget.id, renameValue.trim());
-      setRenameTarget(null);
-      setRenameValue('');
-      await loadSpaces();
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onDeleteSpace(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!deleteTarget || deleteConfirmValue !== deleteTarget.name) return;
-    setLoading(true);
-    setError('');
-    try {
-      await runSensitive(() => deleteAdminSpace(deleteTarget.id, deleteConfirmValue));
-      setDeleteTarget(null);
-      setDeleteConfirmValue('');
-      await loadSpaces();
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onSetMember(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selectedSpaceId || !memberAccountId.trim()) return;
-    setLoading(true);
-    setError('');
-    try {
-      await putSpaceMember(selectedSpaceId, memberAccountId.trim(), memberPermission);
-      setMemberAccountId('');
-      await loadMembers(selectedSpaceId);
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onUpdatePermission(accountId: string, permission: SpaceMemberRole) {
-    setError('');
-    try {
-      await putSpaceMember(selectedSpaceId, accountId, permission);
-      await loadMembers(selectedSpaceId);
-    } catch (caught) {
-      setError(describeError(caught));
-    }
-  }
-
-  async function onRemoveMember(accountId: string) {
-    setError('');
-    try {
-      await removeSpaceMember(selectedSpaceId, accountId);
-      await loadMembers(selectedSpaceId);
-    } catch (caught) {
-      setError(describeError(caught));
-    }
-  }
-
-  return (
-    <div className="member-admin-workspace">
-      <div className="member-heading">
-        <div><h1>{text.spacesAdminTitle}</h1><p>{text.spacesAdminDetail}</p></div>
-        <button className="member-secondary-action" type="button" onClick={() => void loadSpaces()} disabled={loading}>{text.refresh}</button>
-      </div>
-      {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
-
-      <form className="member-admin-inline-form" onSubmit={onCreateSpace}>
-        <label>{text.spaceName}<input value={spaceName} onChange={(event) => setSpaceName(event.target.value)} required /></label>
-        <button className="member-primary" type="submit" disabled={creating}>{text.spaceCreate}</button>
-      </form>
-
-      {spaces.length === 0 ? <div className="member-empty">{text.spaceNoSpacesAdmin}</div> : (
-        <>
-          <label className="member-admin-inline-form"><span>{text.spaceSelect}</span>
-            <select value={selectedSpaceId} onChange={(event) => setSelectedSpaceId(event.target.value)}>
-              {spaces.map((space) => <option key={space.id} value={space.id}>{space.name} ({space.type})</option>)}
-            </select>
-          </label>
-          {selectedSpace?.type === 'shared' && (
-            <div className="member-admin-table-actions">
-              <button className="member-table-action" type="button" onClick={() => openRenameSpace(selectedSpace)} disabled={loading}>{text.spaceRename}</button>
-              <button className="member-table-action member-table-danger" type="button" onClick={() => openDeleteSpace(selectedSpace)} disabled={loading}>{text.spaceDelete}</button>
-            </div>
-          )}
-
-          <h2>{text.spaceMembersTitle}</h2>
-          {members.length === 0 ? <div className="member-empty">{text.spaceNoMembers}</div> : (
-            <table className="member-admin-table">
-              <thead><tr><th>{text.userColumnEmail}</th><th>{text.spaceMemberRole}</th><th>{text.actions}</th></tr></thead>
-              <tbody>{members.map((member) => {
-                const account = spaceMemberLabel(member);
-                return (
-                  <tr key={member.accountId}>
-                    <td>{account.primary}{account.secondary && <small>{account.secondary}</small>}</td>
-                    <td>
-                      {member.protected ? text.userColumnAdmin : <select value={member.permission} onChange={(event) => void onUpdatePermission(member.accountId, event.target.value as SpaceMemberRole)}>
-                        <option value="viewer">{text.spaceRoleViewer}</option>
-                        <option value="editor">{text.spaceRoleEditor}</option>
-                        <option value="manager">{text.spaceRoleManager}</option>
-                      </select>}
-                    </td>
-                    <td>{member.protected ? '--' : <button className="member-table-action member-table-danger" type="button" onClick={() => void onRemoveMember(member.accountId)}>{text.spaceMemberRemove}</button>}</td>
-                  </tr>
-                );
-              })}</tbody>
-            </table>
-          )}
-
-          <form className="member-admin-inline-form" onSubmit={onSetMember}>
-            <label>{text.spaceMemberAccountId}<input value={memberAccountId} onChange={(event) => setMemberAccountId(event.target.value)} required /></label>
-            <label>{text.spaceMemberRole}
-              <select value={memberPermission} onChange={(event) => setMemberPermission(event.target.value as SpaceMemberRole)}>
-                <option value="viewer">{text.spaceRoleViewer}</option>
-                <option value="editor">{text.spaceRoleEditor}</option>
-                <option value="manager">{text.spaceRoleManager}</option>
-              </select>
-            </label>
-            <button className="member-primary" type="submit" disabled={loading}>{text.spaceMemberAdd}</button>
-          </form>
-
-          {renameTarget && (
-            <div className="member-modal-backdrop">
-              <form className="member-modal" onSubmit={onRenameSpace}>
-                <h2>{text.spaceRenameTitle}</h2>
-                <label>{text.spaceName}<input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} required /></label>
-                {error && <div className="member-error">{text.error}: {error}</div>}
-                <div className="member-modal-actions">
-                  <button type="button" onClick={() => setRenameTarget(null)}>{text.cancel}</button>
-                  <button className="member-primary" type="submit" disabled={loading || !renameValue.trim()}>{text.spaceRenameSave}</button>
-                </div>
-              </form>
-            </div>
-          )}
-
-          {deleteTarget && (
-            <div className="member-modal-backdrop">
-              <form className="member-modal" onSubmit={onDeleteSpace}>
-                <h2>{text.spaceDeleteTitle}</h2>
-                <p className="member-modal-hint">{text.spaceDeleteDetail}</p>
-                <p className="member-modal-hint"><strong>{deleteTarget.name}</strong></p>
-                <label>{text.spaceDeleteConfirmLabel}<input autoFocus value={deleteConfirmValue} onChange={(event) => setDeleteConfirmValue(event.target.value)} required /></label>
-                {error && <div className="member-error">{text.error}: {error}</div>}
-                <div className="member-modal-actions">
-                  <button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button>
-                  <button className="member-modal-danger" type="submit" disabled={loading || deleteConfirmValue !== deleteTarget.name}>{text.spaceDeleteSubmit}</button>
-                </div>
-              </form>
-            </div>
-          )}
-        </>
       )}
     </div>
   );

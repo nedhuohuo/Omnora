@@ -8,7 +8,7 @@ REST 的机器可读唯一手工契约是 [OpenAPI 3.1](../../openapi/omnora.v1.
 
 ## 账号—挂载契约
 
-现行模型移除 Space：
+现行模型直接以账号、个人目录、共用挂载和协作为业务资源：
 
 - 普通共用挂载使用 `mountId + relativePath`；
 - “我的文件”使用当前账号绑定的虚拟个人根，客户端不能指定其他账号；
@@ -35,7 +35,7 @@ REST 使用三个不可混用的资源族：账号作用域“我的文件”、
 - `DELETE /api/v1/admin/mounts/{mountId}`：请求体必须提交当前 `displayName` 精确确认。成功返回 `dataDeleted: false`，只清理 Omnora 控制面和派生能力，不删除 NAS 真实文件；
 - `POST /api/v1/admin/mounts/{mountId}/reverify`：重新验证挂载身份；
 - `GET /api/v1/admin/host-directories`：只返回部署映射的外部根和已绑定插槽；
-- `GET/POST /api/v1/admin/index-jobs`：只针对可治理的共用挂载，响应只含 `mountName`，不含 Space 字段。
+- `GET/POST /api/v1/admin/index-jobs`：只针对可治理的共用挂载，响应只含 `mountName`。
 
 普通管理员不能发现受限挂载；直接管理请求和相关索引请求统一表现为 `404`。候选路径或名称与隐藏对象冲突时返回不泄露对象信息的 `mount_unavailable`。
 

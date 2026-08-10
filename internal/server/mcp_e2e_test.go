@@ -183,7 +183,7 @@ func newMCPProtocolFixture(t *testing.T) *mcpProtocolFixture {
 		t.Fatalf("mark recovery ready: %v", err)
 	}
 	admin, _ := createAPITestAccounts(t, db)
-	root := createTestSpaceAndMount(t, db, "", "mcp-protocol-mount", admin.ID, "read_write")
+	root := createTestMount(t, db, "mcp-protocol-mount", admin.ID, "read_write")
 	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello from MCP\n"), 0o600); err != nil {
 		t.Fatalf("write MCP fixture file: %v", err)
 	}

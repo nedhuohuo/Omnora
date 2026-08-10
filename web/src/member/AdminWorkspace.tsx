@@ -18,7 +18,6 @@ import {
   AdminBackupsPanel,
   AdminOverviewPanel,
   AdminShareGovernancePanel,
-  AdminSpacesPanel,
   AdminTokenGovernancePanel,
   AdminUsersPanel,
 } from './AdminPanels';
@@ -26,7 +25,6 @@ import {
 export type AdminTab =
   | 'overview'
   | 'users'
-  | 'spaces'
   | 'mounts'
   | 'index-jobs'
   | 'route-groups'
@@ -165,7 +163,6 @@ export default function AdminWorkspace({ tab, locale, isInitialAdmin }: { tab: A
 
   if (tab === 'overview') return <AdminOverviewPanel locale={locale} />;
   if (tab === 'users') return <AdminUsersPanel locale={locale} />;
-  if (tab === 'spaces') return <AdminSpacesPanel locale={locale} />;
   if (tab === 'mounts') return <AdminMountsPanel locale={locale} isInitialAdmin={isInitialAdmin} />;
   if (tab === 'index-jobs') return <AdminIndexJobsPanel locale={locale} />;
   if (tab === 'share-governance') return <AdminShareGovernancePanel locale={locale} />;

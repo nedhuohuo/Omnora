@@ -11,7 +11,7 @@ import (
 // expose account, mount, or path values.
 func AccountMountInvariants() []DomainInvariant {
 	return []DomainInvariant{
-		{Name: "space model removed", Check: rejectSpaceModel},
+		{Name: "legacy schema absent", Check: rejectLegacySchema},
 		{Name: "single protected personal default mount", Check: requirePersonalDefaultMount},
 		{Name: "mount classifications", Check: requireMountClassifications},
 		{Name: "one stable personal directory per account", Check: requirePersonalDirectories},
@@ -20,7 +20,7 @@ func AccountMountInvariants() []DomainInvariant {
 	}
 }
 
-func rejectSpaceModel(ctx context.Context, db *sql.DB) error {
+func rejectLegacySchema(ctx context.Context, db *sql.DB) error {
 	return requireZero(ctx, db, `
 SELECT
   (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('spaces', 'space_members')) +

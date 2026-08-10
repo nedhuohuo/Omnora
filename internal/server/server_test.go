@@ -311,8 +311,7 @@ func TestWebGroupUnknownAssetsReturnNotFound(t *testing.T) {
 	}
 }
 
-func TestEnabledRESTRouteRequiresSessionForSpaces(t *testing.T) {
-	skipLegacySpaceRESTTest(t)
+func TestRemovedSpaceRESTRouteReturnsGone(t *testing.T) {
 	routes := map[domain.RouteGroup]bool{
 		domain.RouteGroupREST: true,
 	}
@@ -322,8 +321,8 @@ func TestEnabledRESTRouteRequiresSessionForSpaces(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/spaces", nil)
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	if rec.Code != http.StatusGone {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusGone)
 	}
 }
 

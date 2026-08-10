@@ -4,7 +4,7 @@
 状态：目标安全基线，账号—挂载模型待实施
 适用范围：Omnora Web、REST、MCP、公开分享、文件传输、后台任务与备份恢复
 
-> 本文描述移除 Space 后的目标授权边界。当前实现仍含 Space ACL；迁移与受限挂载方案 B 见[账号、挂载与内容授权设计](../superpowers/specs/2026-08-08-account-mount-access-design.md)。
+> 本文描述账号—挂载模型的现行授权边界；受限挂载方案 B 的决策依据见[账号、挂载与内容授权设计](../superpowers/specs/2026-08-08-account-mount-access-design.md)。
 
 ## 1. 目的与原则
 
@@ -153,14 +153,14 @@ Omnora 首版只提供一个 HTTP 监听地址。私网 IP、Host、客户端提
 
 ### 6.2 Token scope
 
-AI Token 是绑定成员账号的受限 PAT。目标模型删除 `spaces.list`，将 `spaces:read` 改为 `mounts:read`，并移除所有 `spaceId` 边界。迁移完成时必须按实际 MCP catalog 重新计算工具和 scope 总数；迁移前 15 个 scope 仅描述当前实现。
+AI Token 是绑定成员账号的受限 PAT。MCP 使用 `mounts:read` 和账号—挂载边界，所有工具和 scope 以当前 catalog 为准；Token 不接受旧的资源坐标。
 
-迁移前 legacy scope 完整枚举为：
+当前 scope 枚举和入口授权以 `internal/aitoken` 与 MCP catalog 为准；其中挂载发现使用 `mounts:read`：
 
-`spaces:read`、`files:list`、`files:metadata`、`files:text`、`files:download_ticket`、`search:read`、`uploads:create`、`files:write`、`files:trash`、`trash:read`、`files:restore`、`files:purge`、`shares:read`、`shares:create`、`shares:revoke`。
+`mounts:read`、`files:list`、`files:metadata`、`files:text`、`files:download_ticket`、`search:read`、`uploads:create`、`files:write`、`files:trash`、`trash:read`、`files:restore`、`files:purge`、`shares:read`、`shares:create`、`shares:revoke`。
 
 scope 只控制 MCP 工具目录和调用资格，不替代账号实时内容权限、边界、挂载状态/身份/模式、对象状态和
-配额检查。迁移后的 catalog 中，移动、回收站、永久删除、公开分享变更和覆盖已有文件内容等高风险能力必须同时具有显式 scope 和逐次 MRTR；具体工具清单与数量以迁移后的 catalog 为准。迁移前当前实现中，
+配额检查。当前 catalog 中，移动、回收站、永久删除、公开分享变更和覆盖已有文件内容等高风险能力必须同时具有显式 scope 和逐次 MRTR；具体工具清单与数量以 catalog 为准。
 `files.move`、`files.trash`、`trash.purge`、`trash.empty`、`files.delete_permanently`、
 `shares.create`、`shares.revoke`、`files.update` 每次都必须经过 MRTR。Token 不提供管理员控制面工具。
 
@@ -236,7 +236,7 @@ WHERE id = ? AND revoked_at IS NULL AND used < max_uses;
 - 挂载配置属于系统控制面。普通挂载允许所有管理员治理，受限挂载仅允许初始管理员治理；分享、内容授权和 Token 不能获得治理权。管理员配置挂载不授予内容权限。
 - 注册前按路径组件拒绝相同路径和双向父子路径；候选根及其父组件包含符号链接或 magic link 时拒绝。安全打开根目录后比较设备号、inode、mount ID，并结合 `/proc/self/mountinfo` 的文件系统设备与 mount root 识别相同 bind 来源和来源父子关系。
 - 候选挂载与所有未删除挂载比较，不因只读、停用、治理类型或授权账号相同而放宽。身份信息不足或无法证明互不重叠时返回 `mount_identity_unverifiable` 并拒绝激活，不允许管理员确认绕过。
-- 预声明根目录的直接子路径（插槽）只是部署者可选择的 bind mount 入口。注册时所选目录本身就是挂载根，不创建 Space、账号或其他隐式业务子目录；已有文件在身份验证和内容授权通过后直接可见。
+- 预声明根目录的直接子路径（插槽）只是部署者可选择的 bind mount 入口。注册时所选目录本身就是挂载根，不创建账号或其他隐式业务子目录；已有文件在身份验证和内容授权通过后直接可见。
 - 解除共用挂载不得对挂载根路径执行文件系统删除；外部目录和用户真实文件保留在服务器上。失效上传会话的临时分片由幂等清理流程处理，不能承诺永久保留。
 - 启动、备份恢复、重新启用、扫描和实际访问时复核根身份。身份漂移、不可验证或新冲突使挂载立即不可用；搜索排除其索引，所有入口拒绝分享和文件访问。普通挂载可由任一管理员重新验证，受限挂载和默认个人挂载只能由初始管理员处理。
 - 内部文件 ID 只是定位信息，不是授权证明。访问时从挂载根目录文件描述符开始解析规范化相对路径。
@@ -357,7 +357,7 @@ Transfer Ticket 只在 `/mcp/transfers/{publicId}` 和
 下载按 Range/ETag 与原子字节预算执行，上传按 part size/声明大小限制。拒绝 query 凭证，
 不记录 bearer、challenge requestState、文件内容、checksum 或宿主路径。
 
-迁移后的 catalog 中所有高风险工具都采用一次性 MRTR，具体数量不预先固定；迁移前当前实现为八个。挑战绑定规范化参数、对象指纹、账号和 Token；只有可靠
+当前 catalog 中所有高风险工具都采用一次性 MRTR，具体数量以 catalog 为准。挑战绑定规范化参数、对象指纹、账号和 Token；只有可靠
 form elicitation 客户端才会在目录中看到对应工具。intent 审计失败阻止执行，terminal 审计
 失败记录 `mcp_audit_degraded` 并使 `/readyz` 返回 `503`，直到审计恢复。
 

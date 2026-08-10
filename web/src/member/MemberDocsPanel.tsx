@@ -57,13 +57,17 @@ const OPENAPI_GROUPS: OpenApiGroup[] = [
     ],
   },
   {
-    title: 'docsOpenapiGroupFiles',
+    title: 'docsOpenapiGroupContent',
     endpoints: [
-      { method: 'GET', path: '/api/v1/spaces', desc: 'docsOpenapiSpaces', auth: 'session' },
-      { method: 'GET', path: '/api/v1/spaces/{spaceId}/mounts', desc: 'docsOpenapiMounts', auth: 'session' },
-      { method: 'GET', path: '/api/v1/spaces/{spaceId}/mounts/{mountId}/children', desc: 'docsOpenapiChildren', auth: 'session' },
-      { method: 'GET', path: '/api/v1/spaces/{spaceId}/mounts/{mountId}/download', desc: 'docsOpenapiDownload', auth: 'session' },
-      { method: 'GET', path: '/api/v1/spaces/{spaceId}/search', desc: 'docsOpenapiSearch', auth: 'session' },
+      { method: 'GET', path: '/api/v1/member/content-sources', desc: 'docsOpenapiContentSources', auth: 'session' },
+      { method: 'GET', path: '/api/v1/member/files/children', desc: 'docsOpenapiChildren', auth: 'session' },
+      { method: 'GET', path: '/api/v1/member/files/download', desc: 'docsOpenapiDownload', auth: 'session' },
+      { method: 'GET', path: '/api/v1/member/files/search', desc: 'docsOpenapiSearch', auth: 'session' },
+      { method: 'POST', path: '/api/v1/member/files/directories', desc: 'docsOpenapiDirectoryCreate', auth: 'session' },
+      { method: 'POST', path: '/api/v1/member/files/rename', desc: 'docsOpenapiFileMutation', auth: 'session' },
+      { method: 'POST', path: '/api/v1/member/files/move', desc: 'docsOpenapiFileMutation', auth: 'session' },
+      { method: 'POST', path: '/api/v1/member/files/copy', desc: 'docsOpenapiFileMutation', auth: 'session' },
+      { method: 'DELETE', path: '/api/v1/member/files/object', desc: 'docsOpenapiFileMutation', auth: 'session' },
     ],
   },
   {

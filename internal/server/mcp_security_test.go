@@ -177,7 +177,7 @@ func newMCPHTTPTestServer(t *testing.T, mcpConfig config.MCPConfig) (*store.DB, 
 		t.Fatalf("mark recovery ready: %v", err)
 	}
 	admin, _ := createAPITestAccounts(t, db)
-	createTestSpaceAndMount(t, db, "mcp-space", "mcp-mount", admin.ID, "read_write")
+	createTestMount(t, db, "mcp-mount", admin.ID, "read_write")
 	issued, err := aitoken.NewService(db.SQL()).Create(context.Background(), aitoken.CreateRequest{
 		AccountID: admin.ID,
 		Name:      "mcp-test",

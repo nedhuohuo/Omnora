@@ -1,16 +1,8 @@
 import type { DirectoryChildrenPayload } from '../api';
 
-export type MemberSpace = {
-  id: string;
-  type: string;
-  name: string;
-  role: 'viewer' | 'editor' | 'manager';
-};
-
 export type MemberMount = {
   id: string;
   name: string;
-  space: string;
   kind: 'external' | 'managed';
   mode: 'read-write' | 'read-only';
   index: string;

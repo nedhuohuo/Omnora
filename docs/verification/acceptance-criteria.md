@@ -30,7 +30,7 @@
 - MCP Wire Protocol：implemented and protocol-tested（MCP Inspector Modern，`2026-07-28`；兼容性测试覆盖 `2025-11-25`）。
 - Omnora AI Token Authorization：implemented, non-OAuth。
 - MCP OAuth Authorization Profile：NOT IMPLEMENTED。
-- MCP 工具目录固定为 24 tools、15 scopes、8 个逐操作 MRTR 工具；工具目录包含 `files.update`，不含旧 Space 工具。
+- MCP 工具目录包含 `files.update`，不含已移除的旧资源工具；工具、scope 和逐操作 MRTR 数量以当前 catalog 为准。
 - 15 个 scope 必须逐项覆盖：`mounts:read`、`files:list`、`files:metadata`、`files:text`、`files:download_ticket`、`search:read`、`uploads:create`、`files:write`、`files:trash`、`trash:read`、`files:restore`、`files:purge`、`shares:read`、`shares:create`、`shares:revoke`。
 - `mounts.list` 无输入且只返回账号实时获权的共用挂载；默认个人挂载的 ID、名称和兄弟账号目录不出现在工具结果、普通挂载管理 API 或 Token boundary。
 - MCP 文件 locator 只接受显式 `personal` 或 `common_mount` 内容源，并拒绝账号 ID、默认挂载 ID 和目录协作标识。

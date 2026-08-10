@@ -182,7 +182,7 @@ func (g *Guard) AuthorizePair(ctx context.Context, source, destination CheckRequ
 }
 
 // LoadMountIdentity loads only mount classification and identity metadata.
-// It performs no account authorization and accepts no legacy Space coordinate.
+// It performs no account authorization; callers must authorize the account separately.
 func (g *Guard) LoadMountIdentity(ctx context.Context, mountID string) (AuthorizedMount, error) {
 	if g == nil || g.db == nil || strings.TrimSpace(mountID) == "" {
 		return AuthorizedMount{}, ErrInvalidRequest

@@ -18,8 +18,6 @@ type shareRecordDTO struct {
 	Fragment           string `json:"fragment,omitempty"`
 	Source             string `json:"source"`
 	MountID            string `json:"mountId,omitempty"`
-	SpaceID            string `json:"-"`
-	SpaceName          string `json:"-"`
 	MountName          string `json:"mountName,omitempty"`
 	RelativePath       string `json:"relativePath"`
 	CreatorEmail       string `json:"creatorEmail,omitempty"`
@@ -101,7 +99,7 @@ func writeMemberShareError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, membershare.ErrForbidden):
 		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "the account is not allowed to manage this share")
 	case errors.Is(err, access.ErrForbidden):
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "creating shares requires manager permission")
+		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "creating shares requires editor permission")
 	case errors.Is(err, membershare.ErrUnauthorized):
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 	case errors.Is(err, access.ErrBoundaryViolation):
@@ -117,53 +115,4 @@ func writeMemberShareError(w http.ResponseWriter, r *http.Request, err error) {
 	default:
 		writeDBError(w, r, err)
 	}
-}
-
-func (s *Server) isSpaceManager(r *http.Request, accountID, spaceID string) bool {
-	var count int
-	err := s.sqlDB().QueryRowContext(r.Context(), `
-SELECT COUNT(1)
-FROM space_members sm
-JOIN spaces sp ON sp.id = sm.space_id
-WHERE sm.account_id = ? AND sm.space_id = ? AND sm.permission = 'manager' AND sp.status = 'active'
-`, accountID, spaceID).Scan(&count)
-	return err == nil && count == 1
-}
-
-func scanShareRecordDTO(rows *sql.Rows) (shareRecordDTO, error) {
-	var item shareRecordDTO
-	var fragmentSecret string
-	var allowPreview, allowDownload int
-	var maxVisits, maxDownloads sql.NullInt64
-	if err := rows.Scan(
-		&item.ID, &item.PublicID, &fragmentSecret, &item.SpaceID, &item.MountID, &item.RelativePath,
-		&allowPreview, &allowDownload, &maxVisits, &item.UsedVisits,
-		&maxDownloads, &item.UsedDownloads, &item.ExpiresAt, &item.RevokedAt,
-		&item.SpaceName, &item.MountName, &item.CreatorEmail, &item.CreatorDisplayName,
-	); err != nil {
-		return shareRecordDTO{}, err
-	}
-	if fragmentSecret != "" {
-		item.Fragment = item.PublicID + "." + fragmentSecret
-	}
-	item.AllowPreview = allowPreview == 1
-	item.AllowDownload = allowDownload == 1
-	if maxVisits.Valid {
-		item.MaxVisits = &maxVisits.Int64
-	}
-	if maxDownloads.Valid {
-		item.MaxDownloads = &maxDownloads.Int64
-	}
-	item.Status = shareRecordStatus(item.ExpiresAt, item.RevokedAt)
-	return item, nil
-}
-
-func shareRecordStatus(expiresAt, revokedAt string) string {
-	if revokedAt != "" {
-		return "revoked"
-	}
-	if parsed, err := time.Parse(time.RFC3339Nano, expiresAt); err == nil && !time.Now().UTC().Before(parsed) {
-		return "expired"
-	}
-	return "active"
 }
