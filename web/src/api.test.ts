@@ -6,6 +6,8 @@ import {
   registerAdminMount,
   listMemberContentSources,
   listMemberDirectoryChildren,
+  createMemberCollaboration,
+  deleteMemberCollaboration,
   requestJson,
 } from './api';
 
@@ -78,6 +80,15 @@ describe('member content source API contract', () => {
       '/api/v1/member/files/children?source=collaboration&path=drafts&collaborationId=collab+%2F+1',
     ]);
     expect(fetchMock.mock.calls.map(([url]) => String(url)).join('\n')).not.toMatch(/spaceId|accountId|defaultMountId/);
+  });
+
+  it('uses collaboration CRUD routes without Space fields', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ id: 'collab-1' }), { status: 201, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await createMemberCollaboration({ recipientId: 'acct-2', rootRelativePath: 'docs', permission: 'viewer' });
+    await deleteMemberCollaboration('collab / 1');
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/v1/member/collaborations', '/api/v1/member/collaborations/collab%20%2F%201']);
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toMatch(/spaceId|spaceName|space_id/);
   });
 
   it('lists incoming and outgoing collaborations on the member route', async () => {

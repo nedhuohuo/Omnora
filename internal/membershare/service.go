@@ -174,6 +174,9 @@ func (s *Service) CreateSecure(ctx context.Context, subject access.Subject, req 
 	if err := s.validateSubject(ctx, subject, aitoken.ScopeSharesCreate); err != nil {
 		return IssuedShare{}, err
 	}
+	if req.Locator.Source == contentref.SourceCollaboration {
+		return IssuedShare{}, ErrForbidden
+	}
 	allowPreview, allowDownload := true, true
 	if req.AllowPreview != nil {
 		allowPreview = *req.AllowPreview

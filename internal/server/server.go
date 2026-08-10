@@ -85,7 +85,7 @@ func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 		shutdownCh: make(chan struct{}),
 	}
 	if db != nil {
-		s.guard = access.NewGuard(db.SQL())
+		s.guard = access.NewGuard(db.SQL(), cfg.Storage.ManagedDir)
 		s.tokens = aitoken.NewService(db.SQL())
 		s.confirmations = confirmation.NewService(db.SQL())
 		s.transferTickets = transferticket.NewService(db.SQL(), s.tokens, s.guard)

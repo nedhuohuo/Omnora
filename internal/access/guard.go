@@ -15,6 +15,7 @@ import (
 	"omnora/internal/aitoken"
 	"omnora/internal/contentref"
 	"omnora/internal/domain"
+	"omnora/internal/foldercollab"
 	"omnora/internal/mountid"
 )
 
@@ -67,11 +68,16 @@ type AuthorizedPair struct {
 }
 
 type Guard struct {
-	db *sql.DB
+	db         *sql.DB
+	managedDir string
 }
 
-func NewGuard(db *sql.DB) *Guard {
-	return &Guard{db: db}
+func NewGuard(db *sql.DB, managedDir ...string) *Guard {
+	root := ""
+	if len(managedDir) > 0 {
+		root = strings.TrimSpace(managedDir[0])
+	}
+	return &Guard{db: db, managedDir: root}
 }
 
 // Authorize reloads token state, account state, content grants and mount
@@ -84,7 +90,13 @@ func (g *Guard) Authorize(ctx context.Context, req CheckRequest) (AuthorizedMoun
 	if accountID == "" || !req.RequiredPermission.Valid() {
 		return AuthorizedMount{}, ErrInvalidRequest
 	}
-	locator, err := contentref.NormalizeForAutomation(req.Locator)
+	var locator contentref.Locator
+	var err error
+	if req.Subject.Principal == nil {
+		locator, err = contentref.NormalizeForMemberSession(req.Locator)
+	} else {
+		locator, err = contentref.NormalizeForAutomation(req.Locator)
+	}
 	if err != nil {
 		if errors.Is(err, contentref.ErrInvalidLocator) {
 			return AuthorizedMount{}, fmt.Errorf("%w: %v", ErrBoundaryViolation, err)
@@ -107,6 +119,8 @@ func (g *Guard) Authorize(ctx context.Context, req CheckRequest) (AuthorizedMoun
 		mount, permission, err = g.authorizePersonal(ctx, accountID)
 	case contentref.SourceCommonMount:
 		mount, permission, err = g.authorizeCommon(ctx, accountID, locator.MountID)
+	case contentref.SourceCollaboration:
+		mount, permission, err = g.authorizeCollaboration(ctx, accountID, locator, req.Write)
 	default:
 		return AuthorizedMount{}, ErrInvalidRequest
 	}
@@ -122,8 +136,10 @@ func (g *Guard) Authorize(ctx context.Context, req CheckRequest) (AuthorizedMoun
 	if principal != nil && !withinBoundaries(*principal, locator, locator.Path) {
 		return AuthorizedMount{}, ErrBoundaryViolation
 	}
-	if err := g.VerifyMountIdentity(ctx, mount); err != nil {
-		return AuthorizedMount{}, err
+	if mount.Source != contentref.SourceCollaboration {
+		if err := g.VerifyMountIdentity(ctx, mount); err != nil {
+			return AuthorizedMount{}, err
+		}
 	}
 	if mount.Source == contentref.SourcePersonal {
 		accountPath, err := cleanAccountStoragePath(accountID)
@@ -145,6 +161,9 @@ func (g *Guard) Authorize(ctx context.Context, req CheckRequest) (AuthorizedMoun
 	if mount.Source == contentref.SourcePersonal {
 		mount.StorageRelativePath = path.Join(accountID, locator.Path)
 	} else {
+		mount.StorageRelativePath = locator.Path
+	}
+	if mount.Source == contentref.SourceCollaboration {
 		mount.StorageRelativePath = locator.Path
 	}
 	return mount, nil
@@ -311,6 +330,31 @@ WHERE pd.account_id = ?
 		Mode:         mode,
 		IdentityJSON: identityJSON,
 	}, domain.ContentPermissionEditor, nil
+}
+
+func (g *Guard) authorizeCollaboration(ctx context.Context, accountID string, locator contentref.Locator, write bool) (AuthorizedMount, domain.ContentPermission, error) {
+	if strings.TrimSpace(g.managedDir) == "" {
+		return AuthorizedMount{}, domain.ContentPermissionNone, ErrMountUnavailable
+	}
+	root, permission, err := foldercollab.New(g.db, g.managedDir).Resolve(ctx, accountID, locator.CollaborationID, locator.Path, write)
+	if err != nil {
+		if errors.Is(err, foldercollab.ErrForbidden) {
+			return AuthorizedMount{}, domain.ContentPermissionNone, ErrForbidden
+		}
+		return AuthorizedMount{}, domain.ContentPermissionNone, ErrMountUnavailable
+	}
+	mode := domain.MountModeReadWrite
+	if permission == domain.ContentPermissionViewer {
+		mode = domain.MountModeReadOnly
+	}
+	return AuthorizedMount{
+		Source:      contentref.SourceCollaboration,
+		ID:          "personal-default",
+		Root:        root,
+		MountRoot:   root,
+		StorageKind: domain.StorageKindManaged,
+		Mode:        mode,
+	}, permission, nil
 }
 
 func (g *Guard) authorizeCommon(ctx context.Context, accountID, mountID string) (AuthorizedMount, domain.ContentPermission, error) {

@@ -1135,9 +1135,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       {shareTarget && (
         <ShareCreateModal
           text={text}
-          spaceId={activeSpaceId}
-          mountId={shareTarget.mountId}
-          relativePath={shareTarget.relativePath}
+          locator={{ source: 'common_mount', mountId: shareTarget.mountId, path: shareTarget.relativePath }}
           targetLabel={shareTarget.name}
           onCancel={() => setShareTarget(null)}
           onCreated={(result) => {
