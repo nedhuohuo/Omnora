@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import {
   ApiError,
   completeUpload,
@@ -47,6 +47,18 @@ type TrashItem = {
   size: number;
   deletedAt: string;
 };
+
+export function MemberToolbarSearch({ label, value, loading, onChange, onSearch }: { label: string; value: string; loading: boolean; onChange: (value: string) => void; onSearch: () => void }) {
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!loading && value.trim()) onSearch();
+  }
+
+  return <form className="member-toolbar-search" role="search" onSubmit={submit}>
+    <input aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} placeholder={label} />
+    <button type="submit" disabled={loading || !value.trim()}>{label}</button>
+  </form>;
+}
 
 function describeError(error: unknown) {
   if (error instanceof ApiError) {
@@ -325,8 +337,7 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
           {!activeSource.readOnly && <><button className="member-primary" type="button" onClick={() => fileInputRef.current?.click()}>{text.upload}</button><button type="button" onClick={() => void createFolder()}>{text.newFolder}</button></>}
           {!isCollaboration && <button type="button" onClick={() => void loadTrash(activeSource)}>{text.trashTitle}</button>}
           <span className="member-toolbar-spacer" />
-          {!isCollaboration && <><input aria-label={text.search} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder={text.search} />
-          <button type="button" onClick={() => void search()} disabled={loading || !searchQuery.trim()}>{text.search}</button></>}
+          {!isCollaboration && <MemberToolbarSearch label={text.search} value={searchQuery} loading={loading} onChange={setSearchQuery} onSearch={() => void search()} />}
           <button type="button" onClick={() => void loadDirectory(activeSource, path)} disabled={loading}>{text.refresh}</button>
           <input ref={fileInputRef} type="file" hidden onChange={(event) => void onFileSelected(event)} />
         </div>
