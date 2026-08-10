@@ -100,6 +100,11 @@ export type MemberContentLocator =
   | CommonMountContentLocator
   | CollaborationContentLocator;
 
+export type MemberContentSourceLocator =
+  | { source: 'personal' }
+  | { source: 'common_mount'; mountId: string }
+  | { source: 'collaboration'; collaborationId: string };
+
 export type MemberContentSourcesPayload = {
   personal: {
     source: 'personal';
@@ -193,8 +198,9 @@ export type CreateAiTokenResponse = {
 };
 
 export type CreateUploadPayload = {
-  spaceId: string;
-  mountId: string;
+  source: 'personal' | 'common_mount' | 'collaboration';
+  mountId?: string;
+  collaborationId?: string;
   parentPath: string;
   fileName: string;
   size: number;
@@ -781,6 +787,93 @@ export function listMemberDirectoryChildren(locator: MemberContentLocator, signa
   return requestJson<DirectoryChildrenPayload>(`/api/v1/member/files/children?${params.toString()}`, { signal });
 }
 
+function memberLocatorBody(locator: MemberContentLocator) {
+  return locator.source === 'personal'
+    ? { source: locator.source, path: locator.path }
+    : locator.source === 'common_mount'
+      ? { source: locator.source, mountId: locator.mountId, path: locator.path }
+      : { source: locator.source, collaborationId: locator.collaborationId, path: locator.path };
+}
+
+export function memberDownloadURL(locator: MemberContentLocator, options?: { inline?: boolean }) {
+  const params = new URLSearchParams();
+  params.set('source', locator.source);
+  params.set('path', locator.path);
+  if (locator.source === 'common_mount') params.set('mountId', locator.mountId);
+  if (locator.source === 'collaboration') params.set('collaborationId', locator.collaborationId);
+  if (options?.inline) params.set('inline', '1');
+  return `/api/v1/member/files/download?${params.toString()}`;
+}
+
+export function searchMemberFiles(locator: MemberContentSourceLocator, query: string, limit = 50, cursor?: string, signal?: AbortSignal) {
+  const params = new URLSearchParams();
+  params.set('source', locator.source);
+  if (locator.source === 'common_mount') params.set('mountId', locator.mountId);
+  if (locator.source === 'collaboration') params.set('collaborationId', locator.collaborationId);
+  params.set('q', query);
+  params.set('limit', String(limit));
+  if (cursor) params.set('cursor', cursor);
+  return requestJson<SearchPayload>(`/api/v1/member/files/search?${params.toString()}`, { signal });
+}
+
+export function createMemberDirectory(locator: MemberContentLocator, name: string, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/directories', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorBody(locator), name }), signal,
+  });
+}
+
+export function renameMemberObject(locator: MemberContentLocator, toPath: string, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/rename', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorBody(locator), toPath }), signal,
+  });
+}
+
+export function moveMemberObject(source: MemberContentLocator, destination: MemberContentLocator, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/move', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorBody(source), toSource: destination.source, ...(destination.source === 'common_mount' ? { toMountId: destination.mountId } : {}), toPath: destination.path }), signal,
+  });
+}
+
+export function copyMemberObject(source: MemberContentLocator, destination: MemberContentLocator, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>('/api/v1/member/files/copy', {
+    method: 'POST', body: JSON.stringify({ ...memberLocatorBody(source), toSource: destination.source, ...(destination.source === 'common_mount' ? { toMountId: destination.mountId } : {}), toPath: destination.path }), signal,
+  });
+}
+
+export function deleteMemberObject(locator: MemberContentLocator, options?: { permanent?: boolean }, signal?: AbortSignal) {
+  const params = options?.permanent ? '?permanent=1' : '';
+  return requestJson<TrashItemPayload | void>('/api/v1/member/files/object' + params, {
+    method: 'DELETE', body: JSON.stringify(memberLocatorBody(locator)), signal,
+  });
+}
+
+function memberLocatorQuery(locator: MemberContentLocator) {
+  const params = new URLSearchParams();
+  params.set('source', locator.source);
+  params.set('path', locator.path);
+  if (locator.source === 'common_mount') params.set('mountId', locator.mountId);
+  if (locator.source === 'collaboration') params.set('collaborationId', locator.collaborationId);
+  return params;
+}
+
+export function listMemberTrash(locator: MemberContentLocator, signal?: AbortSignal) {
+  return requestJson<{ items: TrashItemPayload[] }>(`/api/v1/member/files/trash?${memberLocatorQuery(locator).toString()}`, { signal });
+}
+
+export function restoreMemberTrash(locator: MemberContentLocator, trashId: string, signal?: AbortSignal) {
+  return requestJson<{ relativePath: string }>(`/api/v1/member/files/trash/${encodeURIComponent(trashId)}/restore`, {
+    method: 'POST', body: JSON.stringify(memberLocatorBody(locator)), signal,
+  });
+}
+
+export function purgeMemberTrash(locator: MemberContentLocator, trashId: string, signal?: AbortSignal) {
+  return requestJson<void>(`/api/v1/member/files/trash/${encodeURIComponent(trashId)}?${memberLocatorQuery(locator).toString()}`, { method: 'DELETE', signal });
+}
+
+export function emptyMemberTrash(locator: MemberContentLocator, signal?: AbortSignal) {
+  return requestJson<{ removed: number }>(`/api/v1/member/files/trash?${memberLocatorQuery(locator).toString()}`, { method: 'DELETE', signal });
+}
+
 export function listMemberCollaborations(direction: 'incoming' | 'outgoing', signal?: AbortSignal) {
   const params = new URLSearchParams({ direction });
   return requestJson<MemberCollaborationsPayload>(`/api/v1/member/collaborations?${params.toString()}`, { signal });
@@ -884,7 +977,7 @@ export function deleteAiToken(tokenId: string, signal?: AbortSignal) {
 export const revokeAiToken = deleteAiToken;
 
 export function createUpload(payload: CreateUploadPayload, signal?: AbortSignal) {
-  return requestJson<UploadSessionPayload>('/api/v1/uploads', {
+  return requestJson<UploadSessionPayload>('/api/v1/member/uploads', {
     method: 'POST',
     body: JSON.stringify(payload),
     signal,
@@ -892,7 +985,7 @@ export function createUpload(payload: CreateUploadPayload, signal?: AbortSignal)
 }
 
 export function getUpload(uploadId: string, signal?: AbortSignal) {
-  return requestJson<UploadSessionPayload>(`/api/v1/uploads/${encodeURIComponent(uploadId)}`, { signal });
+  return requestJson<UploadSessionPayload>(`/api/v1/member/uploads/${encodeURIComponent(uploadId)}`, { signal });
 }
 
 export async function uploadPart(uploadId: string, partNumber: number, chunk: Blob | string, signal?: AbortSignal) {
@@ -901,7 +994,7 @@ export async function uploadPart(uploadId: string, partNumber: number, chunk: Bl
   if (csrf) {
     headers.set('X-CSRF-Token', csrf);
   }
-  const response = await fetch(`/api/v1/uploads/${encodeURIComponent(uploadId)}/parts/${partNumber}`, {
+  const response = await fetch(`/api/v1/member/uploads/${encodeURIComponent(uploadId)}/parts/${partNumber}`, {
     method: 'PUT',
     body: chunk,
     credentials: 'same-origin',
@@ -934,14 +1027,14 @@ function readCsrfCookie(authContext: APIAuthContext = 'account'): string | undef
 }
 
 export function completeUpload(uploadId: string, signal?: AbortSignal) {
-  return requestJson<unknown>(`/api/v1/uploads/${encodeURIComponent(uploadId)}/complete`, {
+  return requestJson<unknown>(`/api/v1/member/uploads/${encodeURIComponent(uploadId)}/complete`, {
     method: 'POST',
     signal,
   });
 }
 
 export function cancelUpload(uploadId: string, signal?: AbortSignal) {
-  return requestJson<void>(`/api/v1/uploads/${encodeURIComponent(uploadId)}`, {
+  return requestJson<void>(`/api/v1/member/uploads/${encodeURIComponent(uploadId)}`, {
     method: 'DELETE',
     signal,
   });

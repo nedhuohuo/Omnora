@@ -783,7 +783,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     const parentPath = normalizeParentPath(relativePath);
     setError('');
     setTransfers((current) => [{ id: transferId, name: file.name, progress: 0, state: 'queued' }, ...current]);
-    const storageKey = uploadStorageKey(activeSpaceId, activeMountId, parentPath, file);
+    const storageKey = uploadStorageKey(`common_mount:${activeMountId}`, parentPath, file);
 
     try {
       let uploadId = '';
@@ -802,7 +802,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
         }
       }
       if (!uploadId) {
-        const created = await createUpload({ spaceId: activeSpaceId, mountId: activeMountId, parentPath, fileName: file.name, size: file.size }, controller.signal);
+        const created = await createUpload({ source: 'common_mount', mountId: activeMountId, parentPath, fileName: file.name, size: file.size }, controller.signal);
         uploadId = created.id ?? '';
         partSize = created.partSize ?? partSize;
         if (!uploadId) throw new Error('Upload session ID is missing');

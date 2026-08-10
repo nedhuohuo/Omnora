@@ -154,6 +154,22 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("POST /api/v1/account/totp/confirm", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.confirmTOTP)))
 	s.mux.Handle("GET /api/v1/member/content-sources", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMemberContentSources)))
 	s.mux.Handle("GET /api/v1/member/files/children", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMemberFileChildren)))
+	s.mux.Handle("GET /api/v1/member/files/download", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.memberDownload)))
+	s.mux.Handle("GET /api/v1/member/files/search", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.memberSearch)))
+	s.mux.Handle("POST /api/v1/member/files/directories", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.memberCreateDirectory)))
+	s.mux.Handle("POST /api/v1/member/files/rename", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.memberRename)))
+	s.mux.Handle("POST /api/v1/member/files/move", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.memberMove)))
+	s.mux.Handle("POST /api/v1/member/files/copy", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.memberCopy)))
+	s.mux.Handle("DELETE /api/v1/member/files/object", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.memberDelete)))
+	s.mux.Handle("GET /api/v1/member/files/trash", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.memberTrashList)))
+	s.mux.Handle("DELETE /api/v1/member/files/trash", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.memberTrashEmpty)))
+	s.mux.Handle("POST /api/v1/member/files/trash/{trashId}/restore", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.memberTrashRestore)))
+	s.mux.Handle("DELETE /api/v1/member/files/trash/{trashId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.memberTrashPurge)))
+	s.mux.Handle("POST /api/v1/member/uploads", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createUpload)))
+	s.mux.Handle("GET /api/v1/member/uploads/{uploadId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.getUpload)))
+	s.mux.Handle("PUT /api/v1/member/uploads/{uploadId}/parts/{partNumber}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.uploadPart)))
+	s.mux.Handle("POST /api/v1/member/uploads/{uploadId}/complete", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.completeUpload)))
+	s.mux.Handle("DELETE /api/v1/member/uploads/{uploadId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.cancelUpload)))
 	s.mux.Handle("GET /api/v1/member/collaborations", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMemberCollaborations)))
 	s.mux.Handle("GET /api/v1/account", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.getAccount)))
 	s.mux.Handle("PATCH /api/v1/account/password", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.changeAccountPassword)))
@@ -891,19 +907,24 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		SpaceID    string `json:"spaceId"`
-		MountID    string `json:"mountId"`
-		ParentPath string `json:"parentPath"`
-		FileName   string `json:"fileName"`
-		Size       int64  `json:"size"`
+		Source          string `json:"source"`
+		MountID         string `json:"mountId"`
+		CollaborationID string `json:"collaborationId"`
+		ParentPath      string `json:"parentPath"`
+		FileName        string `json:"fileName"`
+		Size            int64  `json:"size"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
 	targetPath := pathJoinForUpload(req.ParentPath, req.FileName)
+	locator, err := memberLocatorFromJSON(req.Source, req.MountID, req.CollaborationID, targetPath)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_locator", err.Error())
+		return
+	}
 	result, err := s.memberFiles.PrepareUpload(r.Context(), access.Subject{AccountID: session.AccountID}, memberfiles.UploadRequest{
-		Locator:      access.Locator{Source: contentref.SourceCommonMount, MountID: req.MountID, Path: targetPath},
-		ExpectedSize: req.Size,
+		Locator: locator, ExpectedSize: req.Size,
 	})
 	if err != nil {
 		writeMemberFilesError(w, r, err, "upload requires editor permission")

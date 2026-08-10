@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -158,6 +159,24 @@ VALUES ('common-visible', 'Team NAS', ?, 'common', 'external', 'normal', 'read_o
 	if len(listing.Entries) != 1 || listing.Entries[0].Name != "team.txt" {
 		t.Fatalf("common entries = %#v", listing.Entries)
 	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/member/files/directories", bytes.NewBufferString(`{"source":"personal","path":".","name":"docs"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: issued.Token})
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create personal directory status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/member/files/download?source=personal&path=mine.txt", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: issued.Token})
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "mine" {
+		t.Fatalf("personal download status/body = %d/%q", rec.Code, rec.Body.String())
+	}
+
 	if _, err := db.SQL().Exec(`DELETE FROM mount_grants WHERE mount_id = 'common-visible' AND account_id = ?`, memberID); err != nil {
 		t.Fatal(err)
 	}

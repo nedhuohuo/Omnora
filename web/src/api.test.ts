@@ -6,6 +6,9 @@ import {
   registerAdminMount,
   listMemberContentSources,
   listMemberDirectoryChildren,
+  memberDownloadURL,
+  createMemberDirectory,
+  renameMemberObject,
   requestJson,
 } from './api';
 
@@ -78,6 +81,30 @@ describe('member content source API contract', () => {
       '/api/v1/member/files/children?source=collaboration&path=drafts&collaborationId=collab+%2F+1',
     ]);
     expect(fetchMock.mock.calls.map(([url]) => String(url)).join('\n')).not.toMatch(/spaceId|accountId|defaultMountId/);
+  });
+
+  it('uses account content operation routes without Space coordinates', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ relativePath: 'docs/renamed.txt' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createMemberDirectory({ source: 'personal', path: 'docs' }, 'new-folder');
+    await renameMemberObject({ source: 'common_mount', mountId: 'mount-1', path: 'docs/a.txt' }, 'docs/b.txt');
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      '/api/v1/member/files/directories',
+      '/api/v1/member/files/rename',
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ source: 'personal', path: 'docs', name: 'new-folder' });
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ source: 'common_mount', mountId: 'mount-1', path: 'docs/a.txt', toPath: 'docs/b.txt' });
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toMatch(/spaceId|spaceName|accountId/);
+  });
+
+  it('builds a locator-based download URL', () => {
+    expect(memberDownloadURL({ source: 'personal', path: 'docs/a b.txt' })).toBe('/api/v1/member/files/download?source=personal&path=docs%2Fa+b.txt');
+    expect(memberDownloadURL({ source: 'common_mount', mountId: 'mount / 1', path: 'a.txt' })).toBe('/api/v1/member/files/download?source=common_mount&path=a.txt&mountId=mount+%2F+1');
   });
 
   it('lists incoming and outgoing collaborations on the member route', async () => {
