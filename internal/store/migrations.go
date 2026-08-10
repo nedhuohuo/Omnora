@@ -63,6 +63,8 @@ var productionMigrationCatalog = []migrationDescriptor{
 	{Version: 11, Name: "011_recovery_control.sql", Class: migrationOnlineSafe},
 	{Version: 12, Name: "012_upload_target_identity.sql", Class: migrationOnlineSafe},
 	{Version: 13, Name: "013_account_mount_model.sql", Class: migrationOfflineRequired},
+	{Version: 14, Name: "014_upload_reservations.sql", Class: migrationOnlineSafe},
+	{Version: 15, Name: "015_backup_artifact_provenance.sql", Class: migrationOnlineSafe},
 }
 
 func validateMigrationCatalog(files fs.FS, catalog []migrationDescriptor) ([]migrationDescriptor, error) {

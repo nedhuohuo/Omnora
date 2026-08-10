@@ -644,16 +644,43 @@ func objectSize(mount access.AuthorizedMount) (int64, error) {
 }
 
 func fingerprintObject(mount access.AuthorizedMount) (string, error) {
-	pathValue := filepath.Join(mount.Root, filepath.FromSlash(mount.RelativePath))
-	info, err := os.Lstat(pathValue)
+	info, err := lstatObject(mount)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return missingFingerprint(mount), nil
 		}
 		return "", err
 	}
+	return FingerprintFileInfo(mount, info), nil
+}
+
+// lstatObject inspects the authorized object through the host path the ticket
+// database was populated from. It rejects symlinks exactly like the
+// authorization boundary, so a swapped path cannot be fingerprinted.
+func lstatObject(mount access.AuthorizedMount) (os.FileInfo, error) {
+	pathValue := filepath.Join(mount.Root, filepath.FromSlash(mount.RelativePath))
+	info, err := os.Lstat(pathValue)
+	if err != nil {
+		return nil, err
+	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return "", access.ErrBoundaryViolation
+		return nil, access.ErrBoundaryViolation
+	}
+	return info, nil
+}
+
+// FingerprintFileInfo encodes the ticket-v2 object fingerprint from metadata
+// that a verified descriptor (or the equivalent path metadata) reports for the
+// authorized object. It binds the mount ID and storage-relative path together
+// with the file's type, permissions, size, UTC nanosecond mtime and its
+// device/inode identity, then hashes the raw record. The format is stable and
+// MUST stay byte-identical: the server compares the fingerprint of an
+// already-open descriptor against the one stored on the ticket, so both sides
+// must agree on every field below. It deliberately does not reuse the
+// differently-shaped files.Fingerprint.
+func FingerprintFileInfo(mount access.AuthorizedMount, info os.FileInfo) string {
+	if info == nil {
+		return missingFingerprint(mount)
 	}
 	sys := ""
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat != nil {
@@ -661,7 +688,7 @@ func fingerprintObject(mount access.AuthorizedMount) (string, error) {
 	}
 	raw := fmt.Sprintf("omnora-object-v2|%s|%s|%s|%o|%d|%d|%s|%s", mount.ID, mount.StorageRelativePath,
 		info.Mode().Type(), info.Mode().Perm(), info.Size(), info.ModTime().UTC().UnixNano(), sys, info.Mode().String())
-	return hashBytes([]byte(raw)), nil
+	return hashBytes([]byte(raw))
 }
 
 func missingFingerprint(mount access.AuthorizedMount) string {

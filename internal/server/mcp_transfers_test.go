@@ -334,3 +334,219 @@ VALUES ('mcp-transfer-mount','MCP Transfer',?,'common','external','normal','read
 	srv := NewServer(config.Config{Routes: map[domain.RouteGroup]bool{domain.RouteGroupMCP: true}, MCP: config.MCPConfig{AllowedHosts: []string{"mcp.example.test"}}}, db)
 	return srv, db, principal, root
 }
+
+// setMCPDownloadSync installs a hook for the current test and restores the
+// previous hook when the test finishes. Tests in this file run sequentially, so
+// the package-private sync points are safe to steer per test.
+func setMCPDownloadSync(t *testing.T, hook *func(), fn func()) {
+	t.Helper()
+	previous := *hook
+	*hook = fn
+	t.Cleanup(func() { *hook = previous })
+}
+
+func newMCPDownloadRequest(t *testing.T, ticket transferticket.IssuedTicket) *http.Request {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, ticket.URL, nil)
+	request.Host = "mcp.example.test"
+	request.Header.Set("Authorization", "Bearer "+ticket.BearerToken)
+	return request
+}
+
+// assertObjectDriftDownload verifies a failed download response carries the
+// 409 object_changed code and never set a success ETag or Content-Length.
+func assertObjectDriftDownload(t *testing.T, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("download status = %d, want 409 (body=%s)", recorder.Code, recorder.Body.String())
+	}
+	if !bytes.Contains(recorder.Body.Bytes(), []byte(`"code":"object_changed"`)) {
+		t.Fatalf("download body = %s, want object_changed code", recorder.Body.String())
+	}
+	if etag := recorder.Header().Get("ETag"); etag != "" {
+		t.Fatalf("drift download set ETag %q", etag)
+	}
+	if recorder.Header().Get("Content-Length") != "" {
+		t.Fatalf("drift download set Content-Length %q", recorder.Header().Get("Content-Length"))
+	}
+}
+
+// assertTicketUnconsumed verifies a failed download never consumed the ticket
+// byte budget, so retries and accounting stay intact.
+func assertTicketUnconsumed(t *testing.T, db *store.DB, ticket transferticket.IssuedTicket) {
+	t.Helper()
+	var consumed int64
+	if err := db.SQL().QueryRow(`SELECT consumed_bytes FROM mcp_transfer_tickets WHERE id = ?`, ticket.ID).Scan(&consumed); err != nil {
+		t.Fatalf("SELECT consumed_bytes: %v", err)
+	}
+	if consumed != 0 {
+		t.Fatalf("drift download consumed %d bytes, want 0", consumed)
+	}
+}
+
+// serveSwappedDownload issues a fresh download ticket for a freshly written
+// notes.txt, installs a swap hook right after the first verification, and
+// serves one request. The hook runs inside ServeHTTP, so the swap happens in
+// the window between the first verification and the rooted open.
+func serveSwappedDownload(t *testing.T, srv *Server, principal aitoken.Principal, root string, swap func(notesPath string) error) (*httptest.ResponseRecorder, transferticket.IssuedTicket) {
+	t.Helper()
+	notes := filepath.Join(root, "notes.txt")
+	if err := os.Remove(notes); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("Remove(notes) error = %v", err)
+	}
+	if err := os.WriteFile(notes, []byte("0123456789"), 0o600); err != nil {
+		t.Fatalf("WriteFile(notes) error = %v", err)
+	}
+	ticket, err := srv.transferTickets.IssueDownload(context.Background(), principal, access.Locator{Source: contentref.SourceCommonMount, MountID: "mcp-transfer-mount", Path: "notes.txt"}, 10)
+	if err != nil {
+		t.Fatalf("IssueDownload() error = %v", err)
+	}
+	setMCPDownloadSync(t, &mcpDownloadSyncAfterFirstVerify, func() {
+		if err := swap(notes); err != nil {
+			t.Errorf("swap hook: %v", err)
+		}
+	})
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, newMCPDownloadRequest(t, ticket))
+	return recorder, ticket
+}
+
+// Swapping the authorized file after the first verification must fail closed:
+// whether the replacement is an external symlink or a different in-root file,
+// the response is 409 object_changed with no bytes, no success headers and no
+// byte-budget consumption.
+func TestMCPDownloadRaceSwappedAfterFirstVerify(t *testing.T) {
+	srv, db, principal, root := newMCPTransferFixture(t)
+
+	t.Run("external symlink", func(t *testing.T) {
+		outside := t.TempDir()
+		if err := os.WriteFile(filepath.Join(outside, "probe.txt"), []byte("PROBE-SECRET"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(outside, "probe.txt"), filepath.Join(root, "replacement")); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		recorder, ticket := serveSwappedDownload(t, srv, principal, root, func(notes string) error {
+			return os.Rename(filepath.Join(root, "replacement"), notes)
+		})
+		assertObjectDriftDownload(t, recorder)
+		assertTicketUnconsumed(t, db, ticket)
+	})
+
+	t.Run("in-root different file", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(root, "evil.txt"), []byte("EVIL"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		recorder, ticket := serveSwappedDownload(t, srv, principal, root, func(notes string) error {
+			return os.Rename(filepath.Join(root, "evil.txt"), notes)
+		})
+		assertObjectDriftDownload(t, recorder)
+		assertTicketUnconsumed(t, db, ticket)
+	})
+}
+
+// This isolates the descriptor-binding check: the path is swapped to a
+// different file before the rooted open and restored to the authorized inode
+// before the final verification, so the final path-fingerprint replay passes.
+// Only re-stating the already-open descriptor can detect that the served bytes
+// would not be the authorized object.
+func TestMCPDownloadRaceReplaceThenRestore(t *testing.T) {
+	srv, db, principal, root := newMCPTransferFixture(t)
+	notes := filepath.Join(root, "notes.txt")
+	if err := os.WriteFile(notes, []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evil := filepath.Join(root, "evil.txt")
+	if err := os.WriteFile(evil, []byte("EVIL"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := srv.transferTickets.IssueDownload(context.Background(), principal, access.Locator{Source: contentref.SourceCommonMount, MountID: "mcp-transfer-mount", Path: "notes.txt"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold := filepath.Join(root, "hold.txt")
+	setMCPDownloadSync(t, &mcpDownloadSyncAfterFirstVerify, func() {
+		// Swap the authorized path to the attacker file before the open.
+		if err := os.Rename(notes, hold); err != nil {
+			t.Errorf("swap notes -> hold: %v", err)
+		}
+		if err := os.Rename(evil, notes); err != nil {
+			t.Errorf("swap evil -> notes: %v", err)
+		}
+	})
+	setMCPDownloadSync(t, &mcpDownloadSyncBeforeFinalVerify, func() {
+		// Restore the authorized inode at the path before the final replay so
+		// the path fingerprint still matches the ticket.
+		if err := os.Rename(hold, notes); err != nil {
+			t.Errorf("restore hold -> notes: %v", err)
+		}
+	})
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, newMCPDownloadRequest(t, ticket))
+	assertObjectDriftDownload(t, recorder)
+	assertTicketUnconsumed(t, db, ticket)
+
+	var metadata string
+	if err := db.SQL().QueryRow(`SELECT metadata_json FROM audit_events WHERE route_group = 'mcp' AND target_id = ? ORDER BY id DESC LIMIT 1`, ticket.PublicID).Scan(&metadata); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(metadata, ticket.Secret) || strings.Contains(metadata, root) || strings.Contains(metadata, "Bearer") {
+		t.Fatalf("drift audit leaked credential/path: %s", metadata)
+	}
+}
+
+// Revoking the token in the window after the first verification must be caught
+// by the final verification and return 401, preserving the pre-existing
+// revocation behavior even though the open already happened.
+func TestMCPDownloadRaceTokenRevokedAfterFirstVerify(t *testing.T) {
+	srv, db, principal, root := newMCPTransferFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := srv.transferTickets.IssueDownload(context.Background(), principal, access.Locator{Source: contentref.SourceCommonMount, MountID: "mcp-transfer-mount", Path: "notes.txt"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setMCPDownloadSync(t, &mcpDownloadSyncAfterFirstVerify, func() {
+		if err := aitoken.NewService(db.SQL()).Revoke(context.Background(), principal.TokenID); err != nil {
+			t.Errorf("revoke token: %v", err)
+		}
+	})
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, newMCPDownloadRequest(t, ticket))
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked mid-download status = %d, want 401 (body=%s)", recorder.Code, recorder.Body.String())
+	}
+	if !bytes.Contains(recorder.Body.Bytes(), []byte(`"code":"unauthorized"`)) {
+		t.Fatalf("revoked mid-download body = %s, want unauthorized code", recorder.Body.String())
+	}
+	assertTicketUnconsumed(t, db, ticket)
+}
+
+// Removing the mount grant in the window after the first verification must be
+// caught by the final verification and return 403, preserving the ACL
+// degradation behavior even though the open already happened.
+func TestMCPDownloadRaceGrantRemovedAfterFirstVerify(t *testing.T) {
+	srv, db, principal, root := newMCPTransferFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := srv.transferTickets.IssueDownload(context.Background(), principal, access.Locator{Source: contentref.SourceCommonMount, MountID: "mcp-transfer-mount", Path: "notes.txt"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setMCPDownloadSync(t, &mcpDownloadSyncAfterFirstVerify, func() {
+		if _, err := db.SQL().Exec(`DELETE FROM mount_grants WHERE mount_id = 'mcp-transfer-mount' AND account_id = ?`, principal.AccountID); err != nil {
+			t.Errorf("remove grant: %v", err)
+		}
+	})
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, newMCPDownloadRequest(t, ticket))
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("grant removed mid-download status = %d, want 403 (body=%s)", recorder.Code, recorder.Body.String())
+	}
+	if !bytes.Contains(recorder.Body.Bytes(), []byte(`"code":"forbidden"`)) {
+		t.Fatalf("grant removed mid-download body = %s, want forbidden code", recorder.Body.String())
+	}
+	assertTicketUnconsumed(t, db, ticket)
+}

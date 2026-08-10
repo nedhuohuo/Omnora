@@ -24,10 +24,31 @@ func openRecoveryTestDB(t *testing.T) *store.DB {
 	return db
 }
 
+func insertCompletedBackupFixture(t *testing.T, ctx context.Context, db *store.DB) BackupArtifact {
+	t.Helper()
+	artifact, err := NewBackupPublisher(db).Publish(ctx, filepath.Join(t.TempDir(), "backups"))
+	if err != nil {
+		t.Fatalf("publish backup fixture: %v", err)
+	}
+	createdAt := time.Date(2026, 8, 6, 11, 0, 0, 0, time.UTC)
+	completedAt := time.Date(2026, 8, 6, 11, 1, 0, 0, time.UTC)
+	if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO backups(
+    id, status, path, created_by, created_at, completed_at, notes,
+    sha256, size_bytes, canonical_path, schema_version
+)
+VALUES ('backup-1', 'completed', ?, 'admin', ?, ?, 'test', ?, ?, ?, ?)
+`, artifact.Path, formatTime(createdAt), formatTime(completedAt), artifact.SHA256, artifact.SizeBytes,
+		artifact.Path, artifact.SchemaVersion); err != nil {
+		t.Fatalf("insert backup fixture: %v", err)
+	}
+	return artifact
+}
+
 func TestCoordinatorBeginRestoreAndStateTransitionsAreAudited(t *testing.T) {
 	db := openRecoveryTestDB(t)
 	ctx := context.Background()
-	coordinator := NewCoordinator(db.SQL(), WithClock(func() time.Time {
+	coordinator := NewCoordinator(db.SQL(), WithJournalPath(filepath.Join(t.TempDir(), "recovery-journal.json")), WithClock(func() time.Time {
 		return time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	}))
 
@@ -37,12 +58,7 @@ VALUES ('admin', 'admin@example.com', 'Admin', 'admin', 'active', 'hash')
 `); err != nil {
 		t.Fatalf("insert account: %v", err)
 	}
-	if _, err := db.SQL().ExecContext(ctx, `
-INSERT INTO backups(id, status, path, created_by, created_at, notes)
-VALUES ('backup-1', 'completed', '/tmp/backup.db', 'admin', CURRENT_TIMESTAMP, 'test')
-`); err != nil {
-		t.Fatalf("insert backup: %v", err)
-	}
+	insertCompletedBackupFixture(t, ctx, db)
 
 	request, err := coordinator.BeginRestore(ctx, BeginRestoreRequest{BackupID: "backup-1", ActorAccountID: "admin"})
 	if err != nil {
@@ -98,7 +114,7 @@ VALUES ('backup-1', 'completed', '/tmp/backup.db', 'admin', CURRENT_TIMESTAMP, '
 func TestCoordinatorApplyRestoreRevokesCredentialClassesAtomically(t *testing.T) {
 	db := openRecoveryTestDB(t)
 	ctx := context.Background()
-	coordinator := NewCoordinator(db.SQL(), WithClock(func() time.Time {
+	coordinator := NewCoordinator(db.SQL(), WithJournalPath(filepath.Join(t.TempDir(), "recovery-journal.json")), WithClock(func() time.Time {
 		return time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	}))
 
@@ -143,9 +159,7 @@ VALUES ('mount-1', 'Docs', '/tmp/docs', 'common', 'external', 'normal', 'read_wr
 	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO jobs(id, kind, status) VALUES ('job-1', 'index', 'running')`); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
-	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO backups(id, status, path, created_by) VALUES ('backup-1', 'completed', '/tmp/backup.db', 'admin')`); err != nil {
-		t.Fatalf("insert backup: %v", err)
-	}
+	insertCompletedBackupFixture(t, ctx, db)
 
 	request, err := coordinator.BeginRestore(ctx, BeginRestoreRequest{BackupID: "backup-1", ActorAccountID: "admin"})
 	if err != nil {
@@ -208,7 +222,7 @@ VALUES ('mount-1', 'Docs', '/tmp/docs', 'common', 'external', 'normal', 'read_wr
 func TestCoordinatorCompleteBootstrapWritesCompletedRestoreRequestState(t *testing.T) {
 	db := openRecoveryTestDB(t)
 	ctx := context.Background()
-	coordinator := NewCoordinator(db.SQL(), WithClock(func() time.Time {
+	coordinator := NewCoordinator(db.SQL(), WithJournalPath(filepath.Join(t.TempDir(), "recovery-journal.json")), WithClock(func() time.Time {
 		return time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	}))
 
@@ -218,12 +232,7 @@ VALUES ('admin', 'admin@example.com', 'Admin', 'admin', 'active', 'hash')
 `); err != nil {
 		t.Fatalf("insert account: %v", err)
 	}
-	if _, err := db.SQL().ExecContext(ctx, `
-INSERT INTO backups(id, status, path, created_by, created_at, notes)
-VALUES ('backup-1', 'completed', '/tmp/backup.db', 'admin', CURRENT_TIMESTAMP, 'test')
-`); err != nil {
-		t.Fatalf("insert backup: %v", err)
-	}
+	insertCompletedBackupFixture(t, ctx, db)
 
 	request, err := coordinator.BeginRestore(ctx, BeginRestoreRequest{BackupID: "backup-1", ActorAccountID: "admin"})
 	if err != nil {
@@ -274,7 +283,7 @@ VALUES ('backup-1', 'completed', '/tmp/backup.db', 'admin', CURRENT_TIMESTAMP, '
 func TestCoordinatorAuditFailureRollsBackTransition(t *testing.T) {
 	db := openRecoveryTestDB(t)
 	ctx := context.Background()
-	coordinator := NewCoordinator(db.SQL(), WithAuditWriter(func(context.Context, *sql.Tx, AuditEvent) error {
+	coordinator := NewCoordinator(db.SQL(), WithJournalPath(filepath.Join(t.TempDir(), "recovery-journal.json")), WithAuditWriter(func(context.Context, *sql.Tx, AuditEvent) error {
 		return errors.New("audit unavailable")
 	}))
 	if _, err := db.SQL().ExecContext(ctx, `
@@ -283,9 +292,7 @@ VALUES ('admin', 'admin@example.com', 'Admin', 'admin', 'active', 'hash')
 `); err != nil {
 		t.Fatalf("insert account: %v", err)
 	}
-	if _, err := db.SQL().ExecContext(ctx, `INSERT INTO backups(id, status, path, created_by) VALUES ('backup-1', 'completed', '/tmp/backup.db', 'admin')`); err != nil {
-		t.Fatalf("insert backup: %v", err)
-	}
+	insertCompletedBackupFixture(t, ctx, db)
 	if _, err := coordinator.BeginRestore(ctx, BeginRestoreRequest{BackupID: "backup-1", ActorAccountID: "admin"}); err == nil {
 		t.Fatal("begin restore succeeded despite audit failure")
 	}

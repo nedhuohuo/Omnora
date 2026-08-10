@@ -11,6 +11,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -188,17 +190,50 @@ func doRestore(ctx context.Context, p restoreParams) *stepError {
 	if p.log == nil {
 		p.log = func(string, ...any) {}
 	}
+	journal, err := recovery.ReadJournal(p.journalPath)
+	if err != nil {
+		return wrapStep("read recovery journal", err)
+	}
+	if strings.TrimSpace(p.requestID) != journal.RequestID {
+		return wrapStep("validate recovery journal request", fmt.Errorf("journal request %q does not match --request %q", journal.RequestID, p.requestID))
+	}
+	backupPath, err := canonicalRestoreFilePath(p.backupPath)
+	if err != nil {
+		return wrapStep("validate --backup path", err)
+	}
+	if backupPath != journal.BackupCanonicalPath {
+		return wrapStep("validate --backup path", fmt.Errorf("backup path does not match approved journal artifact"))
+	}
+	dbPath, err := filepath.Abs(filepath.Clean(strings.TrimSpace(p.dbPath)))
+	if err != nil || dbPath == "" {
+		return wrapStep("validate live database path", fmt.Errorf("live database path is required"))
+	}
+	if backupPath == dbPath {
+		return wrapStep("validate --backup path", fmt.Errorf("backup path must be distinct from live database path"))
+	}
+	lock, err := offlinemigration.AcquireLock(dbPath)
+	if err != nil {
+		return wrapStep("acquire offline lifecycle lock", err)
+	}
+	defer lock.Close()
+	if err := verifyLiveRestoreBinding(ctx, dbPath, journal); err != nil {
+		return wrapStep("verify live restore request binding", err)
+	}
 
-	p.log("validating backup snapshot %s", p.backupPath)
-	if err := recovery.ValidateSnapshot(ctx, p.backupPath); err != nil {
+	p.log("validating approved backup snapshot")
+	if err := recovery.ValidateSnapshot(ctx, backupPath); err != nil {
 		return wrapStep("backup snapshot failed validation", err)
 	}
 
-	stagingPath := p.dbPath + ".restore-staging-" + p.requestID + ".db"
+	stagingPath := dbPath + ".restore-staging-" + p.requestID + ".db"
 	defer os.Remove(stagingPath)
-	p.log("staging the backup snapshot for forward migration")
-	if err := copyFileAtomic(p.backupPath, stagingPath, 0o600); err != nil {
+	p.log("staging the approved backup snapshot for forward migration")
+	stagedHash, stagedSize, err := stageSnapshot(backupPath, stagingPath)
+	if err != nil {
 		return wrapStep("stage backup snapshot", err)
+	}
+	if stagedHash != journal.BackupSHA256 || stagedSize != journal.BackupSizeBytes {
+		return wrapStep("verify staged backup artifact", fmt.Errorf("staged backup hash/size does not match approved journal artifact"))
 	}
 
 	stagingDB, err := store.OpenSQLite(ctx, store.SQLiteOptions{Path: stagingPath})
@@ -206,6 +241,11 @@ func doRestore(ctx context.Context, p restoreParams) *stepError {
 		// store.OpenSQLite rejects a schema newer than this binary supports,
 		// so this also covers "new schema rejected" without special-casing it.
 		return wrapStep("open staged snapshot (schema is too new or the file is corrupt)", err)
+	}
+	stagingSchemaVersion, err := readDBSchemaVersion(ctx, stagingDB)
+	if err != nil {
+		_ = stagingDB.Close()
+		return wrapStep("read staged snapshot schema version", err)
 	}
 	if err := stagingDB.IntegrityCheck(ctx); err != nil {
 		_ = stagingDB.Close()
@@ -215,24 +255,27 @@ func doRestore(ctx context.Context, p restoreParams) *stepError {
 		return wrapStep("close staged snapshot", err)
 	}
 
-	safeSnapshotPath := p.dbPath + ".pre-restore-safe-snapshot-" + p.requestID + ".db"
+	safeSnapshotPath := dbPath + ".pre-restore-safe-snapshot-" + p.requestID + ".db"
 	p.log("creating a pre-restore safe snapshot of the current live database")
-	if err := createSafeSnapshot(ctx, p.dbPath, safeSnapshotPath); err != nil {
+	if err := createSafeSnapshot(ctx, dbPath, safeSnapshotPath); err != nil {
 		return wrapStep("create pre-restore safe snapshot", err)
+	}
+	if err := verifyLiveRestoreBinding(ctx, dbPath, journal); err != nil {
+		return wrapStep("reconfirm live restore request binding", err)
 	}
 
 	p.log("atomically replacing the live database with the staged, migrated snapshot")
-	if err := os.Rename(stagingPath, p.dbPath); err != nil {
+	if err := os.Rename(stagingPath, dbPath); err != nil {
 		return wrapStep("replace live database (original database and safe snapshot are untouched)", err)
 	}
 	for _, suffix := range []string{"-wal", "-shm"} {
-		_ = os.Remove(p.dbPath + suffix)
+		_ = os.Remove(dbPath + suffix)
 	}
-	if err := syncDir(filepath.Dir(p.dbPath)); err != nil {
+	if err := syncDir(filepath.Dir(dbPath)); err != nil {
 		return wrapStep("sync database directory after replace", err)
 	}
 
-	liveDB, err := store.OpenSQLite(ctx, store.SQLiteOptions{Path: p.dbPath})
+	liveDB, err := store.OpenSQLite(ctx, store.SQLiteOptions{Path: dbPath})
 	if err != nil {
 		return wrapStep("open replaced live database; restore safe snapshot from "+safeSnapshotPath, err)
 	}
@@ -251,8 +294,9 @@ func doRestore(ctx context.Context, p restoreParams) *stepError {
 		return wrapStep("mark restoring", err)
 	}
 	if _, err := coordinator.RecordArtifacts(ctx, p.requestID, p.actor, recovery.ArtifactUpdate{
-		StagingPath:      stagingPath,
-		SafeSnapshotPath: safeSnapshotPath,
+		StagingPath:         stagingPath,
+		SafeSnapshotPath:    safeSnapshotPath,
+		SourceSchemaVersion: &stagingSchemaVersion,
 	}); err != nil {
 		return wrapStep("record staging/safe-snapshot artifacts", err)
 	}
@@ -361,39 +405,115 @@ func createSafeSnapshot(ctx context.Context, dbPath, safeSnapshotPath string) er
 	return os.Chmod(safeSnapshotPath, 0o600)
 }
 
-// copyFileAtomic copies src to dst via a same-directory temp file, fsync,
-// and rename so a crash mid-copy never leaves a partially written dst.
-func copyFileAtomic(src, dst string, perm os.FileMode) error {
+func canonicalRestoreFilePath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	absolute, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(absolute)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("path must be a real regular file")
+	}
+	return absolute, nil
+}
+
+func verifyLiveRestoreBinding(ctx context.Context, dbPath string, journal recovery.Journal) error {
+	db, err := store.OpenSQLite(ctx, store.SQLiteOptions{Path: dbPath})
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	coordinator := recovery.NewCoordinator(db.SQL(), recovery.WithJournalPath(recovery.DefaultJournalPath(dbPath)))
+	request, err := coordinator.Request(ctx, journal.RequestID)
+	if err != nil {
+		return err
+	}
+	if request.State != recovery.StatePreparing || request.BackupID != journal.BackupID {
+		return fmt.Errorf("restore request does not match journal binding")
+	}
+	control, err := coordinator.Control(ctx)
+	if err != nil {
+		return err
+	}
+	if control.State != recovery.StatePreparing || control.RequestID != journal.RequestID {
+		return fmt.Errorf("recovery_control does not match journal binding")
+	}
+	return nil
+}
+
+func stageSnapshot(src, dst string) (string, int64, error) {
+	before, err := os.Lstat(src)
+	if err != nil {
+		return "", 0, err
+	}
+	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
+		return "", 0, fmt.Errorf("backup source must be a real regular file")
+	}
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 	defer in.Close()
+	opened, err := in.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	if !os.SameFile(before, opened) {
+		return "", 0, fmt.Errorf("backup source changed while opening")
+	}
 
 	tempPath := dst + ".tmp"
-	out, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, perm)
+	out, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, 0o600)
 	if err != nil {
-		return err
+		return "", 0, err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	hasher := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(out, hasher), in); err != nil {
 		_ = out.Close()
 		_ = os.Remove(tempPath)
-		return err
+		return "", 0, err
 	}
 	if err := out.Sync(); err != nil {
 		_ = out.Close()
 		_ = os.Remove(tempPath)
-		return err
+		return "", 0, err
 	}
 	if err := out.Close(); err != nil {
 		_ = os.Remove(tempPath)
-		return err
+		return "", 0, err
+	}
+	after, err := os.Lstat(src)
+	if err != nil {
+		_ = os.Remove(tempPath)
+		return "", 0, err
+	}
+	if !os.SameFile(opened, after) || opened.Size() != after.Size() || !opened.ModTime().Equal(after.ModTime()) {
+		_ = os.Remove(tempPath)
+		return "", 0, fmt.Errorf("backup source changed during copy")
 	}
 	if err := os.Rename(tempPath, dst); err != nil {
 		_ = os.Remove(tempPath)
-		return err
+		return "", 0, err
 	}
-	return syncDir(filepath.Dir(dst))
+	if err := syncDir(filepath.Dir(dst)); err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), opened.Size(), nil
+}
+
+func readDBSchemaVersion(ctx context.Context, db *store.DB) (int64, error) {
+	var version int64
+	if err := db.SQL().QueryRowContext(ctx, `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, nil
 }
 
 func syncDir(dir string) error {

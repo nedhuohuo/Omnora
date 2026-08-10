@@ -60,14 +60,18 @@ var routeMatrix = []RouteRule{
 	{Method: "PATCH", Pattern: "/api/v1/account/password", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "DELETE", Pattern: "/api/v1/account/sessions/*", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "POST", Pattern: "/api/v1/account/totp/disable", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
-	// Lenient recent-reauth matrix: only credential issuance and hard-to-undo
-	// control-plane damage require a fresh password (and TOTP when enabled).
+	// Recent reauthentication protects credential issuance, administrator account
+	// mutations, and hard-to-undo control-plane damage.
 	{Method: "POST", Pattern: "/api/v1/ai-tokens", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "DELETE", Pattern: "/api/v1/ai-tokens/*", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "POST", Pattern: "/api/v1/admin/backups", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/backups/*/restore", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/users/*/disable", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "POST", Pattern: "/api/v1/admin/users/*/enable", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/users/*/revoke-sessions", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	// Admin user creation grants a full new credential, so it requires a recent
+	// reauthentication like other control-plane mutations.
+	{Method: "POST", Pattern: "/api/v1/admin/users", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "GET", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie},
 	{Method: "HEAD", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie},
 	{Method: "*", Pattern: "/api/v1/admin/*", Mode: RouteAuthCookie, CSRF: true},

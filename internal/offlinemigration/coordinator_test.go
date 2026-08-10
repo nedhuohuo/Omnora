@@ -21,7 +21,7 @@ func TestMigrationCoordinatorEndToEndStagesValidatesAndAtomicallyCommits(t *test
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if result.NoPendingMigration || result.Target != (MigrationTarget{Version: 14, Name: "014_injected_test.sql"}) {
+	if result.NoPendingMigration || result.Target != (MigrationTarget{Version: 16, Name: "016_injected_test.sql"}) {
 		t.Fatalf("Run() result = %#v", result)
 	}
 	journal, err := ReadJournal(result.JournalPath)
@@ -131,8 +131,8 @@ func newInjectedCoordinator(t *testing.T) *MigrationCoordinator {
 	coordinator.deps.randomID = func() (string, error) { return "test", nil }
 	coordinator.deps.inspect = func(context.Context, *store.DB) (migrationInspection, error) {
 		return migrationInspection{
-			Source: store.MigrationInfo{Version: 13, Name: "013_account_mount_model.sql"},
-			Target: store.MigrationInfo{Version: 14, Name: "014_injected_test.sql"}, Pending: true,
+			Source: store.MigrationInfo{Version: 15, Name: "015_backup_artifact_provenance.sql"},
+			Target: store.MigrationInfo{Version: 16, Name: "016_injected_test.sql"}, Pending: true,
 		}, nil
 	}
 	coordinator.deps.migrateStaging = func(ctx context.Context, _, stagingPath string) error {
@@ -142,7 +142,7 @@ func newInjectedCoordinator(t *testing.T) *MigrationCoordinator {
 		}
 		if _, err := db.ExecContext(ctx, `
 CREATE TABLE account_mount_migration_probe(id INTEGER PRIMARY KEY);
-INSERT INTO schema_migrations(version, name) VALUES (14, '014_injected_test.sql');
+INSERT INTO schema_migrations(version, name) VALUES (16, '016_injected_test.sql');
 `); err != nil {
 			_ = db.Close()
 			return err

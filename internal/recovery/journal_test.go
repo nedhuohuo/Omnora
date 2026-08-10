@@ -28,12 +28,7 @@ VALUES ('admin', 'admin@example.com', 'Admin', 'admin', 'active', 'hash')
 `); err != nil {
 		t.Fatalf("insert account: %v", err)
 	}
-	if _, err := db.SQL().ExecContext(ctx, `
-INSERT INTO backups(id, status, path, created_by, created_at, notes)
-VALUES ('backup-1', 'completed', '/tmp/backup.db', 'admin', CURRENT_TIMESTAMP, 'test')
-`); err != nil {
-		t.Fatalf("insert backup: %v", err)
-	}
+	insertCompletedBackupFixture(t, ctx, db)
 
 	request, err := coordinator.BeginRestore(ctx, BeginRestoreRequest{BackupID: "backup-1", ActorAccountID: "admin"})
 	if err != nil {

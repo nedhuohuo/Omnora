@@ -2,6 +2,7 @@ package files
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"mime"
@@ -11,9 +12,12 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
+	"omnora/internal/access"
 	"omnora/internal/domain"
+	"omnora/internal/mountid"
 	"omnora/internal/storage"
 )
 
@@ -392,6 +396,104 @@ func (Service) OpenFile(mount Mount, relativePath string) (*os.File, os.FileInfo
 		return nil, nil, ErrNotFile
 	}
 	return file, info, nil
+}
+
+// OpenVerifiedRegularFile opens the regular file that a verified ticket
+// authorized, binding the returned descriptor to the mount identity recorded in
+// the mount row. It is the only mount-open primitive safe to stream bytes from
+// across the trust boundary:
+//
+//  1. The mount root is opened with os.OpenRoot and the root descriptor is kept
+//     for the whole operation, so every later lookup is descriptor-relative and
+//     cannot be redirected outside the root.
+//  2. The open root's own "." entry is statted and compared against the
+//     device/inode identity already stored in mount.IdentityJSON. This closes
+//     the window in which the mount root is replaced by another directory
+//     between authorization and open.
+//  3. The cleaned storage-relative path is opened from the root descriptor,
+//     rejecting escapes, the reserved namespace, symlink path components and
+//     non-regular leaf objects.
+//  4. The still-open leaf descriptor and its own Stat result are returned; the
+//     root descriptor is released as soon as the leaf is open. Every failure
+//     path closes every descriptor it opened.
+//
+// os.Root pins the root and intermediate directories and prevents resolving
+// outside the root, but it still allows symlinks inside the root. The identity
+// check here and the object-fingerprint check on the returned descriptor are
+// therefore both required: the caller must re-fingerprint the returned
+// descriptor and require it to equal the ticket fingerprint before serving any
+// byte.
+func OpenVerifiedRegularFile(mount access.AuthorizedMount) (*os.File, os.FileInfo, error) {
+	rootPath := strings.TrimSpace(mount.MountRoot)
+	if rootPath == "" {
+		return nil, nil, ErrInvalidMount
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidMount, err)
+	}
+	rootInfo, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, nil, fmt.Errorf("%w: %v", access.ErrMountIdentityUnverifiable, err)
+	}
+	if err := verifyMountRootIdentity(mount.IdentityJSON, rootInfo); err != nil {
+		_ = root.Close()
+		return nil, nil, err
+	}
+	cleaned, err := storage.CleanRelativePath(mount.StorageRelativePath)
+	if err != nil || cleaned == "." {
+		_ = root.Close()
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, ErrNotFile
+	}
+	if err := rejectSymlinkPath(root, cleaned); err != nil {
+		_ = root.Close()
+		return nil, nil, err
+	}
+	leaf, err := root.Open(cleaned)
+	if err != nil {
+		_ = root.Close()
+		return nil, nil, err
+	}
+	_ = root.Close()
+	info, err := leaf.Stat()
+	if err != nil {
+		_ = leaf.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = leaf.Close()
+		return nil, nil, ErrNotFile
+	}
+	return leaf, info, nil
+}
+
+// verifyMountRootIdentity compares the device/inode of an already-open mount
+// root descriptor against the identity captured at authorization time and
+// serialized into mount.IdentityJSON. A mismatch means the root directory was
+// replaced, so the object cannot be bound to the authorized mount.
+func verifyMountRootIdentity(identityJSON string, rootInfo os.FileInfo) error {
+	if strings.TrimSpace(identityJSON) == "" {
+		return access.ErrMountIdentityUnverifiable
+	}
+	var stored mountid.Identity
+	if err := json.Unmarshal([]byte(identityJSON), &stored); err != nil {
+		return access.ErrMountIdentityUnverifiable
+	}
+	stat, ok := rootInfo.Sys().(*syscall.Stat_t)
+	if !ok || stat == nil {
+		return access.ErrMountIdentityUnverifiable
+	}
+	if stored.Device == 0 || stored.Inode == 0 {
+		return access.ErrMountIdentityUnverifiable
+	}
+	if uint64(stat.Dev) != stored.Device || uint64(stat.Ino) != stored.Inode {
+		return access.ErrMountIdentityUnverifiable
+	}
+	return nil
 }
 
 func (Service) ValidateWritableTarget(mount Mount, relativePath string) error {

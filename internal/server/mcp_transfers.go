@@ -8,12 +8,12 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"omnora/internal/access"
 	"omnora/internal/audit"
+	"omnora/internal/files"
 	"omnora/internal/httpx"
 	"omnora/internal/memberfiles"
 	"omnora/internal/storage"
@@ -25,6 +25,17 @@ type mcpTransferAudit struct {
 	intentID int64
 	event    audit.MCPEvent
 }
+
+// mcpDownloadSyncAfterFirstVerify, mcpDownloadSyncAfterOpen and
+// mcpDownloadSyncBeforeFinalVerify are package-private, default no-op hooks
+// that focused tests replace to arrange the download races deterministically.
+// Production behavior never gives them side effects and they are never called
+// on any non-download path.
+var (
+	mcpDownloadSyncAfterFirstVerify  = func() {}
+	mcpDownloadSyncAfterOpen         = func() {}
+	mcpDownloadSyncBeforeFinalVerify = func() {}
+)
 
 func (s *Server) beginMCPTransferAudit(ctx context.Context, ticket transferticket.VerifiedTicket, tool string, metadata map[string]any, r *http.Request) (*mcpTransferAudit, error) {
 	if s == nil || s.db == nil {
@@ -155,6 +166,7 @@ func (s *Server) mcpDownload(w http.ResponseWriter, r *http.Request) {
 		writeMCPTransferError(w, r, err)
 		return
 	}
+	mcpDownloadSyncAfterFirstVerify()
 	rangeLabel := safeTransferRangeLabel(r.Header.Get("Range"))
 	auditRecord, err := s.beginMCPTransferAudit(r.Context(), ticket, "mcp.transfer.download", map[string]any{"operation": "download", "targetLabel": transferTargetLabel(ticket), "range": rangeLabel}, r)
 	if err != nil {
@@ -184,32 +196,52 @@ func (s *Server) mcpDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		writeMCPTransferError(w, r, cause)
 	}
-	filePath := filepath.Join(ticket.Mount.Root, filepath.FromSlash(ticket.Mount.RelativePath))
-	file, err := os.Open(filePath)
+	// Open the object through the verified mount root. This rooted-open binds
+	// the descriptor to the mount identity stored in the mount row and rejects
+	// symlink, escape, reserved-namespace and non-regular objects before any
+	// byte can be served.
+	leaf, _, err := files.OpenVerifiedRegularFile(ticket.Mount)
 	if err != nil {
-		fail(err, transferAuditFailure(err))
-		return
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		if err == nil {
-			err = transferticket.ErrNotRegularFile
+		if !errors.Is(err, access.ErrMountIdentityUnverifiable) {
+			// The authorized object cannot be opened as the authorized regular
+			// file (missing, symlinked, replaced or otherwise drifted): fold it
+			// into object drift so the response stays 409 object_changed. A
+			// mount-root identity failure keeps its own 409
+			// mount_identity_unverifiable mapping.
+			err = transferticket.ErrObjectDrift
 		}
 		fail(err, transferAuditFailure(err))
 		return
 	}
-	size := info.Size()
+	defer leaf.Close()
+	mcpDownloadSyncAfterOpen()
+	mcpDownloadSyncBeforeFinalVerify()
+
+	// The final verification replays the token, ACL, boundary, mount identity,
+	// ticket state and path-fingerprint checks after the open, so every
+	// authorization input is re-read with the object already pinned.
 	rechecked, err := s.transferTickets.Verify(r.Context(), bearer, transferticket.OperationDownload)
 	if err != nil {
 		fail(err, transferAuditFailure(err))
 		return
 	}
-	if rechecked.ObjectFingerprint != ticket.ObjectFingerprint {
+	// Re-stat the same open descriptor and compute the ticket-v2 fingerprint
+	// with the freshly authorized mount. The descriptor, the initial ticket and
+	// the final verification must all name the same object: this is what proves
+	// the bytes that follow came from the authorized file, not from a path that
+	// was swapped between verification and open.
+	leafInfo, err := leaf.Stat()
+	if err != nil {
 		fail(transferticket.ErrObjectDrift, transferAuditFailure(transferticket.ErrObjectDrift))
 		return
 	}
-	etag := `"` + ticket.ObjectFingerprint + `"`
+	fdFingerprint := transferticket.FingerprintFileInfo(rechecked.Mount, leafInfo)
+	if fdFingerprint != ticket.ObjectFingerprint || fdFingerprint != rechecked.ObjectFingerprint {
+		fail(transferticket.ErrObjectDrift, transferAuditFailure(transferticket.ErrObjectDrift))
+		return
+	}
+	size := leafInfo.Size()
+	etag := `"` + rechecked.ObjectFingerprint + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Accept-Ranges", "bytes")
 	if match := strings.TrimSpace(r.Header.Get("If-Match")); match != "" && match != "*" && match != etag {
@@ -252,12 +284,12 @@ func (s *Server) mcpDownload(w http.ResponseWriter, r *http.Request) {
 		_ = s.finishMCPTransferAudit(r.Context(), auditRecord, "succeeded", map[string]any{"operation": "download", "targetLabel": transferTargetLabel(ticket), "range": rangeLabel, "bytes": auditBytes, "start": start, "status": status})
 		return
 	}
-	if _, err := file.Seek(start, io.SeekStart); err != nil {
+	if _, err := leaf.Seek(start, io.SeekStart); err != nil {
 		_ = s.finishMCPTransferAudit(r.Context(), auditRecord, "failed", downloadAuditFailure(ticket, rangeLabel, err, 0, start, status))
 		return
 	}
 	copyErr := error(nil)
-	if _, err := io.CopyN(w, file, length); err != nil {
+	if _, err := io.CopyN(w, leaf, length); err != nil {
 		copyErr = err
 	}
 	if copyErr != nil {

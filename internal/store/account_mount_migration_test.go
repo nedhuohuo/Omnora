@@ -11,11 +11,15 @@ import (
 
 func TestProductionCatalogRegistersAccountMountMigrationOffline(t *testing.T) {
 	t.Parallel()
-	if len(productionMigrationCatalog) != 13 {
-		t.Fatalf("production migration count = %d, want 13", len(productionMigrationCatalog))
+	if len(productionMigrationCatalog) != 15 {
+		t.Fatalf("production migration count = %d, want 15", len(productionMigrationCatalog))
+	}
+	wantAccountMount := migrationDescriptor{Version: 13, Name: "013_account_mount_model.sql", Class: migrationOfflineRequired}
+	if got := productionMigrationCatalog[12]; got != wantAccountMount {
+		t.Fatalf("account mount migration = %#v, want %#v", got, wantAccountMount)
 	}
 	got := productionMigrationCatalog[len(productionMigrationCatalog)-1]
-	want := migrationDescriptor{Version: 13, Name: "013_account_mount_model.sql", Class: migrationOfflineRequired}
+	want := migrationDescriptor{Version: 15, Name: "015_backup_artifact_provenance.sql", Class: migrationOnlineSafe}
 	if got != want {
 		t.Fatalf("latest production migration = %#v, want %#v", got, want)
 	}

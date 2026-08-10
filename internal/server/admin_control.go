@@ -1163,6 +1163,10 @@ func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) {
 	notes := "sqlite online backup"
 	backupPath := ""
 	completedAt := any(now.Format(time.RFC3339Nano))
+	backupSHA256 := ""
+	var backupSizeBytes any
+	var backupCanonicalPath any
+	var backupSchemaVersion any
 
 	if s.db == nil || strings.TrimSpace(s.cfg.Database.Path) == "" {
 		status = "failed"
@@ -1178,6 +1182,20 @@ func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) {
 		} else {
 			id = "bkp_" + artifact.ID
 			backupPath = artifact.Path
+			backupSHA256 = artifact.SHA256
+			backupSizeBytes = artifact.SizeBytes
+			backupSchemaVersion = artifact.SchemaVersion
+			if canonical, err := filepath.Abs(filepath.Clean(artifact.Path)); err == nil {
+				backupCanonicalPath = canonical
+			} else {
+				status = "failed"
+				notes = "online backup failed: canonicalize backup artifact"
+				backupPath = ""
+				backupSHA256 = ""
+				backupSizeBytes = nil
+				backupSchemaVersion = nil
+				completedAt = nil
+			}
 		}
 	}
 
@@ -1188,9 +1206,10 @@ func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(r.Context(), `
-INSERT INTO backups(id, status, path, created_by, created_at, completed_at, notes)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-`, id, status, nullIfEmpty(backupPath), session.AccountID, now.Format(time.RFC3339Nano), completedAt, notes)
+INSERT INTO backups(id, status, path, created_by, created_at, completed_at, notes, sha256, size_bytes, canonical_path, schema_version)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, id, status, nullIfEmpty(backupPath), session.AccountID, now.Format(time.RFC3339Nano), completedAt, notes,
+		nullIfEmpty(backupSHA256), backupSizeBytes, backupCanonicalPath, backupSchemaVersion)
 	if err != nil {
 		writeDBError(w, r, err)
 		return

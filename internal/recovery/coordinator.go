@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -70,6 +72,9 @@ func (c *Coordinator) BeginRestore(ctx context.Context, request BeginRestoreRequ
 	if c == nil || c.db == nil {
 		return RestoreRequest{}, errors.New("recovery: database is nil")
 	}
+	if strings.TrimSpace(c.journalPath) == "" {
+		return RestoreRequest{}, fmt.Errorf("%w: recovery journal path is required", ErrInvalidRequest)
+	}
 	request.BackupID = strings.TrimSpace(request.BackupID)
 	if request.BackupID == "" {
 		return RestoreRequest{}, fmt.Errorf("%w: backup id is required", ErrInvalidRequest)
@@ -82,6 +87,13 @@ func (c *Coordinator) BeginRestore(ctx context.Context, request BeginRestoreRequ
 		}
 	}
 	now := c.now()
+	backup, err := loadBackupCatalogEntry(ctx, c.db, request.BackupID)
+	if err != nil {
+		return RestoreRequest{}, err
+	}
+	if err := bindBackupArtifact(ctx, &backup); err != nil {
+		return RestoreRequest{}, err
+	}
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
 		return RestoreRequest{}, err
@@ -94,15 +106,12 @@ func (c *Coordinator) BeginRestore(ctx context.Context, request BeginRestoreRequ
 	if current != StateNormal {
 		return RestoreRequest{}, ErrRestoreInProgress
 	}
-	var status string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM backups WHERE id = ?`, request.BackupID).Scan(&status); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return RestoreRequest{}, fmt.Errorf("%w: backup was not found", ErrInvalidRequest)
-		}
+	rechecked, err := loadBackupCatalogEntry(ctx, tx, request.BackupID)
+	if err != nil {
 		return RestoreRequest{}, err
 	}
-	if status != "completed" {
-		return RestoreRequest{}, fmt.Errorf("%w: backup is not completed", ErrInvalidRequest)
+	if !backupCatalogEntriesMatch(backup, rechecked) {
+		return RestoreRequest{}, fmt.Errorf("%w: backup catalog changed during approval", ErrInvalidRequest)
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO restore_requests(id, backup_id, state, staging_path, requested_at)
@@ -137,28 +146,115 @@ WHERE id = 1 AND state = 'normal'
 		ID: request.RequestID, BackupID: request.BackupID, State: StatePreparing,
 		StagingPath: request.StagingPath, RequestedAt: now,
 	}
-	// The durable journal is the only record of this request that survives an
-	// offline recovery worker replacing the live SQLite file with an older
-	// backup snapshot: that replacement necessarily wipes out the
-	// restore_requests/recovery_control rows written above, because the
-	// backup predates this request. RehydrateFromJournal restores them from
-	// this sidecar file before ApplyRestoreEffects runs against the new file.
-	// Journal write failures never invalidate an already-committed request;
-	// they are surfaced so operators can intervene before the offline worker
-	// runs.
-	if strings.TrimSpace(c.journalPath) != "" {
-		if err := WriteJournal(c.journalPath, Journal{
-			RequestID:      request.RequestID,
-			BackupID:       request.BackupID,
-			ActorAccountID: request.ActorAccountID,
-			State:          StatePreparing,
-			StagingPath:    request.StagingPath,
-			RequestedAt:    now,
-		}); err != nil {
-			return created, fmt.Errorf("recovery: restore request committed but journal write failed: %w", err)
+	journal := Journal{
+		RequestID: request.RequestID, BackupID: request.BackupID, ActorAccountID: request.ActorAccountID,
+		State: StatePreparing, StagingPath: request.StagingPath, RequestedAt: now,
+		BackupStatus: backup.Status, BackupPath: backup.Path, BackupCanonicalPath: backup.CanonicalPath,
+		BackupSHA256: backup.SHA256, BackupSizeBytes: backup.SizeBytes, BackupSchemaVersion: backup.SchemaVersion,
+		BackupCreatedBy: backup.CreatedBy, BackupCreatedAt: backup.CreatedAt, BackupCompletedAt: backup.CompletedAt,
+		BackupNotes: backup.Notes,
+	}
+	if err := WriteJournal(c.journalPath, journal); err != nil {
+		markErrPrefix := ""
+		if _, markErr := c.MarkRecoveryRequired(ctx, request.RequestID, request.ActorAccountID, "journal_unavailable"); markErr != nil {
+			markErrPrefix = fmt.Sprintf("; additionally failed to mark recovery_required: %v", markErr)
 		}
+		return created, fmt.Errorf("recovery: restore request committed but journal write failed%s: %w", markErrPrefix, err)
 	}
 	return created, nil
+}
+
+func loadBackupCatalogEntry(ctx context.Context, source rowQuerier, backupID string) (backupCatalogEntry, error) {
+	backupID = strings.TrimSpace(backupID)
+	if backupID == "" {
+		return backupCatalogEntry{}, fmt.Errorf("%w: backup id is required", ErrInvalidRequest)
+	}
+	var entry backupCatalogEntry
+	var path, createdBy, createdAt, completedAt, sha, canonical sql.NullString
+	var size, schema sql.NullInt64
+	err := source.QueryRowContext(ctx, `
+SELECT id, status, path, created_by, created_at, completed_at, notes, sha256, size_bytes, canonical_path, schema_version
+FROM backups WHERE id = ?
+`, backupID).Scan(&entry.ID, &entry.Status, &path, &createdBy, &createdAt, &completedAt, &entry.Notes, &sha, &size, &canonical, &schema)
+	if errors.Is(err, sql.ErrNoRows) {
+		return backupCatalogEntry{}, fmt.Errorf("%w: backup was not found", ErrInvalidRequest)
+	}
+	if err != nil {
+		return backupCatalogEntry{}, err
+	}
+	entry.Path = strings.TrimSpace(path.String)
+	entry.CreatedBy = strings.TrimSpace(createdBy.String)
+	entry.CreatedAt = parseTime(createdAt.String)
+	entry.CompletedAt = parseTime(completedAt.String)
+	entry.SHA256 = strings.TrimSpace(sha.String)
+	entry.SizeBytes = size.Int64
+	entry.CanonicalPath = strings.TrimSpace(canonical.String)
+	entry.SchemaVersion = schema.Int64
+	return entry, nil
+}
+
+func bindBackupArtifact(ctx context.Context, entry *backupCatalogEntry) error {
+	if entry == nil {
+		return fmt.Errorf("%w: backup is required", ErrInvalidRequest)
+	}
+	if entry.Status != "completed" {
+		return fmt.Errorf("%w: backup is not completed", ErrInvalidRequest)
+	}
+	if strings.TrimSpace(entry.Path) == "" {
+		return fmt.Errorf("%w: backup path is missing", ErrInvalidRequest)
+	}
+	if !validSHA256Hex(entry.SHA256) || entry.SizeBytes <= 0 || entry.SchemaVersion <= 0 || entry.CanonicalPath == "" {
+		return fmt.Errorf("%w: backup provenance is incomplete", ErrInvalidRequest)
+	}
+	if entry.CreatedAt.IsZero() || entry.CompletedAt.IsZero() {
+		return fmt.Errorf("%w: backup timestamps are incomplete", ErrInvalidRequest)
+	}
+	canonical, err := canonicalRegularFilePath(entry.Path)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	if canonical != entry.CanonicalPath {
+		return fmt.Errorf("%w: backup canonical path does not match provenance", ErrInvalidRequest)
+	}
+	hash, size, err := hashRegularFile(canonical)
+	if err != nil {
+		return fmt.Errorf("%w: hash backup artifact: %v", ErrInvalidRequest, err)
+	}
+	if hash != entry.SHA256 || size != entry.SizeBytes {
+		return fmt.Errorf("%w: backup artifact hash/size does not match provenance", ErrInvalidRequest)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	return nil
+}
+
+func canonicalRegularFilePath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("backup path is required")
+	}
+	absolute, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(absolute)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("backup must be a real regular file")
+	}
+	return absolute, nil
+}
+
+func backupCatalogEntriesMatch(left, right backupCatalogEntry) bool {
+	return left.ID == right.ID && left.Status == right.Status && left.Path == right.Path &&
+		left.CreatedBy == right.CreatedBy && left.CreatedAt.Equal(right.CreatedAt) && left.CompletedAt.Equal(right.CompletedAt) &&
+		left.Notes == right.Notes && left.SHA256 == right.SHA256 && left.SizeBytes == right.SizeBytes &&
+		left.CanonicalPath == right.CanonicalPath && left.SchemaVersion == right.SchemaVersion
 }
 
 func (c *Coordinator) MarkRestoring(ctx context.Context, requestID, actorAccountID string) (RestoreRequest, error) {

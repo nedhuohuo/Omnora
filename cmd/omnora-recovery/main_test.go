@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,10 +76,33 @@ VALUES ('admin', 'admin@example.com', 'Admin', 'admin', 'active', 'hash')
 `); err != nil {
 		t.Fatalf("insert account: %v", err)
 	}
+	// The backup itself must be a valid, self-contained SQLite snapshot; take
+	// an online backup of the current (pre-restore) live database so it has
+	// the same schema and passes integrity/foreign-key validation.
+	if err := liveDB.BackupTo(ctx, backupPath); err != nil {
+		t.Fatalf("create backup snapshot: %v", err)
+	}
+	backupContents, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("read backup snapshot: %v", err)
+	}
+	backupInfo, err := os.Stat(backupPath)
+	if err != nil {
+		t.Fatalf("stat backup snapshot: %v", err)
+	}
+	var backupSchemaVersion int64
+	if err := liveDB.SQL().QueryRowContext(ctx, `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&backupSchemaVersion); err != nil {
+		t.Fatalf("read backup schema version: %v", err)
+	}
+	backupSHA256 := sha256.Sum256(backupContents)
+	canonicalBackupPath, err := filepath.Abs(backupPath)
+	if err != nil {
+		t.Fatalf("resolve backup canonical path: %v", err)
+	}
 	if _, err := liveDB.SQL().ExecContext(ctx, `
-INSERT INTO backups(id, status, path, created_by, created_at, notes)
-VALUES ('backup-1', 'completed', ?, 'admin', CURRENT_TIMESTAMP, 'test')
-`, backupPath); err != nil {
+INSERT INTO backups(id, status, path, created_by, created_at, completed_at, notes, sha256, size_bytes, canonical_path, schema_version)
+VALUES ('backup-1', 'completed', ?, 'admin', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'test', ?, ?, ?, ?)
+`, backupPath, hex.EncodeToString(backupSHA256[:]), backupInfo.Size(), canonicalBackupPath, backupSchemaVersion); err != nil {
 		t.Fatalf("insert backup record: %v", err)
 	}
 
@@ -88,13 +113,6 @@ VALUES ('backup-1', 'completed', ?, 'admin', CURRENT_TIMESTAMP, 'test')
 	})
 	if err != nil {
 		t.Fatalf("begin restore: %v", err)
-	}
-
-	// The backup itself must be a valid, self-contained SQLite snapshot; take
-	// an online backup of the current (pre-restore) live database so it has
-	// the same schema and passes integrity/foreign-key validation.
-	if err := liveDB.BackupTo(ctx, backupPath); err != nil {
-		t.Fatalf("create backup snapshot: %v", err)
 	}
 	if err := liveDB.Close(); err != nil {
 		t.Fatalf("close live database (simulating the controlled process shutdown): %v", err)

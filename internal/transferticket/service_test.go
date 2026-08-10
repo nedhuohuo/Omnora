@@ -610,3 +610,142 @@ func TestVerifyRejectsUploadClosureAndExpiredTicket(t *testing.T) {
 		t.Fatalf("Verify(expired) error = %v, want expired", err)
 	}
 }
+
+// commonTestMount builds the AuthorizedMount shape the fingerprint helpers
+// rely on for the ticket fixture: a common mount where the host-visible and
+// storage-relative paths coincide.
+func commonTestMount(f ticketFixture, relativePath string) access.AuthorizedMount {
+	return access.AuthorizedMount{
+		Source:              contentref.SourceCommonMount,
+		ID:                  f.mountID,
+		Root:                f.root,
+		MountRoot:           f.root,
+		StorageRelativePath: relativePath,
+		RelativePath:        relativePath,
+	}
+}
+
+// FingerprintFileInfo computed from an already-open descriptor must agree with
+// the existing path-based fingerprintObject for the same object, so the
+// descriptor-binding comparison in the download path is byte-compatible with
+// the fingerprints stored on tickets.
+func TestFingerprintFileInfoMatchesPathFingerprint(t *testing.T) {
+	f := newTicketFixture(t)
+	if err := os.WriteFile(filepath.Join(f.root, "fp.txt"), []byte("data"), 0o640); err != nil {
+		t.Fatalf("WriteFile(fp.txt) error = %v", err)
+	}
+	mount := commonTestMount(f, "fp.txt")
+	pathFP, err := fingerprintObject(mount)
+	if err != nil {
+		t.Fatalf("fingerprintObject() error = %v", err)
+	}
+	file, err := os.Open(filepath.Join(f.root, "fp.txt"))
+	if err != nil {
+		t.Fatalf("Open(fp.txt) error = %v", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	fdFP := FingerprintFileInfo(mount, info)
+	if fdFP != pathFP {
+		t.Fatalf("descriptor fingerprint %q != path fingerprint %q", fdFP, pathFP)
+	}
+}
+
+// The descriptor fingerprint binds the object identity, not the directory
+// entry used to reach it: a hard link to the same inode reports the same
+// fingerprint as the authorized storage path, while the path fingerprint
+// computation and the descriptor fingerprint stay interchangeable.
+func TestFingerprintFileInfoBindsObjectNotDirectoryEntry(t *testing.T) {
+	f := newTicketFixture(t)
+	if err := os.WriteFile(filepath.Join(f.root, "original.txt"), []byte("data"), 0o640); err != nil {
+		t.Fatalf("WriteFile(original.txt) error = %v", err)
+	}
+	if err := os.Link(filepath.Join(f.root, "original.txt"), filepath.Join(f.root, "hardlink.txt")); err != nil {
+		t.Skipf("hard link unavailable: %v", err)
+	}
+	mount := commonTestMount(f, "original.txt")
+	pathFP, err := fingerprintObject(mount)
+	if err != nil {
+		t.Fatalf("fingerprintObject() error = %v", err)
+	}
+	// Reach the same inode through a different directory entry while still
+	// fingerprinting against the authorized storage path.
+	file, err := os.Open(filepath.Join(f.root, "hardlink.txt"))
+	if err != nil {
+		t.Fatalf("Open(hardlink.txt) error = %v", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	fdFP := FingerprintFileInfo(mount, info)
+	if fdFP != pathFP {
+		t.Fatalf("hard-link descriptor fingerprint %q != path fingerprint %q", fdFP, pathFP)
+	}
+}
+
+// Replacing the object with a different inode, or mutating its permissions,
+// size or mtime, must change the descriptor fingerprint so a pinned descriptor
+// that no longer matches the authorized object is rejected before any byte is
+// served.
+func TestFingerprintFileInfoDiffersWhenObjectChanges(t *testing.T) {
+	f := newTicketFixture(t)
+	fdFP := func(relativePath string) string {
+		t.Helper()
+		file, err := os.Open(filepath.Join(f.root, relativePath))
+		if err != nil {
+			t.Fatalf("Open(%s) error = %v", relativePath, err)
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			t.Fatalf("Stat(%s) error = %v", relativePath, err)
+		}
+		return FingerprintFileInfo(commonTestMount(f, relativePath), info)
+	}
+
+	// Different inode: two distinct files with identical content and metadata
+	// still fingerprint differently because device/inode are bound.
+	if err := os.WriteFile(filepath.Join(f.root, "a.txt"), []byte("data"), 0o640); err != nil {
+		t.Fatalf("WriteFile(a.txt) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "b.txt"), []byte("data"), 0o640); err != nil {
+		t.Fatalf("WriteFile(b.txt) error = %v", err)
+	}
+	if fpA, fpB := fdFP("a.txt"), fdFP("b.txt"); fpA == fpB {
+		t.Fatalf("distinct inodes fingerprinted identically: %q", fpA)
+	}
+
+	// Permission change on the same inode.
+	baseline := fdFP("a.txt")
+	if err := os.Chmod(filepath.Join(f.root, "a.txt"), 0o600); err != nil {
+		t.Fatalf("Chmod(a.txt) error = %v", err)
+	}
+	if fp := fdFP("a.txt"); fp == baseline {
+		t.Fatalf("chmod did not change fingerprint (%q)", fp)
+	}
+
+	// Size and mtime change on the same inode.
+	baseline = fdFP("a.txt")
+	if err := os.WriteFile(filepath.Join(f.root, "a.txt"), []byte("different-size-data"), 0o600); err != nil {
+		t.Fatalf("WriteFile(a.txt) error = %v", err)
+	}
+	if fp := fdFP("a.txt"); fp == baseline {
+		t.Fatalf("content change did not change fingerprint (%q)", fp)
+	}
+}
+
+// A nil descriptor fingerprint falls back to the same missing-object encoding
+// the path fingerprint uses, so a ticket whose object vanished is detected
+// identically on both sides.
+func TestFingerprintFileInfoNilInfoMatchesMissingObject(t *testing.T) {
+	f := newTicketFixture(t)
+	mount := commonTestMount(f, "never.txt")
+	if fp := FingerprintFileInfo(mount, nil); fp != missingFingerprint(mount) {
+		t.Fatalf("nil-info fingerprint %q != missing fingerprint %q", fp, missingFingerprint(mount))
+	}
+}

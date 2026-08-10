@@ -73,7 +73,16 @@ func (s *Server) changeAccountPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	svc := identity.New(s.sqlDB(), identity.Options{})
 	material, err := svc.LoadCredentialMaterial(r.Context(), session.AccountID)
-	if err != nil || !svc.VerifyPassword(req.CurrentPassword, material.PasswordHash) {
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
+		return
+	}
+	if !svc.VerifyPassword(req.CurrentPassword, material.PasswordHash) {
+		decision := s.recordCredentialFailure(r, ratelimit.ScopeTOTP, session.AccountID)
+		if !decision.Allowed {
+			writeRateLimited(w, r, decision)
+			return
+		}
 		httpx.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "credentials are not valid")
 		return
 	}
@@ -121,6 +130,7 @@ func (s *Server) changeAccountPassword(w http.ResponseWriter, r *http.Request) {
 		s.writeIdentityError(w, r, err)
 		return
 	}
+	s.recordCredentialSuccess(r, ratelimit.ScopeTOTP, session.AccountID)
 	if s.httpPolicy != nil {
 		if _, err := SetCSRFCookie(w, s.cookieNames(r).CSRF, isSecureRequest(r), time.Now().UTC()); err != nil {
 			writeDBError(w, r, err)

@@ -267,7 +267,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     setCreating(true);
     setError('');
     try {
-      await createAdminUser(form);
+      await runSensitive(() => createAdminUser(form));
       setForm({ email: '', displayName: '', password: '', role: 'member' });
       setFormOpen(false);
       await load();
@@ -285,7 +285,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
       if (user.status === 'active') {
         await runSensitive(() => disableAdminUser(user.id));
       } else {
-        await enableAdminUser(user.id);
+        await runSensitive(() => enableAdminUser(user.id));
       }
       await load();
     } catch (caught) {
