@@ -11,6 +11,7 @@ import {
   renameMemberObject,
   createMemberCollaboration,
   deleteMemberCollaboration,
+  getAdminOverview,
   requestJson,
 } from './api';
 
@@ -138,6 +139,7 @@ describe('member content source API contract', () => {
 describe('admin mount API contract', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('creates an account-level mount without a Space selector', async () => {
@@ -171,6 +173,29 @@ describe('admin mount API contract', () => {
     vi.stubGlobal('fetch', fetchMock);
     await putAdminMountGrant('mount / 1', 'account / 1', 'viewer');
     expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/admin/mounts/mount%20%2F%201/grants/account%20%2F%201');
+  });
+});
+
+describe('admin overview API contract', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('aborts stuck overview requests so the panel cannot stay loading forever', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn<typeof fetch>((_path, init) => new Promise((_resolve, reject) => {
+      const signal = init?.signal as AbortSignal | undefined;
+      signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = getAdminOverview().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    const signal = fetchMock.mock.calls[0][1]?.signal as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(true);
+    await expect(result).resolves.toBeInstanceOf(Error);
   });
 });
 

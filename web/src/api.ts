@@ -528,6 +528,7 @@ export type APIAuthContext = 'account' | 'share';
 
 export type APIRequestInit = RequestInit & {
   authContext?: APIAuthContext;
+  timeoutMs?: number;
 };
 
 export function isReauthenticationRequired(error: unknown): boolean {
@@ -550,7 +551,7 @@ export function isReauthenticationCanceled(error: unknown): boolean {
 }
 
 export async function requestJson<T>(path: string, init: APIRequestInit = {}): Promise<T> {
-  const { authContext = 'account', ...requestInit } = init;
+  const { authContext = 'account', timeoutMs, ...requestInit } = init;
   const headers = new Headers(requestInit.headers);
   headers.set('Accept', 'application/json');
 
@@ -566,18 +567,57 @@ export async function requestJson<T>(path: string, init: APIRequestInit = {}): P
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(path, {
-    ...requestInit,
-    credentials: 'same-origin',
-    headers,
-  });
-  const body = await readJsonResponse(response);
+  const { signal, cleanup, timedOut } = requestTimeoutSignal(requestInit.signal, timeoutMs);
+  let response: Response;
+  let body: unknown;
+  try {
+    response = await fetch(path, {
+      ...requestInit,
+      credentials: 'same-origin',
+      headers,
+      signal,
+    });
+    body = await readJsonResponse(response);
+  } catch (error) {
+    if (timedOut()) {
+      throw new Error('Request timed out');
+    }
+    throw error;
+  } finally {
+    cleanup();
+  }
 
   if (!response.ok) {
     throw new ApiError(`Request failed with ${response.status}`, response.status, body);
   }
 
   return body as T;
+}
+
+function requestTimeoutSignal(signal: AbortSignal | null | undefined, timeoutMs: number | undefined) {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return { signal, cleanup: () => {}, timedOut: () => false };
+  }
+  const controller = new AbortController();
+  let didTimeOut = false;
+  const forwardAbort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) {
+    forwardAbort();
+  } else {
+    signal?.addEventListener('abort', forwardAbort, { once: true });
+  }
+  const timeout = globalThis.setTimeout(() => {
+    didTimeOut = true;
+    controller.abort();
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      globalThis.clearTimeout(timeout);
+      signal?.removeEventListener('abort', forwardAbort);
+    },
+    timedOut: () => didTimeOut,
+  };
 }
 
 export function getHealth(signal?: AbortSignal) {
@@ -1104,7 +1144,7 @@ export function sharePortalDownloadURL(path: string, inline = false) {
 // -- Admin: overview ----------------------------------------------------------
 
 export function getAdminOverview(signal?: AbortSignal) {
-  return requestJson<AdminOverviewPayload>('/api/v1/admin/overview', { signal });
+  return requestJson<AdminOverviewPayload>('/api/v1/admin/overview', { signal, timeoutMs: 15_000 });
 }
 
 // -- Admin: users ---------------------------------------------------------------
