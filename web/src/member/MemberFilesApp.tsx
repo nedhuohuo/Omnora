@@ -9,6 +9,7 @@ import MemberStorageWorkspace from './MemberStorageWorkspace';
 import MemberTokensPanel from './MemberTokensPanel';
 import { type MemberLocale, localeMessages } from './i18n';
 import { RecentReauthProvider } from './RecentReauthProvider';
+import MemberIcon, { type MemberIconName } from './MemberIcon';
 import { stateForSession } from './sessionFlow';
 import { syncAuthenticatedTheme } from './themeSync';
 import { useLocale } from './useLocale';
@@ -17,7 +18,7 @@ import './member-files.css';
 export type MemberTab = 'personal' | 'team-folders' | 'collaborations' | 'shares' | 'tokens' | 'docs' | 'account';
 type AdminNavGroup = 'overview' | 'identity' | 'storage' | 'security' | 'backups';
 type AdminNavItem = { id: AdminTab; label: string };
-type AdminNavGroupItem = { id: AdminNavGroup; label: string; tabs: AdminNavItem[] };
+type AdminNavGroupItem = { id: AdminNavGroup; label: string; icon: MemberIconName; tabs: AdminNavItem[] };
 type SessionState = 'checking' | 'signed-out' | 'enrollment' | 'ready';
 
 type Props = { entry?: 'member' | 'admin' };
@@ -58,11 +59,11 @@ export function isAdminTab(tab: MemberTab | AdminTab): tab is AdminTab {
 
 export function buildAdminNavItems(text: typeof localeMessages[MemberLocale]): AdminNavGroupItem[] {
   return [
-    { id: 'overview', label: text.adminOverview, tabs: [{ id: 'overview', label: text.adminOverview }] },
-    { id: 'identity', label: text.adminIdentitySection, tabs: [{ id: 'users', label: text.adminUsers }] },
-    { id: 'storage', label: text.adminStorageSearch, tabs: [{ id: 'mounts', label: text.adminMounts }, { id: 'index-jobs', label: text.adminIndexJobs }] },
-    { id: 'security', label: text.adminAccessSecurity, tabs: [{ id: 'route-groups', label: text.adminRouteGroups }, { id: 'share-governance', label: text.adminShareGovernance }, { id: 'token-governance', label: text.adminTokenGovernance }, { id: 'audit', label: text.adminAudit }] },
-    { id: 'backups', label: text.adminBackups, tabs: [{ id: 'backups', label: text.adminBackups }] },
+    { id: 'overview', label: text.adminOverview, icon: 'admin', tabs: [{ id: 'overview', label: text.adminOverview }] },
+    { id: 'identity', label: text.adminIdentitySection, icon: 'users', tabs: [{ id: 'users', label: text.adminUsers }] },
+    { id: 'storage', label: text.adminStorageSearch, icon: 'mount', tabs: [{ id: 'mounts', label: text.adminMounts }, { id: 'index-jobs', label: text.adminIndexJobs }] },
+    { id: 'security', label: text.adminAccessSecurity, icon: 'security', tabs: [{ id: 'route-groups', label: text.adminRouteGroups }, { id: 'share-governance', label: text.adminShareGovernance }, { id: 'token-governance', label: text.adminTokenGovernance }, { id: 'audit', label: text.adminAudit }] },
+    { id: 'backups', label: text.adminBackups, icon: 'backup', tabs: [{ id: 'backups', label: text.adminBackups }] },
   ];
 }
 
@@ -79,15 +80,15 @@ export function MemberSidebarNavigation({ locale, activeTab, onSelect }: { local
     <div className="member-sidebar-section">
       <p>{text.shared}</p>
       <nav aria-label={text.shared}>
-        <button className={`member-nav ${memberActive === 'shares' ? 'active' : ''}`} type="button" onClick={() => onSelect('shares')}>{text.navShares}</button>
-        <button className={`member-nav ${memberActive === 'tokens' ? 'active' : ''}`} type="button" onClick={() => onSelect('tokens')}>{text.navTokens}</button>
-        <button className={`member-nav ${memberActive === 'docs' ? 'active' : ''}`} type="button" onClick={() => onSelect('docs')}>{text.navDocs}</button>
+        <button className={`member-nav ${memberActive === 'shares' ? 'active' : ''}`} type="button" onClick={() => onSelect('shares')}><MemberIcon name="share" /> <span>{text.navShares}</span></button>
+        <button className={`member-nav ${memberActive === 'tokens' ? 'active' : ''}`} type="button" onClick={() => onSelect('tokens')}><MemberIcon name="token" /> <span>{text.navTokens}</span></button>
+        <button className={`member-nav ${memberActive === 'docs' ? 'active' : ''}`} type="button" onClick={() => onSelect('docs')}><MemberIcon name="docs" /> <span>{text.navDocs}</span></button>
       </nav>
     </div>
     <div className="member-sidebar-section">
       <p>{text.account}</p>
       <nav aria-label={text.account}>
-        <button className={`member-nav ${memberActive === 'account' ? 'active' : ''}`} type="button" onClick={() => onSelect('account')}>{text.account}</button>
+        <button className={`member-nav ${memberActive === 'account' ? 'active' : ''}`} type="button" onClick={() => onSelect('account')}><MemberIcon name="account" /> <span>{text.account}</span></button>
       </nav>
     </div>
   </>;
@@ -95,7 +96,7 @@ export function MemberSidebarNavigation({ locale, activeTab, onSelect }: { local
 
 export function AdminSidebarNavigation({ items, activeGroupId, groupTabs, onSelect }: { items: readonly AdminNavGroupItem[]; activeGroupId: AdminNavGroup; groupTabs: Record<AdminNavGroup, AdminTab>; onSelect: (tab: AdminTab) => void }) {
   return <nav className="member-admin-nav" aria-label="Admin">
-    {items.map((group) => <button className={`member-nav ${activeGroupId === group.id ? 'active' : ''}`} type="button" onClick={() => onSelect(groupTabs[group.id])} key={group.id}>{group.label}</button>)}
+    {items.map((group) => <button className={`member-nav ${activeGroupId === group.id ? 'active' : ''}`} type="button" onClick={() => onSelect(groupTabs[group.id])} key={group.id}><MemberIcon name={group.icon} /> <span>{group.label}</span></button>)}
   </nav>;
 }
 

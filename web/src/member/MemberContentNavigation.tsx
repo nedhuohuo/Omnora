@@ -1,4 +1,5 @@
 import { localeMessages, type MemberLocale } from './i18n';
+import MemberIcon from './MemberIcon';
 
 type MemberContentTab = 'personal' | 'team-folders' | 'collaborations';
 
@@ -12,9 +13,9 @@ export default function MemberContentNavigation({ locale, active, onSelect }: Pr
   const text = localeMessages[locale];
   return (
     <>
-      <button className={`member-nav ${active === 'personal' ? 'active' : ''}`} type="button" onClick={() => onSelect('personal')}>{text.personalSpace}</button>
-      <button className={`member-nav ${active === 'team-folders' ? 'active' : ''}`} type="button" onClick={() => onSelect('team-folders')}>{text.teamFolders}</button>
-      <button className={`member-nav ${active === 'collaborations' ? 'active' : ''}`} type="button" onClick={() => onSelect('collaborations')}>{text.collaboration}</button>
+      <button className={`member-nav ${active === 'personal' ? 'active' : ''}`} type="button" onClick={() => onSelect('personal')}><MemberIcon name="home" /> <span>{text.personalSpace}</span></button>
+      <button className={`member-nav ${active === 'team-folders' ? 'active' : ''}`} type="button" onClick={() => onSelect('team-folders')}><MemberIcon name="folder" /> <span>{text.teamFolders}</span></button>
+      <button className={`member-nav ${active === 'collaborations' ? 'active' : ''}`} type="button" onClick={() => onSelect('collaborations')}><MemberIcon name="collaboration" /> <span>{text.collaboration}</span></button>
     </>
   );
 }

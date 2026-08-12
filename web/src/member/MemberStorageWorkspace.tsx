@@ -25,6 +25,7 @@ import {
 import FileTypeIcon from './FileTypeIcon';
 import MemberCollaborationsDirectory from './MemberCollaborationsDirectory';
 import MemberContentSourceDirectory from './MemberContentSourceDirectory';
+import MemberIcon from './MemberIcon';
 import { localeMessages, type MemberLocale } from './i18n';
 import { formatDirectoryChildren, type MemberDirectoryEntry } from './types';
 
@@ -56,7 +57,7 @@ export function MemberToolbarSearch({ label, value, loading, onChange, onSearch 
 
   return <form className="member-toolbar-search" role="search" onSubmit={submit}>
     <input aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} placeholder={label} />
-    <button type="submit" disabled={loading || !value.trim()}>{label}</button>
+    <button type="submit" disabled={loading || !value.trim()}><MemberIcon name="search" /> <span>{label}</span></button>
   </form>;
 }
 
@@ -333,19 +334,19 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
         </div>
         <div className="member-heading"><div><h1>{activeSource.label}</h1>{activeSource.readOnly && <p>{text.readOnly}</p>}</div></div>
         <div className="member-toolbar">
-          {path !== '.' && <button type="button" onClick={() => void loadDirectory(activeSource, parentPath(path))}>{text.back}</button>}
-          {!activeSource.readOnly && <><button className="member-primary" type="button" onClick={() => fileInputRef.current?.click()}>{text.upload}</button><button type="button" onClick={() => void createFolder()}>{text.newFolder}</button></>}
-          {!isCollaboration && <button type="button" onClick={() => void loadTrash(activeSource)}>{text.trashTitle}</button>}
+          {path !== '.' && <button type="button" onClick={() => void loadDirectory(activeSource, parentPath(path))}><MemberIcon name="back" /> <span>{text.back}</span></button>}
+          {!activeSource.readOnly && <><button className="member-primary" type="button" onClick={() => fileInputRef.current?.click()}><MemberIcon name="upload" /> <span>{text.upload}</span></button><button type="button" onClick={() => void createFolder()}><MemberIcon name="folder" /> <span>{text.newFolder}</span></button></>}
+          {!isCollaboration && <button type="button" onClick={() => void loadTrash(activeSource)}><MemberIcon name="trash" /> <span>{text.trashTitle}</span></button>}
           <span className="member-toolbar-spacer" />
           {!isCollaboration && <MemberToolbarSearch label={text.search} value={searchQuery} loading={loading} onChange={setSearchQuery} onSearch={() => void search()} />}
-          <button type="button" onClick={() => void loadDirectory(activeSource, path)} disabled={loading}>{text.refresh}</button>
+          <button type="button" onClick={() => void loadDirectory(activeSource, path)} disabled={loading}><MemberIcon name="refresh" /> <span>{text.refresh}</span></button>
           <input ref={fileInputRef} type="file" hidden onChange={(event) => void onFileSelected(event)} />
         </div>
         {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
         {showTrash ? <>
           <div className="member-heading"><div><h2>{text.trashTitle}</h2><p>{text.trashDetail}</p></div><button type="button" onClick={() => void emptyMemberTrash(withPath(activeSource.locator, '.')).then(() => void loadTrash(activeSource))} disabled={loading || activeSource.readOnly}>{text.trashEmptyAction}</button></div>
-          {loading ? <div className="member-loading">{text.loading}</div> : trashItems.length === 0 ? <div className="member-empty">{text.trashEmpty}</div> : <table className="member-file-table"><tbody>{trashItems.map((item) => <tr key={item.id}><td>{item.name}</td><td>{item.originalPath}</td><td><button type="button" onClick={() => void restore(item)} disabled={activeSource.readOnly}>{text.trashRestore}</button><button type="button" onClick={() => void purge(item)} disabled={activeSource.readOnly}>{text.trashPurge}</button></td></tr>)}</tbody></table>}
-        </> : loading ? <div className="member-loading">{text.loading}</div> : visibleEntries.length === 0 ? <div className="member-empty">{text.emptyFolder}</div> : <table className="member-file-table"><thead><tr><th>{text.name}</th><th>{text.size}</th><th>{text.modified}</th><th>{text.actions}</th></tr></thead><tbody>{visibleEntries.map((entry) => <tr key={`${entry.kind}-${entry.relativePath}`}><td><div className="member-file-name"><FileTypeIcon kind={entry.kind} name={entry.name} className={`member-file-icon ${entry.kind}`} />{entry.kind === 'dir' ? <button type="button" onClick={() => void loadDirectory(activeSource, entry.relativePath)}>{entry.name}</button> : <a href={memberDownloadURL(withPath(activeSource.locator, entry.relativePath))}>{entry.name}</a>}</div></td><td>{entry.kind === 'dir' ? '—' : new Intl.NumberFormat(locale).format(entry.size)}</td><td>{entry.modifiedAt ? new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(entry.modifiedAt)) : '—'}</td><td><div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => void loadDirectory(activeSource, entry.relativePath)}>{text.open}</button> : <a href={memberDownloadURL(withPath(activeSource.locator, entry.relativePath), { inline: true })}>{text.preview}</a>}{!activeSource.readOnly && <><button type="button" onClick={() => void copyOrMoveEntry(entry, true)}>{text.move}</button><button type="button" onClick={() => void copyOrMoveEntry(entry, false)}>{text.copyObject}</button><button type="button" onClick={() => void renameEntry(entry)}>{text.rename}</button><button type="button" onClick={() => void deleteEntry(entry)}>{text.deleteFile}</button></>}</div></td></tr>)}</tbody></table>}
+          {loading ? <div className="member-loading">{text.loading}</div> : trashItems.length === 0 ? <div className="member-empty">{text.trashEmpty}</div> : <table className="member-file-table"><tbody>{trashItems.map((item) => <tr key={item.id}><td data-label={text.name}>{item.name}</td><td data-label={text.trashOriginalPath}>{item.originalPath}</td><td data-label={text.actions}><button type="button" onClick={() => void restore(item)} disabled={activeSource.readOnly}>{text.trashRestore}</button><button type="button" onClick={() => void purge(item)} disabled={activeSource.readOnly}>{text.trashPurge}</button></td></tr>)}</tbody></table>}
+        </> : loading ? <div className="member-loading">{text.loading}</div> : visibleEntries.length === 0 ? <div className="member-empty">{text.emptyFolder}</div> : <table className="member-file-table"><thead><tr><th>{text.name}</th><th>{text.size}</th><th>{text.modified}</th><th>{text.actions}</th></tr></thead><tbody>{visibleEntries.map((entry) => <tr key={`${entry.kind}-${entry.relativePath}`}><td data-label={text.name}><div className="member-file-name"><FileTypeIcon kind={entry.kind} name={entry.name} className={`member-file-icon ${entry.kind}`} />{entry.kind === 'dir' ? <button type="button" onClick={() => void loadDirectory(activeSource, entry.relativePath)}>{entry.name}</button> : <a href={memberDownloadURL(withPath(activeSource.locator, entry.relativePath))}>{entry.name}</a>}</div></td><td data-label={text.size}>{entry.kind === 'dir' ? '—' : new Intl.NumberFormat(locale).format(entry.size)}</td><td data-label={text.modified}>{entry.modifiedAt ? new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(entry.modifiedAt)) : '—'}</td><td data-label={text.actions}><div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => void loadDirectory(activeSource, entry.relativePath)}>{text.open}</button> : <a href={memberDownloadURL(withPath(activeSource.locator, entry.relativePath), { inline: true })}>{text.preview}</a>}{!activeSource.readOnly && <><button type="button" onClick={() => void copyOrMoveEntry(entry, true)}>{text.move}</button><button type="button" onClick={() => void copyOrMoveEntry(entry, false)}>{text.copyObject}</button><button type="button" onClick={() => void renameEntry(entry)}>{text.rename}</button><button type="button" onClick={() => void deleteEntry(entry)}>{text.deleteFile}</button></>}</div></td></tr>)}</tbody></table>}
       </div>
     );
   }

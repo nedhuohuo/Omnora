@@ -34,7 +34,7 @@ export function fileIconType(kind: 'dir' | 'file', name: string): FileIconType {
   return 'file';
 }
 
-// Inline SVG paths, 16×16 viewBox, 1.5px stroke, rounded caps/joins.
+// Inline SVG paths, 16x16 viewBox, 1.65px stroke, rounded caps/joins.
 // Shape conventions: file/folder outlines from the top-left corner, inner
 // details (text lines, mountains, zipper) kept to the center-right area.
 const PATHS: Record<FileIconType, ReactNode> = {
@@ -97,7 +97,7 @@ export default function FileTypeIcon({ kind, name, className }: {
   const type = fileIconType(kind, name);
   return (
     <span className={className} aria-hidden="true">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round">
         {PATHS[type]}
       </svg>
     </span>
