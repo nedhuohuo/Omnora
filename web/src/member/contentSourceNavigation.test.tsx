@@ -5,6 +5,7 @@ import type { MemberContentSourcesPayload } from '../api';
 import MemberContentSourceDirectory from './MemberContentSourceDirectory';
 import MemberCollaborationsDirectory from './MemberCollaborationsDirectory';
 import MemberContentNavigation from './MemberContentNavigation';
+import { MemberDialogProvider } from './MemberDialog';
 import MemberSharesPanel from './MemberSharesPanel';
 
 const sources: MemberContentSourcesPayload = {
@@ -51,7 +52,7 @@ describe('member content source directory', () => {
 
 describe('member sharing and collaboration panel', () => {
   it('separates public links from incoming collaborations without Space labels', () => {
-    const html = renderToStaticMarkup(<MemberSharesPanel locale="zh-CN" />);
+    const html = renderToStaticMarkup(<MemberDialogProvider><MemberSharesPanel locale="zh-CN" /></MemberDialogProvider>);
     expect(html).toContain('我的分享');
     expect(html).toContain('共享给我');
     expect(html).toContain('发出的协作');

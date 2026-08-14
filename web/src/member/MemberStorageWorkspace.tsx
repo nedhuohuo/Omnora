@@ -26,6 +26,7 @@ import FileTypeIcon from './FileTypeIcon';
 import MemberCollaborationsDirectory from './MemberCollaborationsDirectory';
 import MemberContentSourceDirectory from './MemberContentSourceDirectory';
 import MemberIcon from './MemberIcon';
+import { useMemberDialog } from './MemberDialog';
 import { localeMessages, type MemberLocale } from './i18n';
 import { formatDirectoryChildren, type MemberDirectoryEntry } from './types';
 
@@ -91,6 +92,7 @@ function sourceUploadFields(locator: MemberContentLocator) {
 
 export default function MemberStorageWorkspace({ locale, view }: Props) {
   const text = localeMessages[locale];
+  const { confirm, prompt } = useMemberDialog();
   const [sources, setSources] = useState<MemberContentSourcesPayload | null>(null);
   const [incoming, setIncoming] = useState<MemberCollaboration[]>([]);
   const [outgoing, setOutgoing] = useState<MemberCollaboration[]>([]);
@@ -174,7 +176,13 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
 
   async function createFolder() {
     if (!activeSource || activeSource.readOnly) return;
-    const name = window.prompt(text.folderName);
+    const name = await prompt({
+      title: text.newFolder,
+      inputLabel: text.folderName,
+      confirmLabel: text.create,
+      cancelLabel: text.cancel,
+      inputRequired: true,
+    });
     if (!name?.trim()) return;
     setLoading(true);
     setError('');
@@ -222,7 +230,14 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
 
   async function renameEntry(entry: MemberDirectoryEntry) {
     if (!activeSource || activeSource.readOnly) return;
-    const name = window.prompt(text.renameNewName, entry.name);
+    const name = await prompt({
+      title: text.renameTitle,
+      inputLabel: text.renameNewName,
+      defaultValue: entry.name,
+      confirmLabel: text.rename,
+      cancelLabel: text.cancel,
+      inputRequired: true,
+    });
     if (!name?.trim()) return;
     setLoading(true);
     setError('');
@@ -236,7 +251,15 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
   }
 
   async function deleteEntry(entry: MemberDirectoryEntry) {
-    if (!activeSource || activeSource.readOnly || !window.confirm(`${text.deleteFile}: ${entry.name}`)) return;
+    if (!activeSource || activeSource.readOnly) return;
+    const confirmed = await confirm({
+      title: text.deleteConfirmTitle,
+      description: `${text.deleteConfirmDetail} ${entry.name}`,
+      confirmLabel: text.deleteObject,
+      cancelLabel: text.cancel,
+      tone: 'danger',
+    });
+    if (!confirmed) return;
     setLoading(true);
     setError('');
     try {
@@ -250,7 +273,14 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
 
   async function copyOrMoveEntry(entry: MemberDirectoryEntry, move: boolean) {
     if (!activeSource || activeSource.readOnly) return;
-    const target = window.prompt(text.moveTargetPath, joinPath(path, entry.name));
+    const target = await prompt({
+      title: move ? text.moveTitle : text.moveCopyTitle,
+      description: text.moveTargetPathHint,
+      inputLabel: text.moveTargetPath,
+      defaultValue: joinPath(path, entry.name),
+      confirmLabel: move ? text.moveSubmit : text.copySubmit,
+      cancelLabel: text.cancel,
+    });
     if (!target?.trim()) return;
     setLoading(true);
     setError('');
@@ -307,7 +337,15 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
   }
 
   async function purge(item: TrashItem) {
-    if (!activeSource || activeSource.readOnly || !window.confirm(`${text.trashPurge}: ${item.name}`)) return;
+    if (!activeSource || activeSource.readOnly) return;
+    const confirmed = await confirm({
+      title: text.trashPurge,
+      description: `${text.deletePermanentConfirmDetail} ${item.name}`,
+      confirmLabel: text.trashPurge,
+      cancelLabel: text.cancel,
+      tone: 'danger',
+    });
+    if (!confirmed) return;
     setLoading(true);
     try {
       await purgeMemberTrash(withPath(activeSource.locator, '.'), item.id);

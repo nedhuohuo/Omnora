@@ -13,6 +13,7 @@ import {
   type MemberContentLocator,
   type SharePayload,
 } from '../api';
+import { useMemberDialog } from './MemberDialog';
 import { type MemberLocale, localeMessages } from './i18n';
 import { copyText } from './clipboard';
 
@@ -147,6 +148,7 @@ function CollaborationRow({ item, incoming, text, onRevoke }: { item: MemberColl
 
 export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { confirm } = useMemberDialog();
   const [shares, setShares] = useState<SharePayload[]>([]);
   const [incoming, setIncoming] = useState<MemberCollaboration[]>([]);
   const [outgoing, setOutgoing] = useState<MemberCollaboration[]>([]);
@@ -173,7 +175,14 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
   }
 
   async function revokeCollaboration(id: string) {
-    if (!window.confirm(text.collaborationRevoke)) return;
+    const confirmed = await confirm({
+      title: text.collaborationRevokeConfirmTitle,
+      description: text.collaborationRevokeConfirmDetail,
+      confirmLabel: text.collaborationRevoke,
+      cancelLabel: text.cancel,
+      tone: 'danger',
+    });
+    if (!confirmed) return;
     setLoading(true); setError('');
     try { await deleteMemberCollaboration(id); await load(); } catch (caught) { setError(describeError(caught)); setLoading(false); }
   }

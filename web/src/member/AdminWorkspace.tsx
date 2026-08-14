@@ -8,6 +8,7 @@ import {
   listAuditEvents,
   updateAdminRouteGroup,
 } from '../api';
+import { useMemberDialog } from './MemberDialog';
 import { type MemberLocale, localeMessages } from './i18n';
 import { readableLabel } from './displayLabels';
 import { copyText } from './clipboard';
@@ -100,6 +101,7 @@ function auditTargetLabel(event: AuditEventPayload) {
 
 export default function AdminWorkspace({ tab, locale, isInitialAdmin }: { tab: AdminTab; locale: MemberLocale; isInitialAdmin: boolean }) {
   const text = localeMessages[locale];
+  const { confirm } = useMemberDialog();
   const [routeGroups, setRouteGroups] = useState<AdminRouteGroupItem[]>([]);
   const [events, setEvents] = useState<AuditEventPayload[]>([]);
   const [loading, setLoading] = useState(false);
@@ -143,7 +145,16 @@ export default function AdminWorkspace({ tab, locale, isInitialAdmin }: { tab: A
   async function onToggleRouteGroup(group: AdminRouteGroupItem) {
     if (!isAdminToggleableRouteGroup(group.id)) return;
     const nextExposed = !group.exposed;
-    if (!nextExposed && group.id === 'rest' && !window.confirm(text.routeLockoutWarn)) return;
+    if (!nextExposed && group.id === 'rest') {
+      const confirmed = await confirm({
+        title: text.routeLockoutTitle,
+        description: text.routeLockoutWarn,
+        confirmLabel: text.routeDisable,
+        cancelLabel: text.cancel,
+        tone: 'danger',
+      });
+      if (!confirmed) return;
+    }
     setPendingGroupId(group.id);
     setLoading(true);
     setError('');

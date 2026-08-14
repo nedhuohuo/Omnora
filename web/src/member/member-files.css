@@ -637,3 +637,127 @@
     justify-content: flex-start;
   }
 }
+
+.member-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+  background: var(--backdrop);
+  overscroll-behavior: contain;
+}
+
+.member-dialog {
+  display: grid;
+  gap: var(--layout-component);
+  width: min(440px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: var(--layout-section-compact);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text-body);
+  box-shadow: var(--shadow-xl);
+}
+
+.member-dialog h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: var(--text-2xl);
+  line-height: 1.3;
+}
+
+.member-dialog-description {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: var(--text-md);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.member-dialog-field {
+  display: grid;
+  gap: var(--layout-inline);
+  color: var(--text-muted);
+  font-size: var(--text-md);
+}
+
+.member-dialog-field input {
+  width: 100%;
+  min-height: var(--control-lg);
+  padding: 0 var(--control-padding-inline);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  color: var(--text-body);
+  font-size: var(--text-md);
+}
+
+.member-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--layout-inline);
+  margin-top: var(--space-2);
+}
+
+.member-dialog-actions button {
+  min-width: 96px;
+  min-height: var(--control-lg);
+  padding: 0 var(--control-padding-inline);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--text-md);
+}
+
+.member-dialog-actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-text);
+  background: var(--surface-hover);
+}
+
+.member-dialog-actions .member-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.member-dialog-actions .member-primary:hover:not(:disabled) {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+  color: #fff;
+}
+
+.member-dialog-actions .member-modal-danger,
+.member-dialog-actions .member-modal-danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
+}
+
+@media (max-width: 560px) {
+  .member-dialog-backdrop {
+    padding: var(--space-3);
+    align-items: end;
+  }
+
+  .member-dialog {
+    width: 100%;
+    padding: var(--layout-section-compact);
+  }
+
+  .member-dialog-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .member-dialog-actions button {
+    width: 100%;
+  }
+}

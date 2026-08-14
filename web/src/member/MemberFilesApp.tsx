@@ -7,6 +7,7 @@ import MemberDocsPanel from './MemberDocsPanel';
 import MemberSharesPanel from './MemberSharesPanel';
 import MemberStorageWorkspace from './MemberStorageWorkspace';
 import MemberTokensPanel from './MemberTokensPanel';
+import { MemberDialogProvider } from './MemberDialog';
 import { type MemberLocale, localeMessages } from './i18n';
 import { RecentReauthProvider } from './RecentReauthProvider';
 import MemberIcon, { type MemberIconName } from './MemberIcon';
@@ -248,19 +249,23 @@ export default function MemberFilesApp({ entry = 'member' }: Props) {
   const activeAdminGroup = adminItems.find((group) => group.id === activeAdminGroupId) ?? adminItems[0];
   const adminView = shouldUseAdminShell(entry, isAdmin);
 
-  if (entry === 'admin' && !isAdmin) return <RecentReauthProvider locale={locale}>
-    <main className="member-app">
-      <header className="member-topbar"><strong>{text.adminAccessSecurity}</strong><div className="member-top-actions"><button type="button" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}>{locale === 'zh-CN' ? 'EN' : '中文'}</button><button type="button" onClick={() => void onLogout()}>{text.signOut}</button></div></header>
-      <section className="member-no-access"><h1>{text.adminAccessDenied}</h1><p>{text.adminAccessDetail}</p><button className="member-primary" type="button" onClick={() => { window.location.href = '/app'; }}>{text.goToFiles}</button></section>
-    </main>
-  </RecentReauthProvider>;
+  if (entry === 'admin' && !isAdmin) return <MemberDialogProvider>
+    <RecentReauthProvider locale={locale}>
+      <main className="member-app">
+        <header className="member-topbar"><strong>{text.adminAccessSecurity}</strong><div className="member-top-actions"><button type="button" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}>{locale === 'zh-CN' ? 'EN' : '中文'}</button><button type="button" onClick={() => void onLogout()}>{text.signOut}</button></div></header>
+        <section className="member-no-access"><h1>{text.adminAccessDenied}</h1><p>{text.adminAccessDetail}</p><button className="member-primary" type="button" onClick={() => { window.location.href = '/app'; }}>{text.goToFiles}</button></section>
+      </main>
+    </RecentReauthProvider>
+  </MemberDialogProvider>;
 
-  return <RecentReauthProvider locale={locale}>
-    <main className="member-app"><header className="member-topbar"><strong>{entry === 'admin' ? adminTopbarTitle(entry, activeTab, adminItems, text.signIn) : memberTopbarTitle(activeTab, text)}</strong><div className="member-top-actions"><button type="button" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}>{locale === 'zh-CN' ? 'EN' : '中文'}</button><button type="button" onClick={() => void onLogout()}>{text.signOut}</button></div></header><div className="member-layout"><aside className="member-sidebar">
+  return <MemberDialogProvider>
+    <RecentReauthProvider locale={locale}>
+      <main className="member-app"><header className="member-topbar"><strong>{entry === 'admin' ? adminTopbarTitle(entry, activeTab, adminItems, text.signIn) : memberTopbarTitle(activeTab, text)}</strong><div className="member-top-actions"><button type="button" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}>{locale === 'zh-CN' ? 'EN' : '中文'}</button><button type="button" onClick={() => void onLogout()}>{text.signOut}</button></div></header><div className="member-layout"><aside className="member-sidebar">
       {entry === 'member' ? <MemberSidebarNavigation locale={locale} activeTab={activeTab} onSelect={setActiveTab} /> : <AdminSidebarNavigation items={adminItems} activeGroupId={activeAdminGroupId} groupTabs={adminGroupTabs} onSelect={setActiveTab} />}
     </aside><section className="member-content">{adminView ? <>
       {activeAdminGroup.tabs.length > 1 && <div className="member-admin-subnav" role="tablist" aria-label={activeAdminGroup.label}>{activeAdminGroup.tabs.map((item) => <button type="button" role="tab" aria-selected={activeTab === item.id} aria-pressed={activeTab === item.id} onClick={() => { setAdminGroupTabs((current) => ({ ...current, [activeAdminGroup.id]: item.id })); setActiveTab(item.id); }} key={item.id}>{item.label}</button>)}</div>}
       <AdminWorkspace tab={activeTab as AdminTab} locale={locale} isInitialAdmin={isInitialAdmin} />
     </> : activeTab === 'personal' ? <MemberStorageWorkspace locale={locale} view="personal" /> : activeTab === 'team-folders' ? <MemberStorageWorkspace locale={locale} view="team-folders" /> : activeTab === 'collaborations' ? <MemberStorageWorkspace locale={locale} view="collaborations" /> : activeTab === 'shares' ? <MemberSharesPanel locale={locale} /> : activeTab === 'tokens' ? <MemberTokensPanel locale={locale} /> : activeTab === 'docs' ? <MemberDocsPanel locale={locale} /> : <MemberAccountPanel locale={locale} />}</section></div></main>
-  </RecentReauthProvider>;
+    </RecentReauthProvider>
+  </MemberDialogProvider>;
 }
