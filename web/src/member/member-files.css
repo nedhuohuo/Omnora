@@ -151,6 +151,10 @@
 .member-status-dot.info { background: var(--status-info); }
 .member-status-dot.muted { background: var(--status-muted); }
 
+.member-collaborations-directory > section + section { margin-top: var(--layout-section); }
+.member-collaborations-directory .member-section-heading { margin: 0 0 var(--layout-section-compact); }
+.member-collaborations-directory .member-section-heading h2 { margin: 0; color: var(--text-strong); font-size: var(--text-2xl); line-height: 1.35; }
+
 .member-mcp-status { display: grid; gap: var(--layout-component); margin: var(--layout-section) 0; padding: var(--layout-section); border: 1px solid var(--border-card); border-radius: var(--radius-md); background: var(--surface-2); }
 .member-mcp-status-heading { display: flex; align-items: start; justify-content: space-between; gap: var(--layout-component); }
 .member-mcp-status-heading h2 { margin: 0; color: var(--text-strong); font-size: var(--text-2xl); }

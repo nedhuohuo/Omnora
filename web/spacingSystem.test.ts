@@ -48,6 +48,20 @@ describe('member files spacing cleanup', () => {
   });
 });
 
+describe('form action spacing', () => {
+  it('keeps adjacent admin form actions separated', () => {
+    expect(ruleFor(memberFilesCss, '.member-admin-form-actions')).toContain('gap: var(--layout-inline)');
+  });
+});
+
+describe('collaboration section spacing', () => {
+  it('uses explicit section spacing instead of browser heading margins', () => {
+    expect(ruleFor(memberFilesCss, '.member-collaborations-directory > section + section')).toContain('margin-top: var(--layout-section)');
+    expect(ruleFor(memberFilesCss, '.member-collaborations-directory .member-section-heading')).toContain('margin: 0 0 var(--layout-section-compact)');
+    expect(ruleFor(memberFilesCss, '.member-collaborations-directory .member-section-heading h2')).toContain('margin: 0');
+  });
+});
+
 describe('share portal style independence', () => {
   it('uses shared layout tokens without importing member page CSS', () => {
     expect(sharePortalApp).not.toContain("import './member/member-files.css';");

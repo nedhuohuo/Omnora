@@ -16,7 +16,7 @@ function labelFor(item: MemberCollaboration) {
 export default function MemberCollaborationsDirectory({ locale, incoming, outgoing, onOpen }: Props) {
   const text = localeMessages[locale];
   return (
-    <div className="member-page-flow">
+    <div className="member-page-flow member-collaborations-directory">
       <div className="member-heading"><div><h1>{text.collaboration}</h1><p>{text.collaborationDetail}</p></div></div>
       <section aria-labelledby="incoming-collaborations">
         <div className="member-heading member-section-heading"><div><h2 id="incoming-collaborations">{text.incomingCollaborations}</h2></div></div>

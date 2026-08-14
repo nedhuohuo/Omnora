@@ -69,6 +69,8 @@ describe('member collaboration directory', () => {
 
     expect(html).toContain('收到的协作');
     expect(html).toContain('发出的协作');
+    expect(html).toContain('member-collaborations-directory');
+    expect(html).toContain('member-section-heading');
     expect(html).not.toContain('Space');
   });
 });
