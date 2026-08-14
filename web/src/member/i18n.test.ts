@@ -60,6 +60,15 @@ describe('member locale', () => {
     expect(localeMessages['en-US'].mountManagementDetail).not.toMatch(/\bSpace\b/);
   });
 
+  it('distinguishes mount mode from account content permission', () => {
+    expect(localeMessages['zh-CN'].mountMode).toBe('挂载读写模式');
+    expect(localeMessages['zh-CN'].mountGrantPermission).toBe('所选账号的访问权限');
+    expect(localeMessages['zh-CN'].contentViewer).toBe('查看');
+    expect(localeMessages['zh-CN'].contentEditor).toBe('编辑');
+    expect(localeMessages['en-US'].mountMode).toBe('Mount read/write mode');
+    expect(localeMessages['en-US'].mountGrantPermission).toBe('Access permission for selected accounts');
+  });
+
   it('describes MCP as standard Streamable HTTP without claiming OAuth support', () => {
     expect(localeMessages['zh-CN'].tokenMcpStatusDetail).toContain('Streamable HTTP');
     expect(localeMessages['zh-CN'].routeDescMcp).toContain('OAuth');

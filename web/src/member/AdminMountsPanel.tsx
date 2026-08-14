@@ -1,7 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import {
   type AdminMountGrant,
-  type AdminMountGrantInput,
   type AdminMountListItem,
   type AdminUserPayload,
   ApiError,
@@ -51,7 +50,6 @@ type MountForm = {
   governance: 'normal' | 'restricted';
   mode: 'read_only' | 'read_write';
   indexEnabled: boolean;
-  grants: AdminMountGrantInput[];
 };
 
 const emptyForm: MountForm = {
@@ -60,7 +58,6 @@ const emptyForm: MountForm = {
   governance: 'normal',
   mode: 'read_write',
   indexEnabled: true,
-  grants: [],
 };
 
 export default function AdminMountsPanel({ locale, isInitialAdmin }: { locale: MemberLocale; isInitialAdmin: boolean }) {
@@ -72,7 +69,7 @@ export default function AdminMountsPanel({ locale, isInitialAdmin }: { locale: M
   const [form, setForm] = useState<MountForm>(emptyForm);
   const [selectedMountId, setSelectedMountId] = useState('');
   const [grants, setGrants] = useState<AdminMountGrant[]>([]);
-  const [grantAccountId, setGrantAccountId] = useState('');
+  const [grantAccountIds, setGrantAccountIds] = useState<string[]>([]);
   const [grantPermission, setGrantPermission] = useState<'viewer' | 'editor'>('viewer');
   const [editName, setEditName] = useState('');
   const [editMode, setEditMode] = useState<'read_only' | 'read_write'>('read_write');
@@ -140,26 +137,18 @@ export default function AdminMountsPanel({ locale, isInitialAdmin }: { locale: M
     void loadGrants(selectedMount.id);
   }, [loadGrants, selectedMount]);
 
-  function addInitialGrant() {
-    if (!grantAccountId || form.grants.some((grant) => grant.accountId === grantAccountId)) return;
-    setForm((current) => ({
-      ...current,
-      grants: [...current.grants, { accountId: grantAccountId, permission: grantPermission }],
-    }));
-    setGrantAccountId('');
-  }
-
   async function onCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
     setError('');
     setNotice('');
     try {
-      await runSensitive(() => registerAdminMount({ ...form, governance: isInitialAdmin ? form.governance : 'normal' }));
+      const created = await runSensitive(() => registerAdminMount({ ...form, governance: isInitialAdmin ? form.governance : 'normal', grants: [] }));
       setForm({ ...emptyForm, rootPath: roots[0] ?? '' });
-      setGrantAccountId('');
+      setGrantAccountIds([]);
       setNotice(text.adminOperationComplete);
       await load();
+      setSelectedMountId(created.id);
     } catch (caught) {
       setError(describeError(caught));
       setLoading(false);
@@ -189,15 +178,19 @@ export default function AdminMountsPanel({ locale, isInitialAdmin }: { locale: M
 
   async function onAddGrant(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedMount || !grantAccountId) return;
+    if (!selectedMount || grantAccountIds.length === 0) return;
     setLoading(true);
     setError('');
     try {
-      const grant = await runSensitive(() => putAdminMountGrant(selectedMount.id, grantAccountId, grantPermission));
-      setGrants((current) => [...current.filter((item) => item.accountId !== grant.accountId), grant]);
-      setGrantAccountId('');
+      for (const accountId of grantAccountIds) {
+        const grant = await runSensitive(() => putAdminMountGrant(selectedMount.id, accountId, grantPermission));
+        setGrants((current) => [...current.filter((item) => item.accountId !== grant.accountId), grant]);
+      }
+      setGrantAccountIds([]);
     } catch (caught) {
       setError(describeError(caught));
+      await loadGrants(selectedMount.id);
+      setGrantAccountIds([]);
     } finally {
       setLoading(false);
     }
@@ -264,11 +257,8 @@ export default function AdminMountsPanel({ locale, isInitialAdmin }: { locale: M
         </label>
         {isInitialAdmin && <label>{text.mountGovernance}<select value={form.governance} onChange={(event) => setForm({ ...form, governance: event.target.value as MountForm['governance'] })}><option value="normal">{text.normalMount}</option><option value="restricted">{text.restrictedMount}</option></select></label>}
         <label>{text.mountMode}<select value={form.mode} onChange={(event) => setForm({ ...form, mode: event.target.value as MountForm['mode'] })}><option value="read_write">{text.readWrite}</option><option value="read_only">{text.readOnly}</option></select></label>
-        <label className="member-admin-checkbox"><input type="checkbox" checked={form.indexEnabled} onChange={(event) => setForm({ ...form, indexEnabled: event.target.checked })} />{text.enableIndex}</label>
-        <label>{text.mountGrantAccount}<select value={grantAccountId} onChange={(event) => setGrantAccountId(event.target.value)}><option value="">{text.mountNoGrants}</option>{users.filter((user) => !form.grants.some((grant) => grant.accountId === user.id)).map((user) => <option value={user.id} key={user.id}>{user.displayName} · {user.email}</option>)}</select></label>
-        <label>{text.mountGrantPermission}<select value={grantPermission} onChange={(event) => setGrantPermission(event.target.value as MountForm['grants'][number]['permission'])}><option value="viewer">{text.readOnly}</option><option value="editor">{text.readWrite}</option></select></label>
-        <div className="member-admin-form-actions"><button type="button" onClick={addInitialGrant} disabled={!grantAccountId}>{text.mountAddGrant}</button><button className="member-primary" type="submit" disabled={loading || !form.displayName.trim() || !form.rootPath.trim()}>{text.createMount}</button></div>
-        {form.grants.length > 0 && <div className="member-path-roots member-admin-form-wide"><span className="member-path-roots-title">{text.mountGrants}</span>{form.grants.map((grant) => <p className="member-path-hint" key={grant.accountId}>{users.find((user) => user.id === grant.accountId)?.displayName ?? grant.accountId} · {grant.permission}<button type="button" onClick={() => setForm((current) => ({ ...current, grants: current.grants.filter((item) => item.accountId !== grant.accountId) }))}>{text.remove}</button></p>)}</div>}
+        <label className="member-admin-checkbox member-admin-form-wide"><input type="checkbox" checked={form.indexEnabled} onChange={(event) => setForm({ ...form, indexEnabled: event.target.checked })} />{text.enableIndex}</label>
+        <div className="member-admin-form-actions member-admin-form-wide"><button className="member-primary" type="submit" disabled={loading || !form.displayName.trim() || !form.rootPath.trim()}>{text.createMount}</button></div>
       </form>
 
       {loading && mounts.length === 0 ? <div className="member-loading">{text.loading}</div> : mounts.length === 0 ? <div className="member-empty">{text.noAdminMounts}</div> : (
@@ -294,8 +284,8 @@ export default function AdminMountsPanel({ locale, isInitialAdmin }: { locale: M
           <label className="member-admin-checkbox"><input type="checkbox" checked={editShareEnabled} onChange={(event) => setEditShareEnabled(event.target.checked)} />{editShareEnabled ? text.mountShareEnabled : text.mountShareDisabled}</label>
           <button className="member-primary" type="submit" disabled={loading}>{text.mountSettingsSave}</button>
         </form>
-        {grants.length === 0 ? <p className="member-path-hint">{text.mountNoGrants}</p> : <table className="member-admin-table"><thead><tr><th>{text.mountGrantAccount}</th><th>{text.mountGrantPermission}</th><th>{text.actions}</th></tr></thead><tbody>{grants.map((grant) => <tr key={grant.accountId}><td>{grantLabel(grant)}<small>{grant.email}</small></td><td>{grant.permission === 'viewer' ? text.readOnly : text.readWrite}</td><td><button className="member-table-action member-table-danger" type="button" onClick={() => void onRemoveGrant(grant)} disabled={loading}>{text.remove}</button></td></tr>)}</tbody></table>}
-        <form className="member-admin-inline-form" onSubmit={onAddGrant}><label>{text.mountGrantAccount}<select value={grantAccountId} onChange={(event) => setGrantAccountId(event.target.value)} required><option value="">{text.selectAccount}</option>{users.filter((user) => !grants.some((grant) => grant.accountId === user.id)).map((user) => <option value={user.id} key={user.id}>{user.displayName} · {user.email}</option>)}</select></label><label>{text.mountGrantPermission}<select value={grantPermission} onChange={(event) => setGrantPermission(event.target.value as 'viewer' | 'editor')}><option value="viewer">{text.readOnly}</option><option value="editor">{text.readWrite}</option></select></label><button className="member-primary" type="submit" disabled={loading || !grantAccountId}>{text.mountAddGrant}</button></form>
+        {grants.length === 0 ? <p className="member-path-hint">{text.mountNoGrants}</p> : <table className="member-admin-table"><thead><tr><th>{text.mountGrantedAccounts}</th><th>{text.mountGrantPermission}</th><th>{text.actions}</th></tr></thead><tbody>{grants.map((grant) => <tr key={grant.accountId}><td>{grantLabel(grant)}<small>{grant.email}</small></td><td>{grant.permission === 'viewer' ? text.contentViewer : text.contentEditor}</td><td><button className="member-table-action member-table-danger" type="button" onClick={() => void onRemoveGrant(grant)} disabled={loading}>{text.remove}</button></td></tr>)}</tbody></table>}
+        <form className="member-admin-inline-form" onSubmit={onAddGrant}><label>{text.mountGrantAccount}<select className="member-admin-grant-select" multiple value={grantAccountIds} onChange={(event) => setGrantAccountIds(Array.from(event.currentTarget.selectedOptions, (option) => option.value))} required><option value="" disabled>{text.mountGrantSelect}</option>{users.filter((user) => !grants.some((grant) => grant.accountId === user.id)).map((user) => <option value={user.id} key={user.id}>{user.displayName} · {user.email}</option>)}</select></label><label>{text.mountGrantPermission}<select value={grantPermission} onChange={(event) => setGrantPermission(event.target.value as 'viewer' | 'editor')}><option value="viewer">{text.contentViewer}</option><option value="editor">{text.contentEditor}</option></select></label><button className="member-primary" type="submit" disabled={loading || grantAccountIds.length === 0}>{text.mountAddGrant}</button></form>
       </div>}
 
       {deleteTarget && <div className="member-modal-backdrop"><form className="member-modal" onSubmit={onDelete}><h2>{text.deleteMount}</h2><p className="member-modal-hint">{text.mountDeleteConfirmDetail}</p><label>{text.mountDeleteConfirmLabel}<input autoFocus value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} required /></label><div className="member-modal-actions"><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="submit" disabled={loading || deleteConfirmation !== deleteTarget.displayName}>{text.confirmDeleteMount}</button></div></form></div>}

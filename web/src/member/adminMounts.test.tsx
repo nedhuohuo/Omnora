@@ -17,6 +17,7 @@ describe('admin mount panel', () => {
     const html = renderMounts(false);
     expect(html).toContain('挂载管理');
     expect(html).toContain('外部目录');
+    expect(html).toContain('挂载读写模式');
     expect(html).not.toContain('空间');
     expect(html).not.toContain('托管挂载');
     expect(html).not.toContain('受限挂载');
