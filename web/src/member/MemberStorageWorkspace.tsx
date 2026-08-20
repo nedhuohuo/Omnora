@@ -27,6 +27,7 @@ import MemberCollaborationsDirectory from './MemberCollaborationsDirectory';
 import MemberContentSourceDirectory from './MemberContentSourceDirectory';
 import MemberIcon from './MemberIcon';
 import { useMemberDialog } from './MemberDialog';
+import MemberMoveCopyPicker from './MemberMoveCopyPicker';
 import { localeMessages, type MemberLocale } from './i18n';
 import { formatDirectoryChildren, type MemberDirectoryEntry } from './types';
 
@@ -93,6 +94,7 @@ function sourceUploadFields(locator: MemberContentLocator) {
 export default function MemberStorageWorkspace({ locale, view }: Props) {
   const text = localeMessages[locale];
   const { confirm, prompt } = useMemberDialog();
+  const [moveCopyState, setMoveCopyState] = useState<{ entry: MemberDirectoryEntry; move: boolean } | null>(null);
   const [sources, setSources] = useState<MemberContentSourcesPayload | null>(null);
   const [incoming, setIncoming] = useState<MemberCollaboration[]>([]);
   const [outgoing, setOutgoing] = useState<MemberCollaboration[]>([]);
@@ -139,6 +141,20 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
     }
   }, []);
 
+  const loadCollaborations = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const [received, sent] = await Promise.all([listMemberCollaborations('incoming'), listMemberCollaborations('outgoing')]);
+      setIncoming(received.items ?? []);
+      setOutgoing(sent.items ?? []);
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     setActiveSource(null);
     setEntries([]);
@@ -157,14 +173,8 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
         .finally(() => setLoading(false));
       return;
     }
-    void Promise.all([listMemberCollaborations('incoming'), listMemberCollaborations('outgoing')])
-      .then(([received, sent]) => {
-        setIncoming(received.items ?? []);
-        setOutgoing(sent.items ?? []);
-      })
-      .catch((caught) => setError(describeError(caught)))
-      .finally(() => setLoading(false));
-  }, [view]);
+    void loadCollaborations();
+  }, [view, loadCollaborations]);
 
   const crumbs = useMemo(() => path.split('/').filter((part) => part && part !== '.'), [path]);
 
@@ -273,20 +283,25 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
 
   async function copyOrMoveEntry(entry: MemberDirectoryEntry, move: boolean) {
     if (!activeSource || activeSource.readOnly) return;
-    const target = await prompt({
-      title: move ? text.moveTitle : text.moveCopyTitle,
-      description: text.moveTargetPathHint,
-      inputLabel: text.moveTargetPath,
-      defaultValue: joinPath(path, entry.name),
-      confirmLabel: move ? text.moveSubmit : text.copySubmit,
-      cancelLabel: text.cancel,
-    });
-    if (!target?.trim()) return;
+    setMoveCopyState({ entry, move });
+  }
+
+  async function handleMoveCopyConfirm(targetDir: string) {
+    if (!activeSource || !moveCopyState) return;
+    const { entry, move } = moveCopyState;
+    const destinationPath = joinPath(targetDir, entry.name);
+    // Same directory is already blocked in picker (button disabled + hint), keep a guard here.
+    if (normalizeForMoveCopyCheck(destinationPath) === normalizeForMoveCopyCheck(entry.relativePath)) {
+      setError(text.movePickerSameDirectory);
+      setMoveCopyState(null);
+      return;
+    }
+    setMoveCopyState(null);
     setLoading(true);
     setError('');
     try {
       const source = withPath(activeSource.locator, entry.relativePath);
-      const destination = withPath(activeSource.locator, target.trim());
+      const destination = withPath(activeSource.locator, destinationPath);
       if (move) await moveMemberObject(source, destination);
       else await copyMemberObject(source, destination);
       await loadDirectory(activeSource, path);
@@ -294,6 +309,12 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
       setError(describeError(caught));
       setLoading(false);
     }
+  }
+
+  function normalizeForMoveCopyCheck(value: string) {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === '.' || trimmed === '/') return '.';
+    return trimmed.replace(/^\/+|\/+$/g, '');
   }
 
   async function search() {
@@ -360,7 +381,8 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
     const visibleEntries = searchResults ?? entries;
     const isCollaboration = activeSource.locator.source === 'collaboration';
     return (
-      <div className="member-page-flow">
+      <>
+        <div className="member-page-flow">
         <div className="member-crumbs">
           <button type="button" onClick={() => {
             setShowTrash(false);
@@ -386,12 +408,23 @@ export default function MemberStorageWorkspace({ locale, view }: Props) {
           {loading ? <div className="member-loading">{text.loading}</div> : trashItems.length === 0 ? <div className="member-empty">{text.trashEmpty}</div> : <table className="member-file-table"><tbody>{trashItems.map((item) => <tr key={item.id}><td data-label={text.name}>{item.name}</td><td data-label={text.trashOriginalPath}>{item.originalPath}</td><td data-label={text.actions}><button type="button" onClick={() => void restore(item)} disabled={activeSource.readOnly}>{text.trashRestore}</button><button type="button" onClick={() => void purge(item)} disabled={activeSource.readOnly}>{text.trashPurge}</button></td></tr>)}</tbody></table>}
         </> : loading ? <div className="member-loading">{text.loading}</div> : visibleEntries.length === 0 ? <div className="member-empty">{text.emptyFolder}</div> : <table className="member-file-table"><thead><tr><th>{text.name}</th><th>{text.size}</th><th>{text.modified}</th><th>{text.actions}</th></tr></thead><tbody>{visibleEntries.map((entry) => <tr key={`${entry.kind}-${entry.relativePath}`}><td data-label={text.name}><div className="member-file-name"><FileTypeIcon kind={entry.kind} name={entry.name} className={`member-file-icon ${entry.kind}`} />{entry.kind === 'dir' ? <button type="button" onClick={() => void loadDirectory(activeSource, entry.relativePath)}>{entry.name}</button> : <a href={memberDownloadURL(withPath(activeSource.locator, entry.relativePath))}>{entry.name}</a>}</div></td><td data-label={text.size}>{entry.kind === 'dir' ? '—' : new Intl.NumberFormat(locale).format(entry.size)}</td><td data-label={text.modified}>{entry.modifiedAt ? new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(entry.modifiedAt)) : '—'}</td><td data-label={text.actions}><div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => void loadDirectory(activeSource, entry.relativePath)}>{text.open}</button> : <a href={memberDownloadURL(withPath(activeSource.locator, entry.relativePath), { inline: true })}>{text.preview}</a>}{!activeSource.readOnly && <><button type="button" onClick={() => void copyOrMoveEntry(entry, true)}>{text.move}</button><button type="button" onClick={() => void copyOrMoveEntry(entry, false)}>{text.copyObject}</button><button type="button" onClick={() => void renameEntry(entry)}>{text.rename}</button><button type="button" onClick={() => void deleteEntry(entry)}>{text.deleteFile}</button></>}</div></td></tr>)}</tbody></table>}
       </div>
+      {moveCopyState && (
+        <MemberMoveCopyPicker
+          locale={locale}
+          activeSource={activeSource}
+          entry={moveCopyState.entry}
+          move={moveCopyState.move}
+          onCancel={() => setMoveCopyState(null)}
+          onConfirm={(targetDir) => void handleMoveCopyConfirm(targetDir)}
+        />
+      )}
+      </>
     );
   }
 
   if (loading) return <div className="member-loading">{text.loading}</div>;
   if (error) return <div className="member-error member-page-error">{text.error}: {error}</div>;
-  if (view === 'collaborations') return <MemberCollaborationsDirectory locale={locale} incoming={incoming} outgoing={outgoing} onOpen={openSource} />;
+  if (view === 'collaborations') return <MemberCollaborationsDirectory locale={locale} incoming={incoming} outgoing={outgoing} onOpen={openSource} onRefresh={() => void loadCollaborations()} />;
   if (!sources) return <div className="member-empty">{text.noCommonStorage}</div>;
   return <MemberContentSourceDirectory locale={locale} sources={sources} onOpen={openSource} />;
 }

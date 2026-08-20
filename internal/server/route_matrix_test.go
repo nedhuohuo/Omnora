@@ -28,6 +28,8 @@ func TestRouteMatrixDeclaresCredentialBoundaries(t *testing.T) {
 		{http.MethodDelete, "/api/v1/admin/ai-tokens/tok_1", RouteAuthCookie, true, false},
 		{http.MethodPost, "/api/v1/admin/backups", RouteAuthCookie, true, true},
 		{http.MethodPost, "/api/v1/admin/backups/b1/restore", RouteAuthCookie, true, true},
+		{http.MethodPost, "/api/v1/admin/updates", RouteAuthCookie, true, true},
+		{http.MethodPost, "/api/v1/admin/updates/rollback", RouteAuthCookie, true, true},
 		{http.MethodPost, "/api/v1/admin/mounts", RouteAuthCookie, true, true},
 		{http.MethodPatch, "/api/v1/admin/mounts/mnt_1", RouteAuthCookie, true, true},
 		{http.MethodDelete, "/api/v1/admin/mounts/mnt_1", RouteAuthCookie, true, true},

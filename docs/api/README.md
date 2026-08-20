@@ -39,6 +39,16 @@ REST 使用三个不可混用的资源族：账号作用域“我的文件”、
 
 普通管理员不能发现受限挂载；直接管理请求和相关索引请求统一表现为 `404`。候选路径或名称与隐藏对象冲突时返回不泄露对象信息的 `mount_unavailable`。
 
+## 管理端版本更新
+
+管理员版本更新使用会话 Cookie，并要求 CSRF、近期重新认证和管理员角色：
+
+- `GET /api/v1/admin/updates`：读取当前、待重启和失败状态；
+- `POST /api/v1/admin/updates`：以 `multipart/form-data` 的 `package` 字段上传 `.tar.gz` 发布包，成功返回 `202` 后服务受控重启；
+- `POST /api/v1/admin/updates/rollback`：排队恢复上一发布版本，成功返回 `202` 后服务受控重启。
+
+发布包只允许 `manifest.json`、`omnora` 和 `omnora-recovery`，并校验目标平台、大小和 SHA-256。更新文件保存在 `/var/lib/omnora/updates`，不会替换数据库、用户文件或只读镜像层。完整部署约束见[Web Self-Update](../deployment/self-update.md)。
+
 ## 路由与三种认证
 
 REST 基础路径是 `/api/v1`，健康检查 `GET /healthz`、`GET /readyz` 和 OpenAPI/MCP 入口

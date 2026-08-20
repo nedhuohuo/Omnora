@@ -66,6 +66,8 @@ var routeMatrix = []RouteRule{
 	{Method: "DELETE", Pattern: "/api/v1/ai-tokens/*", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "POST", Pattern: "/api/v1/admin/backups", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/backups/*/restore", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "POST", Pattern: "/api/v1/admin/updates", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "POST", Pattern: "/api/v1/admin/updates/rollback", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/users/*/disable", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/users/*/enable", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/users/*/revoke-sessions", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},

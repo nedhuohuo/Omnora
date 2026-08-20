@@ -29,6 +29,7 @@ import (
 	"omnora/internal/ratelimit"
 	"omnora/internal/store"
 	"omnora/internal/transferticket"
+	"omnora/internal/update"
 )
 
 type Server struct {
@@ -48,6 +49,7 @@ type Server struct {
 	memberShares      *membershare.Service
 	personalStorage   *personalstorage.Service
 	mountAdmin        *mountadmin.Service
+	updates           *update.Manager
 	routesMu          sync.RWMutex
 	listeners         *ListenerManager
 	shutdownOnce      sync.Once
@@ -83,6 +85,12 @@ func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 		db:         db,
 		mux:        http.NewServeMux(),
 		shutdownCh: make(chan struct{}),
+	}
+	if strings.TrimSpace(cfg.Update.StateDir) != "" {
+		s.updates = update.NewManager(cfg.Update.StateDir, cfg.Update.MaxPackageBytes)
+		if err := s.updates.EnsureDirs(); err != nil {
+			s.startupErr = err
+		}
 	}
 	if db != nil {
 		s.guard = access.NewGuard(db.SQL(), cfg.Storage.ManagedDir)

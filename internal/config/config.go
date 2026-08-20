@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ type Config struct {
 	Initialization    InitializationConfig
 	Secrets           SecretConfig
 	Storage           StorageConfig
+	Update            UpdateConfig
 	Routes            access.RouteGroups
 	RouteEnvOverrides map[domain.RouteGroup]bool
 }
@@ -44,6 +46,11 @@ type MCPConfig struct {
 type StorageConfig struct {
 	ManagedDir           string
 	PredeclaredMountRoot string
+}
+
+type UpdateConfig struct {
+	StateDir        string
+	MaxPackageBytes int64
 }
 
 type HTTPConfig struct {
@@ -100,6 +107,9 @@ func LoadEnv() (Config, error) {
 		Storage: StorageConfig{
 			ManagedDir:           "/srv/omnora/managed",
 			PredeclaredMountRoot: "/mnt/omnora",
+		},
+		Update: UpdateConfig{
+			MaxPackageBytes: 512 << 20,
 		},
 		Routes:            access.DefaultRouteGroups(),
 		RouteEnvOverrides: map[domain.RouteGroup]bool{},
@@ -158,6 +168,19 @@ func LoadEnv() (Config, error) {
 		return Config{}, fmt.Errorf("OMNORA_LOG_LEVEL must be debug, info, warn, or error")
 	}
 	cfg.Database.Path = strings.TrimSpace(os.Getenv("OMNORA_DB_PATH"))
+	if cfg.Database.Path != "" {
+		cfg.Update.StateDir = filepath.Join(filepath.Dir(cfg.Database.Path), "updates")
+	}
+	if value := strings.TrimSpace(os.Getenv("OMNORA_UPDATE_DIR")); value != "" {
+		cfg.Update.StateDir = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OMNORA_UPDATE_MAX_PACKAGE_BYTES")); value != "" {
+		maxBytes, parseErr := strconv.ParseInt(value, 10, 64)
+		if parseErr != nil || maxBytes <= 0 {
+			return Config{}, fmt.Errorf("OMNORA_UPDATE_MAX_PACKAGE_BYTES must be a positive integer")
+		}
+		cfg.Update.MaxPackageBytes = maxBytes
+	}
 	if value := strings.TrimSpace(os.Getenv("OMNORA_SQLITE_BUSY_TIMEOUT")); value != "" {
 		timeout, err := time.ParseDuration(value)
 		if err != nil {
