@@ -798,3 +798,247 @@
     width: 100%;
   }
 }
+
+/* MoveCopyPicker — 百度网盘风格 */
+.mcp-dialog {
+  width: min(620px, 100%);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 20px 60px rgb(0 0 0 / .25);
+  overflow: hidden;
+}
+.mcp-dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 20px 24px 0;
+}
+.mcp-dialog-head h2 {
+  flex: 1;
+  margin: 0;
+  color: var(--text-strong);
+  font-size: var(--text-3xl);
+}
+.mcp-dialog-close {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.mcp-dialog-close:hover {
+  background: var(--surface-2);
+  color: var(--text-body);
+}
+.mcp-dialog-desc {
+  padding: 6px 24px 0;
+  color: var(--text-soft);
+  font-size: var(--text-md);
+  line-height: 1.5;
+}
+.mcp-dialog-desc strong {
+  color: var(--text-body);
+}
+
+/* 面包屑 */
+.mcp-breadcrumb-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+  padding: 14px 24px 0;
+  font-size: var(--text-sm);
+}
+.mcp-bc-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.mcp-bc-sep {
+  color: var(--text-faint);
+  font-size: 11px;
+  margin: 0 2px;
+}
+.mcp-bc-item {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: none;
+  border: 0;
+  color: var(--accent-text);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.mcp-bc-item:hover {
+  background: var(--accent-soft);
+}
+.mcp-bc-item.current {
+  color: var(--text-body);
+  font-weight: 600;
+  cursor: default;
+}
+.mcp-bc-item.current:hover {
+  background: none;
+}
+.mcp-folder-count {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+/* 树形文件夹列表 */
+.mcp-tree-container {
+  flex: 1;
+  overflow: auto;
+  margin: 12px 0;
+  padding: 0 12px;
+  min-height: 180px;
+  max-height: 340px;
+}
+.mcp-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background .12s;
+}
+.mcp-tree-row:hover {
+  background: var(--surface-hover);
+}
+.mcp-tree-row.selected {
+  background: var(--accent-soft);
+}
+.mcp-tree-arrow {
+  width: 20px;
+  height: 20px;
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: transform .15s, background .12s;
+  flex-shrink: 0;
+  transform: rotate(0deg);
+}
+.mcp-tree-arrow.open {
+  transform: rotate(90deg);
+}
+.mcp-tree-arrow:hover {
+  background: var(--surface-3);
+}
+.mcp-tree-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.mcp-tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-md);
+  color: var(--text-body);
+}
+.mcp-tree-check {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  flex-shrink: 0;
+  transition: all .12s;
+}
+.mcp-tree-check.checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.mcp-tree-check.checked::after {
+  content: "✓";
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* 空态 */
+.mcp-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 0;
+  color: var(--text-faint);
+  font-size: var(--text-md);
+}
+.mcp-empty-icon {
+  font-size: 40px;
+  margin-bottom: 8px;
+  opacity: .5;
+}
+
+/* 底部 */
+.mcp-dialog-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--border-soft);
+}
+.mcp-foot-spacer {
+  flex: 1;
+}
+.mcp-btn {
+  height: 40px;
+  border-radius: 20px;
+  font-size: var(--text-md);
+  font-weight: 500;
+  cursor: pointer;
+  border: 0;
+  padding: 0 22px;
+  transition: all .15s;
+  white-space: nowrap;
+}
+.mcp-btn-cancel {
+  background: var(--surface-2);
+  color: var(--text-body);
+  border: 1px solid var(--border-strong);
+}
+.mcp-btn-cancel:hover {
+  background: var(--surface-3);
+}
+.mcp-btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+.mcp-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.mcp-btn-primary:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+.mcp-btn-new {
+  background: transparent;
+  color: var(--accent-text);
+  border: 1px solid var(--accent);
+}
+.mcp-btn-new:hover {
+  background: var(--accent-soft);
+}
