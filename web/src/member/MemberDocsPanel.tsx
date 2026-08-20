@@ -139,7 +139,6 @@ export default function MemberDocsPanel({ locale }: { locale: MemberLocale }) {
           {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
 
           {tab === 'mcp' && <>
-            <p className="member-admin-hint">{text.docsMcpHint}</p>
             <McpDocsBlock endpoint={routeState.endpoint} exposed={routeState.exposed} locale={locale} />
           </>}
 

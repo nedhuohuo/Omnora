@@ -15,6 +15,7 @@ import { copyText } from './clipboard';
 import { getMcpEndpoint } from './mcpIntegration';
 import AdminIndexJobsPanel from './AdminIndexJobsPanel';
 import AdminMountsPanel from './AdminMountsPanel';
+import AdminUpdatesPanel from './AdminUpdatesPanel';
 import {
   AdminBackupsPanel,
   AdminOverviewPanel,
@@ -32,6 +33,7 @@ export type AdminTab =
   | 'share-governance'
   | 'token-governance'
   | 'backups'
+  | 'updates'
   | 'audit';
 
 function describeError(error: unknown) {
@@ -179,6 +181,7 @@ export default function AdminWorkspace({ tab, locale, isInitialAdmin }: { tab: A
   if (tab === 'share-governance') return <AdminShareGovernancePanel locale={locale} />;
   if (tab === 'token-governance') return <AdminTokenGovernancePanel locale={locale} />;
   if (tab === 'backups') return <AdminBackupsPanel locale={locale} />;
+  if (tab === 'updates') return <AdminUpdatesPanel locale={locale} />;
 
   const refresh = tab === 'route-groups' ? loadRouteGroups : loadAudit;
   return (

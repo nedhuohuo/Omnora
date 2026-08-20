@@ -21,6 +21,7 @@ describe('admin navigation shell', () => {
     expect(adminTopbarTitle('admin', 'mounts', adminItems, text.signIn)).toBe(text.adminStorageSearch);
     expect(adminTopbarTitle('admin', 'route-groups', adminItems, text.signIn)).toBe(text.adminAccessSecurity);
     expect(adminTopbarTitle('admin', 'backups', adminItems, text.signIn)).toBe(text.adminBackups);
+    expect(adminTopbarTitle('admin', 'updates', adminItems, text.signIn)).toBe(text.settings);
     expect(adminTopbarTitle('member', 'route-groups', adminItems, text.signIn)).toBe(text.signIn);
   });
 
@@ -41,12 +42,13 @@ describe('admin navigation shell', () => {
     expect(memberTopbarTitle('tokens', text)).toBe('AI Token');
     expect(memberTopbarTitle('docs', text)).toBe('文档');
     expect(memberTopbarTitle('account', text)).toBe('账户');
+    expect(memberTopbarTitle('updates', text)).toBe('版本更新');
     expect(memberTopbarTitle('mounts', text)).toBe('个人空间');
   });
 
   it('keeps admin navigation out of the member sidebar', () => {
     const html = renderToStaticMarkup(
-      createElement(MemberSidebarNavigation, { locale: 'zh-CN', activeTab: 'personal', onSelect: () => undefined }),
+      createElement(MemberSidebarNavigation, { locale: 'zh-CN', activeTab: 'personal', onSelect: () => undefined, isAdmin: false }),
     );
 
     expect(html).toContain('个人空间');
@@ -56,6 +58,10 @@ describe('admin navigation shell', () => {
     expect(html).toContain('AI Token');
     expect(html).toContain('文档');
     expect(html).toContain('账户');
+    expect(html).toContain('设置');
+    expect(html).not.toContain('版本更新');
+    const adminHtml = renderToStaticMarkup(createElement(MemberSidebarNavigation, { locale: 'zh-CN', activeTab: 'personal', onSelect: () => undefined, isAdmin: true }));
+    expect(adminHtml).toContain('版本更新');
     expect(html).not.toContain('账号管理');
     expect(html).not.toContain('存储与搜索');
     expect(html).not.toContain('访问与安全');
@@ -68,7 +74,7 @@ describe('admin navigation shell', () => {
       createElement(AdminSidebarNavigation, {
         items: buildAdminNavItems(text),
         activeGroupId: 'storage',
-        groupTabs: { overview: 'overview', identity: 'users', storage: 'mounts', security: 'route-groups', backups: 'backups' },
+        groupTabs: { overview: 'overview', identity: 'users', storage: 'mounts', security: 'route-groups', backups: 'backups', settings: 'updates' },
         onSelect: () => undefined,
       }),
     );
@@ -78,6 +84,7 @@ describe('admin navigation shell', () => {
     expect(html).toContain('存储与搜索');
     expect(html).toContain('访问与安全');
     expect(html).toContain('备份恢复');
+    expect(html).toContain('设置');
     expect(html).not.toContain('个人空间');
     expect(html).not.toContain('团队文件夹');
     expect(html).not.toContain('协作');

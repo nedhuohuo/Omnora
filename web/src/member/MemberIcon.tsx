@@ -14,6 +14,7 @@ export type MemberIconName =
   | 'route'
   | 'search'
   | 'security'
+  | 'settings'
   | 'share'
   | 'token'
   | 'trash'
@@ -41,6 +42,7 @@ const paths: Record<MemberIconName, string[]> = {
   trash: ['M4.8 6.2h10.4', 'M8 6.2V4.4h4v1.8', 'M6.2 6.2l.6 10h6.4l.6-10', 'M8.8 9.2v4.6M11.2 9.2v4.6'],
   upload: ['M10 14.8V4.2', 'M6.5 7.7 10 4.2l3.5 3.5', 'M4.2 15.8h11.6'],
   users: ['M7.4 9.3a2.9 2.9 0 1 0 0-5.8 2.9 2.9 0 0 0 0 5.8Z', 'M2.8 16.4c.7-2.7 2.3-4 4.6-4s3.9 1.3 4.6 4', 'M13 9.2a2.3 2.3 0 1 0 0-4.6', 'M13.4 12.5c1.8.2 3.1 1.5 3.8 3.9'],
+  settings: ['M10 8.2a2 2 0 1 0 0 3.6 2 2 0 0 0 0-3.6Z', 'M10 3.2v1.2M10 15.6v1.2M3.2 10h1.2M15.6 10h1.2M5.2 5.2l.8.8M14 14l.8.8M14.8 5.2l-.8.8M6 14l-.8.8'],
 };
 
 export default function MemberIcon({ name, className }: { name: MemberIconName; className?: string }) {

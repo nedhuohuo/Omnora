@@ -24,6 +24,7 @@ export default function McpDocsBlock({ endpoint, exposed, locale, showDocs = tru
 }) {
   const text = localeMessages[locale];
   const [copied, setCopied] = useState(false);
+  const [endpointCopied, setEndpointCopied] = useState(false);
   const configExample = JSON.stringify({
     mcpServers: {
       omnora: {
@@ -37,6 +38,13 @@ export default function McpDocsBlock({ endpoint, exposed, locale, showDocs = tru
     if (await copyText(configExample)) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
+    }
+  }
+
+  async function onCopyEndpoint() {
+    if (await copyText(endpoint)) {
+      setEndpointCopied(true);
+      window.setTimeout(() => setEndpointCopied(false), 2000);
     }
   }
 
@@ -117,14 +125,27 @@ OAuth: ${MCP_OAUTH_STATUS}`}</pre>
     <section className="member-mcp-status" aria-label={text.tokenMcpStatusTitle}>
       <div className="member-mcp-status-heading">
         <div><h2>{text.tokenMcpStatusTitle}</h2><p>{text.tokenMcpStatusDetail}</p></div>
-        <span className={`member-route-badge ${exposed ? 'exposed' : 'closed'}`}>{exposed ? text.routeExposed : text.routeClosed}</span>
+        <div className="member-mcp-status-heading-meta">
+          <span className={`member-route-badge ${exposed ? 'exposed' : 'closed'}`}>{exposed ? text.routeExposed : text.routeClosed}</span>
+          <span className="member-mcp-status-heading-hint">{exposed ? text.routeDisableNextRequest.replace('关闭后', '启用中；关闭后') : text.routeDisableNextRequest}</span>
+        </div>
       </div>
       <div className="member-mcp-status-grid">
-        <div><span>{text.tokenMcpEndpoint}</span><code>{endpoint}</code></div>
+        <div>
+          <span>{text.tokenMcpEndpoint}</span>
+          <div className="member-mcp-endpoint-row">
+            <code className="member-mcp-endpoint-code" title={endpoint}>{endpoint}</code>
+            <button className="member-mcp-endpoint-copy" type="button" onClick={() => void onCopyEndpoint()}>{endpointCopied ? text.copied : text.copy}</button>
+          </div>
+        </div>
         <div><span>{text.tokenMcpProtocol}</span><strong>{MCP_PROTOCOL_VERSION}</strong></div>
         <div><span>{text.tokenMcpTransport}</span><strong>{MCP_TRANSPORT}</strong></div>
         <div><span>{text.tokenMcpAuth}</span><code>Authorization: Bearer &lt;AI_TOKEN&gt;</code></div>
-        <div><span>{text.tokenMcpOAuth}</span><strong>{MCP_OAUTH_STATUS}</strong></div>
+      </div>
+      <div className="member-mcp-oauth-row">
+        <span>{text.tokenMcpOAuth}</span>
+        <span className="member-mcp-oauth-pill">{MCP_OAUTH_STATUS}</span>
+        <span className="member-mcp-oauth-desc">{locale === 'zh-CN' ? '当前仅支持 Bearer Token，预留 OAuth 扩展位' : 'Bearer Token only; OAuth reserved'}</span>
       </div>
       {showDocs && <div className="member-mcp-docs">{docs}</div>}
     </section>

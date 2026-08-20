@@ -2,18 +2,13 @@ import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
   buildShareURL,
-  createMemberCollaboration,
   createShare,
-  deleteMemberCollaboration,
   deleteShare,
-  listMemberCollaborations,
   listShares,
   type CreateShareResponse,
-  type MemberCollaboration,
   type MemberContentLocator,
   type SharePayload,
 } from '../api';
-import { useMemberDialog } from './MemberDialog';
 import { type MemberLocale, localeMessages } from './i18n';
 import { copyText } from './clipboard';
 
@@ -142,19 +137,9 @@ export function ShareCreateModal({ text, locator, targetLabel, onCancel, onCreat
   </form></div>;
 }
 
-function CollaborationRow({ item, incoming, text, onRevoke }: { item: MemberCollaboration; incoming: boolean; text: LocaleText; onRevoke?: () => void }) {
-  return <li className="member-collaboration-row"><strong>{item.folderName ?? item.displayName ?? item.path ?? text.myFiles}</strong><small>{incoming ? item.ownerName : item.recipientName} · {item.permission === 'viewer' ? text.readOnly : text.readWrite}</small>{!incoming && onRevoke && <button type="button" onClick={onRevoke}>{text.collaborationRevoke}</button>}</li>;
-}
-
 export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
-  const { confirm } = useMemberDialog();
   const [shares, setShares] = useState<SharePayload[]>([]);
-  const [incoming, setIncoming] = useState<MemberCollaboration[]>([]);
-  const [outgoing, setOutgoing] = useState<MemberCollaboration[]>([]);
-  const [recipientID, setRecipientID] = useState('');
-  const [rootPath, setRootPath] = useState('.');
-  const [permission, setPermission] = useState<'viewer' | 'editor'>('viewer');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [shareLink, setShareLink] = useState<CreateShareResponse | null>(null);
@@ -162,37 +147,16 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
   const load = useCallback(async () => {
     setLoading(true); setError('');
     try {
-      const [shareResponse, received, sent] = await Promise.all([listShares(), listMemberCollaborations('incoming'), listMemberCollaborations('outgoing')]);
-      setShares(shareResponse.items ?? []); setIncoming(received.items ?? []); setOutgoing(sent.items ?? []);
+      const shareResponse = await listShares();
+      setShares(shareResponse.items ?? []);
     } catch (caught) { setError(describeError(caught)); } finally { setLoading(false); }
   }, []);
   useEffect(() => { void load(); }, [load]);
-
-  async function createCollaboration(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setLoading(true); setError('');
-    try { await createMemberCollaboration({ recipientId: recipientID.trim(), rootRelativePath: normalizeSharePath(rootPath), permission }); setRecipientID(''); setRootPath('.'); await load(); }
-    catch (caught) { setError(describeError(caught)); setLoading(false); }
-  }
-
-  async function revokeCollaboration(id: string) {
-    const confirmed = await confirm({
-      title: text.collaborationRevokeConfirmTitle,
-      description: text.collaborationRevokeConfirmDetail,
-      confirmLabel: text.collaborationRevoke,
-      cancelLabel: text.cancel,
-      tone: 'danger',
-    });
-    if (!confirmed) return;
-    setLoading(true); setError('');
-    try { await deleteMemberCollaboration(id); await load(); } catch (caught) { setError(describeError(caught)); setLoading(false); }
-  }
 
   return <div className="member-admin-workspace">
     <div className="member-heading"><div><h1>{text.sharesTitle}</h1><p>{text.sharesTitleDetail}</p></div><button className="member-secondary-action" type="button" onClick={() => void load()} disabled={loading}>{text.refresh}</button></div>
     {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
     <section aria-labelledby="public-shares"><h2 id="public-shares">{text.sharesTitle}</h2>{loading && shares.length === 0 ? <div className="member-loading">{text.loading}</div> : shares.length === 0 ? <div className="member-empty">{text.shareListEmpty}</div> : <table className="member-admin-table"><thead><tr><th>{text.shareColumnTarget}</th><th>{text.shareColumnStatus}</th><th>{text.shareColumnExpires}</th><th>{text.actions}</th></tr></thead><tbody>{shares.map((share) => <tr key={share.id}><td><strong>{displaySharePath(share.relativePath, text)}</strong><small>{shareLocationLabel(share, text)}</small></td><td>{shareStatusLabel(share.status, text)}</td><td>{formatDate(share.expiresAt, locale, text)}</td><td><button className="member-table-action member-table-danger" type="button" onClick={() => void deleteShare(share.id).then(load)} disabled={loading}>{text.shareRevoke}</button></td></tr>)}</tbody></table>}</section>
-    <section aria-labelledby="incoming-collaborations"><h2 id="incoming-collaborations">{text.sharedWithMe}</h2>{incoming.length === 0 ? <div className="member-empty">{text.noIncomingCollaborations}</div> : <ul className="member-collaboration-list">{incoming.map((item) => <CollaborationRow item={item} incoming text={text} key={item.id} />)}</ul>}</section>
-    <section aria-labelledby="outgoing-collaborations"><h2 id="outgoing-collaborations">{text.outgoingCollaborations}</h2><form className="member-admin-inline-form" onSubmit={createCollaboration}><label>{text.collaborationRecipient}<input value={recipientID} onChange={(event) => setRecipientID(event.target.value)} required /></label><label>{text.collaborationRoot}<input value={rootPath} onChange={(event) => setRootPath(event.target.value)} required /></label><label>{text.collaborationPermission}<select value={permission} onChange={(event) => setPermission(event.target.value as 'viewer' | 'editor')}><option value="viewer">{text.readOnly}</option><option value="editor">{text.readWrite}</option></select></label><button className="member-primary" type="submit" disabled={loading}>{text.collaborationCreate}</button></form>{outgoing.length === 0 ? <div className="member-empty">{text.noOutgoingCollaborations}</div> : <ul className="member-collaboration-list">{outgoing.map((item) => <CollaborationRow item={item} incoming={false} text={text} key={item.id} onRevoke={() => void revokeCollaboration(item.id)} />)}</ul>}</section>
     {shareLink && <ShareCreatedResult text={text} result={shareLink} onClose={() => setShareLink(null)} />}
   </div>;
 }

@@ -9,6 +9,13 @@ SECRETS_FILE="${OMNORA_SECRETS_FILE:-$CONFIG_DIR/runtime.env}"
 CONFIG_INSTANCE_FILE="${OMNORA_CONFIG_INSTANCE_FILE:-$CONFIG_DIR/.omnora-instance-id}"
 DATA_INSTANCE_FILE="${OMNORA_DATA_INSTANCE_FILE:-$DATA_DIR/.omnora-instance-id}"
 MANAGED_INSTANCE_FILE="${OMNORA_MANAGED_INSTANCE_FILE:-$MANAGED_DIR/.omnora-instance-id}"
+UPDATE_DIR="${OMNORA_UPDATE_DIR:-$(dirname "$DB_PATH")/updates}"
+UPDATE_RELEASES_DIR="$UPDATE_DIR/releases"
+UPDATE_PENDING_FILE="$UPDATE_DIR/pending"
+UPDATE_ACTIVE_FILE="$UPDATE_DIR/active"
+UPDATE_PREVIOUS_FILE="$UPDATE_DIR/previous"
+UPDATE_ROLLBACK_FILE="$UPDATE_DIR/rollback"
+UPDATE_FAILURE_FILE="$UPDATE_DIR/failure"
 ROOT_CONFIG_DIR=/etc/omnora
 ROOT_DATA_DIR=/var/lib/omnora
 ROOT_MANAGED_DIR=/srv/omnora/managed
@@ -29,6 +36,61 @@ directory_has_entries() {
 
 path_exists() {
 	[ -e "$1" ] || [ -L "$1" ]
+}
+
+read_update_pointer() {
+	pointer_file="$1"
+	[ -f "$pointer_file" ] && [ ! -L "$pointer_file" ] || return 1
+	pointer_value="$(sed -n '1p' "$pointer_file")"
+	pointer_extra="$(sed -n '2p' "$pointer_file")"
+	[ -n "$pointer_value" ] && [ -z "$pointer_extra" ] || return 1
+	case "$pointer_value" in
+		"$UPDATE_RELEASES_DIR"/*) ;;
+		*) return 1 ;;
+	esac
+	[ ! -L "$pointer_value" ] && [ -d "$pointer_value" ] || return 1
+	[ ! -L "$pointer_value/omnora" ] && [ -x "$pointer_value/omnora" ] || return 1
+	[ ! -L "$pointer_value/omnora-recovery" ] && [ -x "$pointer_value/omnora-recovery" ] || return 1
+	printf '%s' "$pointer_value"
+}
+
+write_update_failure() {
+	failure_message="$1"
+	failure_tmp_file="$(mktemp "$UPDATE_FAILURE_FILE.tmp.XXXXXX")" || return 0
+	printf '%s\n' "$failure_message" > "$failure_tmp_file" || true
+	chmod 600 "$failure_tmp_file" || true
+	mv "$failure_tmp_file" "$UPDATE_FAILURE_FILE" || true
+}
+
+apply_update_rollback() {
+	[ -e "$UPDATE_ROLLBACK_FILE" ] || return 0
+	if previous_release="$(read_update_pointer "$UPDATE_PREVIOUS_FILE")"; then
+		rm -f "$UPDATE_ACTIVE_FILE"
+		mv "$UPDATE_PREVIOUS_FILE" "$UPDATE_ACTIVE_FILE" || fail_persistence_check "cannot activate the previous Omnora release"
+	else
+		rm -f "$UPDATE_ACTIVE_FILE" "$UPDATE_PREVIOUS_FILE"
+	fi
+	rm -f "$UPDATE_ROLLBACK_FILE" "$UPDATE_FAILURE_FILE"
+}
+
+apply_pending_update() {
+	[ -e "$UPDATE_PENDING_FILE" ] || return 0
+	if ! pending_release="$(read_update_pointer "$UPDATE_PENDING_FILE")"; then
+		write_update_failure "pending update pointer is invalid"
+		rm -f "$UPDATE_PENDING_FILE"
+		return 0
+	fi
+	if active_release="$(read_update_pointer "$UPDATE_ACTIVE_FILE")"; then
+		rm -f "$UPDATE_PREVIOUS_FILE"
+		mv "$UPDATE_ACTIVE_FILE" "$UPDATE_PREVIOUS_FILE" || fail_persistence_check "cannot preserve the previous Omnora release"
+	fi
+	if ! mv "$UPDATE_PENDING_FILE" "$UPDATE_ACTIVE_FILE"; then
+		if [ -f "$UPDATE_PREVIOUS_FILE" ]; then
+			mv "$UPDATE_PREVIOUS_FILE" "$UPDATE_ACTIVE_FILE" || true
+		fi
+		fail_persistence_check "cannot activate the pending Omnora release"
+	fi
+	rm -f "$UPDATE_FAILURE_FILE" "$UPDATE_ROLLBACK_FILE"
 }
 
 inode_number() {
@@ -278,6 +340,16 @@ if [ "$save_runtime_secrets" = true ]; then
 	printf 'Omnora generated runtime secrets in %s\n' "$SECRETS_FILE" >&2
 fi
 
+APP_COMMAND="$1"
+shift
+if [ "$APP_COMMAND" = "/usr/local/bin/omnora" ]; then
+	apply_update_rollback
+	apply_pending_update
+	if active_release="$(read_update_pointer "$UPDATE_ACTIVE_FILE")"; then
+		APP_COMMAND="$active_release/omnora"
+	fi
+fi
+
 forward_child_signal() {
 	if [ -n "${child_pid:-}" ]; then
 		kill -TERM "$child_pid" 2>/dev/null || true
@@ -286,13 +358,35 @@ forward_child_signal() {
 
 trap 'cleanup_instance_tmp; cleanup_runtime_tmp; forward_child_signal' HUP INT TERM
 set +e
-"$@" &
+"$APP_COMMAND" "$@" &
 child_pid=$!
 wait "$child_pid"
 child_status=$?
 set -e
 trap - HUP INT TERM
 child_pid=''
+
+# A non-signal failure from a selected release is treated as a failed upgrade.
+# Restore the previous pointer before starting the fallback binary. SIGTERM and
+# SIGKILL exit codes are normal container shutdown paths and must not roll back.
+if [ "$APP_COMMAND" != "/usr/local/bin/omnora" ] && [ "$child_status" -ne 0 ] && [ "$child_status" -ne 143 ] && [ "$child_status" -ne 137 ]; then
+	if previous_release="$(read_update_pointer "$UPDATE_PREVIOUS_FILE")"; then
+		rm -f "$UPDATE_ACTIVE_FILE"
+		mv "$UPDATE_PREVIOUS_FILE" "$UPDATE_ACTIVE_FILE" || true
+		APP_COMMAND="$previous_release/omnora"
+	else
+		rm -f "$UPDATE_ACTIVE_FILE" "$UPDATE_PREVIOUS_FILE"
+		APP_COMMAND="/usr/local/bin/omnora"
+	fi
+	write_update_failure "selected release exited with status $child_status"
+	set +e
+	"$APP_COMMAND" "$@" &
+	child_pid=$!
+	wait "$child_pid"
+	child_status=$?
+	set -e
+	child_pid=''
+fi
 
 if [ "$child_status" -ne 0 ] && [ "$instance_markers_created" = true ] && [ ! -f "$DB_PATH" ]; then
 	rm -f "$CONFIG_INSTANCE_FILE" "$DATA_INSTANCE_FILE" "$MANAGED_INSTANCE_FILE"

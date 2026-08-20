@@ -476,6 +476,29 @@ export type BackupPayload = {
   notes?: string;
 };
 
+export type UpdateReleasePayload = {
+  id: string;
+  version: string;
+  targetOS: string;
+  targetArch: string;
+  archiveSha256?: string;
+  archiveSizeBytes?: number;
+  uploadedAt?: string;
+};
+
+export type UpdateStatusPayload = {
+  state: 'disabled' | 'built_in' | 'pending_restart' | 'active' | 'rollback_pending' | 'failed' | string;
+  current?: UpdateReleasePayload;
+  pending?: UpdateReleasePayload;
+  failure?: string;
+};
+
+export type UpdateUploadResponse = {
+  state?: string;
+  release?: UpdateReleasePayload;
+  message?: string;
+};
+
 export type RecoveryControlPayload = {
   state?: string;
   ready?: boolean;
@@ -1230,6 +1253,39 @@ export function restoreAdminBackup(backupId: string, confirmPhrase: string, sign
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ confirmPhrase }),
+    signal,
+  });
+}
+
+// -- Admin: self-update --------------------------------------------------------------
+
+export function getAdminUpdateStatus(signal?: AbortSignal) {
+  return requestJson<UpdateStatusPayload>('/api/v1/admin/updates', { signal });
+}
+
+export async function uploadAdminUpdate(file: File, signal?: AbortSignal) {
+  const headers = new Headers({ Accept: 'application/json' });
+  const csrf = readCsrfCookie('account');
+  if (csrf) headers.set('X-CSRF-Token', csrf);
+  const form = new FormData();
+  form.append('package', file, file.name);
+  const response = await fetch('/api/v1/admin/updates', {
+    method: 'POST',
+    body: form,
+    credentials: 'same-origin',
+    headers,
+    signal,
+  });
+  const body = await readJsonResponse(response);
+  if (!response.ok) {
+    throw new ApiError(`Request failed with ${response.status}`, response.status, body);
+  }
+  return body as UpdateUploadResponse;
+}
+
+export function rollbackAdminUpdate(signal?: AbortSignal) {
+  return requestJson<{ state?: string; message?: string }>('/api/v1/admin/updates/rollback', {
+    method: 'POST',
     signal,
   });
 }

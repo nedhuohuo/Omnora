@@ -51,20 +51,29 @@ describe('member content source directory', () => {
 });
 
 describe('member sharing and collaboration panel', () => {
-  it('separates public links from incoming collaborations without Space labels', () => {
+  it('keeps public links isolated from collaborations without Space labels', () => {
     const html = renderToStaticMarkup(<MemberDialogProvider><MemberSharesPanel locale="zh-CN" /></MemberDialogProvider>);
     expect(html).toContain('我的分享');
-    expect(html).toContain('共享给我');
-    expect(html).toContain('发出的协作');
+    expect(html).not.toContain('共享给我');
+    expect(html).not.toContain('收到的协作');
+    expect(html).not.toContain('发出的协作');
+    expect(html).not.toContain('协作');
     expect(html).not.toContain('空间');
     expect(html).not.toContain('spaceId');
+  });
+
+  it('routes collaborations exclusively through the collaboration directory', () => {
+    const html = renderToStaticMarkup(<MemberDialogProvider><MemberCollaborationsDirectory locale="zh-CN" incoming={[]} outgoing={[]} onOpen={() => undefined} /></MemberDialogProvider>);
+    expect(html).toContain('收到的协作');
+    expect(html).toContain('发出的协作');
+    expect(html).toContain('创建协作');
   });
 });
 
 describe('member collaboration directory', () => {
   it('renders received and sent collaboration sections without spaces', () => {
     const html = renderToStaticMarkup(
-      <MemberCollaborationsDirectory locale="zh-CN" incoming={[]} outgoing={[]} onOpen={() => undefined} />,
+      <MemberDialogProvider><MemberCollaborationsDirectory locale="zh-CN" incoming={[]} outgoing={[]} onOpen={() => undefined} /></MemberDialogProvider>,
     );
 
     expect(html).toContain('收到的协作');

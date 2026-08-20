@@ -7,7 +7,6 @@ import {
   ApiError,
   createAiToken,
   deleteAiToken,
-  getBootstrap,
   isReauthenticationCanceled,
   listAiTokens,
   listMemberContentSources,
@@ -17,11 +16,9 @@ import { useRecentReauth } from './RecentReauthProvider';
 import { createClientId } from './clientId';
 import { copyText } from './clipboard';
 import { readableLabel } from './displayLabels';
-import McpDocsBlock from './McpDocsBlock';
 import {
   MCP_PRESETS,
   buildInspectorConnection,
-  getMcpRouteState,
   type InspectorConnection,
   type McpPreset,
 } from './mcpIntegration';
@@ -106,21 +103,18 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
   const [connectionCopied, setConnectionCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AiTokenListItem | null>(null);
-  const [bootstrap, setBootstrap] = useState<{ routeGroups?: Array<{ id: string; exposed: boolean }> } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const [tokenResponse, sourceResponse, bootstrapResponse] = await Promise.all([
+      const [tokenResponse, sourceResponse] = await Promise.all([
         listAiTokens(),
         listMemberContentSources(),
-        getBootstrap(),
       ]);
       const nextTokens = tokenResponse.items ?? [];
       setTokens(nextTokens);
       setContentSources(sourceResponse);
-      setBootstrap(bootstrapResponse);
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -192,7 +186,6 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     }
   }
 
-  const routeState = getMcpRouteState(bootstrap);
   const presetOptions: Array<{ id: Exclude<McpPreset, 'permanentDelete'>; label: string; detail: string }> = [
     { id: 'readOnly', label: text.tokenPresetReadOnly, detail: text.tokenPresetReadOnlyDetail },
     { id: 'fileManagement', label: text.tokenPresetFileManagement, detail: text.tokenPresetFileManagementDetail },
@@ -229,8 +222,6 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
           <button className="member-primary" type="button" onClick={() => setFormOpen(true)}>{text.tokenCreate}</button>
         </div>
       </div>
-
-      <McpDocsBlock endpoint={routeState.endpoint} exposed={routeState.exposed} locale={locale} showDocs={false} />
 
       {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
 

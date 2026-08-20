@@ -2,6 +2,7 @@ import { type FormEvent, useEffect, useState } from 'react';
 import { ApiError, confirmTOTP, getBootstrap, getPreferences, getSession, initialize, login, logout, setupTOTP } from '../api';
 import AdminWorkspace, { type AdminTab } from './AdminWorkspace';
 import MemberAccountPanel from './MemberAccountPanel';
+import AdminUpdatesPanel from './AdminUpdatesPanel';
 import MemberContentNavigation from './MemberContentNavigation';
 import MemberDocsPanel from './MemberDocsPanel';
 import MemberSharesPanel from './MemberSharesPanel';
@@ -16,8 +17,8 @@ import { syncAuthenticatedTheme } from './themeSync';
 import { useLocale } from './useLocale';
 import './member-files.css';
 
-export type MemberTab = 'personal' | 'team-folders' | 'collaborations' | 'shares' | 'tokens' | 'docs' | 'account';
-type AdminNavGroup = 'overview' | 'identity' | 'storage' | 'security' | 'backups';
+export type MemberTab = 'personal' | 'team-folders' | 'collaborations' | 'shares' | 'tokens' | 'docs' | 'account' | 'updates';
+type AdminNavGroup = 'overview' | 'identity' | 'storage' | 'security' | 'backups' | 'settings';
 type AdminNavItem = { id: AdminTab; label: string };
 type AdminNavGroupItem = { id: AdminNavGroup; label: string; icon: MemberIconName; tabs: AdminNavItem[] };
 type SessionState = 'checking' | 'signed-out' | 'enrollment' | 'ready';
@@ -39,6 +40,7 @@ export function memberTopbarTitle(activeTab: MemberTab | AdminTab, text: typeof 
   if (activeTab === 'tokens') return text.navTokens;
   if (activeTab === 'docs') return text.navDocs;
   if (activeTab === 'account') return text.account;
+  if (activeTab === 'updates') return text.adminUpdates;
   return text.personalSpace;
 }
 
@@ -48,6 +50,7 @@ const defaultAdminGroupTabs: Record<AdminNavGroup, AdminTab> = {
   storage: 'mounts',
   security: 'route-groups',
   backups: 'backups',
+  settings: 'updates',
 };
 
 export function shouldUseAdminShell(entry: Props['entry'], isAdmin: boolean) {
@@ -55,7 +58,7 @@ export function shouldUseAdminShell(entry: Props['entry'], isAdmin: boolean) {
 }
 
 export function isAdminTab(tab: MemberTab | AdminTab): tab is AdminTab {
-  return ['overview', 'users', 'mounts', 'index-jobs', 'route-groups', 'share-governance', 'token-governance', 'audit', 'backups'].includes(tab);
+  return ['overview', 'users', 'mounts', 'index-jobs', 'route-groups', 'share-governance', 'token-governance', 'audit', 'backups', 'updates'].includes(tab);
 }
 
 export function buildAdminNavItems(text: typeof localeMessages[MemberLocale]): AdminNavGroupItem[] {
@@ -65,17 +68,18 @@ export function buildAdminNavItems(text: typeof localeMessages[MemberLocale]): A
     { id: 'storage', label: text.adminStorageSearch, icon: 'mount', tabs: [{ id: 'mounts', label: text.adminMounts }, { id: 'index-jobs', label: text.adminIndexJobs }] },
     { id: 'security', label: text.adminAccessSecurity, icon: 'security', tabs: [{ id: 'route-groups', label: text.adminRouteGroups }, { id: 'share-governance', label: text.adminShareGovernance }, { id: 'token-governance', label: text.adminTokenGovernance }, { id: 'audit', label: text.adminAudit }] },
     { id: 'backups', label: text.adminBackups, icon: 'backup', tabs: [{ id: 'backups', label: text.adminBackups }] },
+    { id: 'settings', label: text.settings, icon: 'settings', tabs: [{ id: 'updates', label: text.adminUpdates }] },
   ];
 }
 
-export function MemberSidebarNavigation({ locale, activeTab, onSelect }: { locale: MemberLocale; activeTab: MemberTab | AdminTab; onSelect: (tab: MemberTab) => void }) {
+export function MemberSidebarNavigation({ locale, activeTab, onSelect, isAdmin }: { locale: MemberLocale; activeTab: MemberTab | AdminTab; onSelect: (tab: MemberTab | AdminTab) => void; isAdmin: boolean }) {
   const text = localeMessages[locale];
-  const memberActive = isAdminTab(activeTab) ? null : activeTab;
+  const memberActive = activeTab as MemberTab | AdminTab;
   return <>
     <div className="member-sidebar-section">
       <p>{text.files}</p>
       <nav aria-label={text.files}>
-        <MemberContentNavigation locale={locale} active={memberActive === 'personal' || memberActive === 'team-folders' || memberActive === 'collaborations' ? memberActive : null} onSelect={onSelect} />
+        <MemberContentNavigation locale={locale} active={memberActive === 'personal' || memberActive === 'team-folders' || memberActive === 'collaborations' ? memberActive as any : null} onSelect={onSelect as any} />
       </nav>
     </div>
     <div className="member-sidebar-section">
@@ -87,9 +91,10 @@ export function MemberSidebarNavigation({ locale, activeTab, onSelect }: { local
       </nav>
     </div>
     <div className="member-sidebar-section">
-      <p>{text.account}</p>
-      <nav aria-label={text.account}>
+      <p>{text.settings}</p>
+      <nav aria-label={text.settings}>
         <button className={`member-nav ${memberActive === 'account' ? 'active' : ''}`} type="button" onClick={() => onSelect('account')}><MemberIcon name="account" /> <span>{text.account}</span></button>
+        {isAdmin && <button className={`member-nav ${memberActive === 'updates' ? 'active' : ''}`} type="button" onClick={() => onSelect('updates')}><MemberIcon name="settings" /> <span>{text.adminUpdates}</span></button>}
       </nav>
     </div>
   </>;
@@ -114,6 +119,7 @@ function adminGroupForTab(tab: AdminTab): AdminNavGroup {
   if (tab === 'mounts' || tab === 'index-jobs') return 'storage';
   if (tab === 'route-groups' || tab === 'share-governance' || tab === 'token-governance' || tab === 'audit') return 'security';
   if (tab === 'backups') return 'backups';
+  if (tab === 'updates') return 'settings';
   return 'overview';
 }
 
@@ -261,11 +267,11 @@ export default function MemberFilesApp({ entry = 'member' }: Props) {
   return <MemberDialogProvider>
     <RecentReauthProvider locale={locale}>
       <main className="member-app"><header className="member-topbar"><strong>{entry === 'admin' ? adminTopbarTitle(entry, activeTab, adminItems, text.signIn) : memberTopbarTitle(activeTab, text)}</strong><div className="member-top-actions"><button type="button" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}>{locale === 'zh-CN' ? 'EN' : '中文'}</button><button type="button" onClick={() => void onLogout()}>{text.signOut}</button></div></header><div className="member-layout"><aside className="member-sidebar">
-      {entry === 'member' ? <MemberSidebarNavigation locale={locale} activeTab={activeTab} onSelect={setActiveTab} /> : <AdminSidebarNavigation items={adminItems} activeGroupId={activeAdminGroupId} groupTabs={adminGroupTabs} onSelect={setActiveTab} />}
+      {entry === 'member' ? <MemberSidebarNavigation locale={locale} activeTab={activeTab} onSelect={setActiveTab as (tab: MemberTab | AdminTab) => void} isAdmin={isAdmin} /> : <AdminSidebarNavigation items={adminItems} activeGroupId={activeAdminGroupId} groupTabs={adminGroupTabs} onSelect={setActiveTab} />}
     </aside><section className="member-content">{adminView ? <>
       {activeAdminGroup.tabs.length > 1 && <div className="member-admin-subnav" role="tablist" aria-label={activeAdminGroup.label}>{activeAdminGroup.tabs.map((item) => <button type="button" role="tab" aria-selected={activeTab === item.id} aria-pressed={activeTab === item.id} onClick={() => { setAdminGroupTabs((current) => ({ ...current, [activeAdminGroup.id]: item.id })); setActiveTab(item.id); }} key={item.id}>{item.label}</button>)}</div>}
       <AdminWorkspace tab={activeTab as AdminTab} locale={locale} isInitialAdmin={isInitialAdmin} />
-    </> : activeTab === 'personal' ? <MemberStorageWorkspace locale={locale} view="personal" /> : activeTab === 'team-folders' ? <MemberStorageWorkspace locale={locale} view="team-folders" /> : activeTab === 'collaborations' ? <MemberStorageWorkspace locale={locale} view="collaborations" /> : activeTab === 'shares' ? <MemberSharesPanel locale={locale} /> : activeTab === 'tokens' ? <MemberTokensPanel locale={locale} /> : activeTab === 'docs' ? <MemberDocsPanel locale={locale} /> : <MemberAccountPanel locale={locale} />}</section></div></main>
+    </> : activeTab === 'personal' ? <MemberStorageWorkspace locale={locale} view="personal" /> : activeTab === 'team-folders' ? <MemberStorageWorkspace locale={locale} view="team-folders" /> : activeTab === 'collaborations' ? <MemberStorageWorkspace locale={locale} view="collaborations" /> : activeTab === 'shares' ? <MemberSharesPanel locale={locale} /> : activeTab === 'tokens' ? <MemberTokensPanel locale={locale} /> : activeTab === 'docs' ? <MemberDocsPanel locale={locale} /> : activeTab === 'updates' ? (isAdmin ? <AdminUpdatesPanel locale={locale} /> : <MemberAccountPanel locale={locale} />) : <MemberAccountPanel locale={locale} />}</section></div></main>
     </RecentReauthProvider>
   </MemberDialogProvider>;
 }
