@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>迁移弹窗预览 — 百度网盘风格</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;background:#f0f2f5;color:#1d1d1f}
+  .demo-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:10}
+  .dialog{width:620px;max-height:85vh;background:#fff;border-radius:16px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+  .dialog-head{display:flex;align-items:center;padding:20px 24px 0;gap:8px}
+  .dialog-head h2{margin:0;font-size:18px;flex:1}
+  .dialog-head .close{width:32px;height:32px;border-radius:8px;border:0;background:transparent;cursor:pointer;font-size:18px;color:#86868b;display:flex;align-items:center;justify-content:center}
+  .dialog-head .close:hover{background:#f5f5f5}
+  .dialog-desc{padding:6px 24px 0;font-size:13px;color:#86868b}
+  .dialog-desc strong{color:#1d1d1f}
+  .breadcrumb-bar{display:flex;align-items:center;gap:4px;padding:14px 24px 0;font-size:13px;flex-wrap:wrap}
+  .breadcrumb-bar .bc{color:#2563eb;cursor:pointer;border:0;background:none;padding:0;font-size:13px}
+  .breadcrumb-bar .bc:hover{text-decoration:underline}
+  .breadcrumb-bar .sep{color:#c2c2c4;font-size:11px}
+  .breadcrumb-bar .cur{color:#1d1d1f;font-weight:600}
+  .breadcrumb-bar .count{margin-left:auto;color:#86868b;font-size:12px}
+  .folder-tree{flex:1;overflow:auto;margin:12px 0;padding:0 12px;min-height:200px;max-height:340px}
+  .ft-row{display:flex;align-items:center;gap:6px;padding:8px 12px;border-radius:10px;cursor:pointer;font-size:14px;transition:background .12s}
+  .ft-row:hover{background:#f5f8ff}
+  .ft-row.selected{background:#e8f0fe}
+  .ft-row .arrow{width:20px;height:20px;border:0;background:none;color:#b0b0b4;font-size:12px;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:4px;transition:transform .15s,background .12s;flex-shrink:0}
+  .ft-row .arrow:hover{background:#e5e5ea}
+  .ft-row .arrow.open{transform:rotate(90deg)}
+  .ft-row .arrow.empty{visibility:hidden}
+  .ft-row .fi{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+  .ft-row .fi.folder{background:#e8f0fe}
+  .ft-row .fi.file{background:#f5f5f5}
+  .ft-row .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ft-row .check{width:20px;height:20px;border-radius:50%;border:2px solid #d2d2d7;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:12px;color:#fff;transition:all .12s}
+  .ft-row.selected .check{background:#2563eb;border-color:#2563eb}
+  .ft-row.selected .check::after{content:"✓"}
+  .dialog-foot{display:flex;align-items:center;gap:10px;padding:16px 24px;border-top:1px solid #f0f0f0}
+  .btn{height:40px;border-radius:20px;font-size:14px;font-weight:500;cursor:pointer;border:0;padding:0 22px;transition:all .15s}
+  .btn-ghost{background:#f5f5f5;color:#1d1d1f;border:1px solid #e5e5ea}
+  .btn-ghost:hover{background:#ebebed}
+  .btn-primary{background:#2563eb;color:#fff}
+  .btn-primary:hover{background:#1d4ed8}
+  .btn-primary:disabled{background:#a3c4f3;cursor:not-allowed}
+  .btn-new{background:transparent;color:#2563eb;border:1px solid #2563eb}
+  .btn-new:hover{background:#f0f7ff}
+  .empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 0;color:#b0b0b4;font-size:13px}
+  .empty-state .icon{font-size:40px;margin-bottom:8px}
+  .section-title{padding:8px 24px 0;font-size:13px;color:#86868b}
+  /* 旧版对比 */
+  .compare{max-width:1300px;margin:20px auto;padding:0 20px;display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  .compare>div{border-radius:12px;border:1px solid #e5e5ea;overflow:hidden}
+  .compare h3{margin:0;padding:12px 16px;background:#fafafa;border-bottom:1px solid #e5e5ea;font-size:13px;color:#6e6e73}
+  .compare .old{border-color:#fde3e3}
+  .compare .old h3{background:#fff8f8;color:#d00}
+  .compare .new{border-color:#c7e8ff}
+  .compare .new h3{background:#f0f7ff;color:#2563eb}
+  .bar{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid #e5e5e7;padding:12px 20px;display:flex;gap:12px;align-items:center}
+  .bar b{font-size:14px}
+  .bar span{font-size:12px;color:#6e6e73}
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <b>迁移弹窗重构预览</b>
+  <span>仿百度网盘风格 · 树形文件夹浏览器 + 面包屑 + 新建文件夹</span>
+</div>
+
+<div class="compare">
+  <div class="old">
+    <h3>旧版 · 扁平列表</h3>
+    <div style="padding:20px;color:#6e6e73;font-size:12px">
+      <p>• 扁平文件夹列表，无层级感</p>
+      <p>• 面包屑用 "/" 分隔，不直观</p>
+      <p>• 没有新建文件夹入口</p>
+      <p>• "选择"按钮在每行右侧，操作分散</p>
+      <p>• 底部按钮灰色，无视觉引导</p>
+    </div>
+  </div>
+  <div class="new">
+    <h3>新版 · 百度网盘风格</h3>
+    <div style="padding:20px;color:#2563eb;font-size:12px">
+      <p>• 树形文件夹，可展开/折叠子目录</p>
+      <p>• 面包屑用 " > " 分隔，点击可跳转</p>
+      <p>• 左下角"新建文件夹"按钮</p>
+      <p>• 单击文件夹即可选择，蓝色圆圈打勾确认</p>
+      <p>• 右下角蓝色圆角"移动到此"按钮</p>
+      <p>• 文件夹计数 "共N个文件夹"</p>
+    </div>
+  </div>
+</div>
+
+<!-- 模拟弹窗 -->
+<div class="demo-bg">
+  <div class="dialog">
+    <div class="dialog-head">
+      <h2>文件移动到</h2>
+      <button class="close">×</button>
+    </div>
+    <div class="dialog-desc">选择目标文件夹，目标文件将保持原名称。<strong>1</strong></div>
+
+    <div class="breadcrumb-bar">
+      <button class="bc">全部文件</button>
+      <span class="sep">›</span>
+      <button class="bc">2024圆圆测试提升课</button>
+      <span class="sep">›</span>
+      <span class="cur">Airtest</span>
+      <span class="count">共24个文件夹</span>
+    </div>
+
+    <div class="folder-tree" id="tree">
+      <!-- 根目录 -->
+      <div class="ft-row" data-id="root" onclick="select(this)">
+        <button class="arrow open" onclick="event.stopPropagation();toggleChildren(this)">▶</button>
+        <div class="fi folder">📁</div>
+        <span class="name">我的文件</span>
+        <div class="check"></div>
+      </div>
+      <!-- 2024圆圆测试提升课 (子级，缩进) -->
+      <div class="ft-row" data-id="2024" data-parent="root" style="padding-left:36px" onclick="select(this)">
+        <button class="arrow open" onclick="event.stopPropagation();toggleChildren(this)">▶</button>
+        <div class="fi folder">📁</div>
+        <span class="name">2024圆圆测试提升课</span>
+        <div class="check">✓</div>
+      </div>
+      <div class="ft-row" data-id="app" data-parent="2024" style="padding-left:60px" onclick="select(this)">
+        <button class="arrow" onclick="event.stopPropagation();toggleChildren(this)">▶</button>
+        <div class="fi folder">📁</div>
+        <span class="name">APP性能测试-长风</span>
+        <div class="check"></div>
+      </div>
+      <div class="ft-row" data-id="airtest" data-parent="2024" style="padding-left:60px" onclick="select(this)">
+        <button class="arrow" onclick="event.stopPropagation();toggleChildren(this)">▶</button>
+        <div class="fi folder">📁</div>
+        <span class="name">Airtest</span>
+        <div class="check"></div>
+      </div>
+      <div class="ft-row" data-id="navicat" data-parent="2024" style="padding-left:60px" onclick="select(this)">
+        <button class="arrow empty">▶</button>
+        <div class="fi folder">📁</div>
+        <span class="name">Navicat Premium Mac 12.0.22</span>
+        <div class="check"></div>
+      </div>
+      <div class="ft-row" data-id="14days" data-parent="2024" style="padding-left:60px" onclick="select(this)">
+        <button class="arrow empty">▶</button>
+        <div class="fi folder">📁</div>
+        <span class="name">14天Airtest自动化测试小白课程</span>
+        <div class="check"></div>
+      </div>
+      <div class="ft-row" data-id="docs" onclick="select(this)">
+        <button class="arrow empty">▶</button>
+        <div class="fi folder">📁</div>
+        <span class="name">文档</span>
+        <div class="check"></div>
+      </div>
+      <div class="ft-row" data-id="projects" onclick="select(this)">
+        <button class="arrow" onclick="event.stopPropagation();toggleChildren(this)">▶</button>
+        <div class="fi folder">📁</div>
+        <span class="name">Projects</span>
+        <div class="check"></div>
+      </div>
+    </div>
+
+    <div class="dialog-foot">
+      <button class="btn btn-new">+ 新建文件夹</button>
+      <span style="flex:1"></span>
+      <button class="btn btn-ghost">取消</button>
+      <button class="btn btn-primary">移动到此</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function select(el){
+  document.querySelectorAll('.ft-row').forEach(r=>r.classList.remove('selected'));
+  el.classList.add('selected');
+  document.querySelector('.btn-primary').disabled=false;
+}
+function toggleChildren(btn){
+  btn.classList.toggle('open');
+  const row=btn.closest('.ft-row');
+  const id=row.dataset.id;
+  const children=document.querySelectorAll(`[data-parent="${id}"]`);
+  children.forEach(c=>c.style.display=c.style.display==='none'?'flex':'none');
+}
+</script>
+</body>
+</html>
