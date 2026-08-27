@@ -1,5 +1,7 @@
 # Omnora 成员网盘文件页设计
 
+> **资源模型说明：** 本文保留成员文件页的迁移前实现设计；其中 Space 导航、资源定位和权限字段已被[账号、挂载与内容授权设计](2026-08-08-account-mount-access-design.md)取代，不得作为目标业务契约。仍适用的通用 Web 约束以[Web 应用设计](../../design/web-application-design.md)为准。
+
 日期：2026-08-03
 
 ## 目标

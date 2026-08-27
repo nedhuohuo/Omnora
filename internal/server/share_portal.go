@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"omnora/internal/access"
 	"omnora/internal/files"
 	"omnora/internal/httpx"
 	"omnora/internal/share"
@@ -25,7 +26,7 @@ func (s *Server) requireShareSession(r *http.Request) (share.SessionPrincipal, e
 	if requestCarriesShareSecretInURL(r) {
 		return share.SessionPrincipal{}, &share.ExchangeError{Code: share.CodeShareUnavailable}
 	}
-	cookie, err := r.Cookie(shareSessionCookieName)
+	cookie, err := r.Cookie(s.cookieNames(r).ShareSession)
 	if err != nil || cookie.Value == "" {
 		return share.SessionPrincipal{}, &share.ExchangeError{Code: share.CodeShareUnavailable}
 	}
@@ -47,11 +48,8 @@ func (s *Server) shareCurrent(w http.ResponseWriter, r *http.Request) {
 		writeShareSessionError(w, r, err)
 		return
 	}
-	mount, err := loadMountForListing(r, s.sqlDB(), principal.SpaceID, principal.MountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
+	mount, err := s.loadShareMount(r, principal.MountID)
+	if err != nil {
 		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
 		return
 	}
@@ -84,11 +82,8 @@ func (s *Server) shareChildren(w http.ResponseWriter, r *http.Request) {
 		writeShareSessionError(w, r, err)
 		return
 	}
-	mount, err := loadMountForListing(r, s.sqlDB(), principal.SpaceID, principal.MountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
+	mount, err := s.loadShareMount(r, principal.MountID)
+	if err != nil {
 		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
 		return
 	}
@@ -118,11 +113,8 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "downloads are not allowed for this share")
 		return
 	}
-	mount, err := loadMountForListing(r, s.sqlDB(), principal.SpaceID, principal.MountID)
-	if writeMountLoadError(w, r, err) {
-		return
-	}
-	if err := s.verifyLoadedMountIdentity(r, mount); err != nil {
+	mount, err := s.loadShareMount(r, principal.MountID)
+	if err != nil {
 		httpx.WriteError(w, r, http.StatusConflict, "mount_identity_unverifiable", "mount identity could not be verified")
 		return
 	}
@@ -152,7 +144,9 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		disposition = "inline"
 	}
 	w.Header().Set("Content-Disposition", disposition+"; filename="+strconv.Quote(path.Base(fullPath)))
-	_ = s.recordAudit(r, "share_download", "share", principal.ShareID, "{}")
+	if !s.recordAuditMutation(w, r, "share_download", "share", principal.ShareID, "{}") {
+		return
+	}
 	http.ServeContent(w, r, path.Base(fullPath), metadata.ModTime, file)
 }
 
@@ -190,4 +184,16 @@ func shareRelativeDisplayPath(shareRoot, mountRelativePath string) string {
 		return "."
 	}
 	return trimmed
+}
+
+func (s *Server) loadShareMount(r *http.Request, mountID string) (access.AuthorizedMount, error) {
+	guard := access.NewGuard(s.sqlDB())
+	mount, err := guard.LoadMountIdentity(r.Context(), mountID)
+	if err != nil {
+		return access.AuthorizedMount{}, err
+	}
+	if err := guard.VerifyMountIdentity(r.Context(), mount); err != nil {
+		return access.AuthorizedMount{}, err
+	}
+	return mount, nil
 }

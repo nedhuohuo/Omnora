@@ -16,5 +16,5 @@ export default function App() {
   if (pathname === '/share' || pathname.startsWith('/share/')) {
     return <SharePortalApp />;
   }
-  return <RouteUnavailable title="页面不存在" detail="请返回成员文件空间。" />;
+  return <RouteUnavailable title="页面不存在" detail="请返回成员文件页面。" />;
 }

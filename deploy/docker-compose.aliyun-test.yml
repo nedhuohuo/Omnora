@@ -10,13 +10,16 @@ services:
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
       OMNORA_DEPLOY_ENV: aliyun-test
+      OMNORA_AUDIT_HMAC_KEY: "${OMNORA_AUDIT_HMAC_KEY:-}"
+      OMNORA_MCP_ALLOWED_HOSTS: "${OMNORA_MCP_ALLOWED_HOSTS:-}"
+      OMNORA_MCP_ALLOWED_ORIGINS: "${OMNORA_MCP_ALLOWED_ORIGINS:-}"
+      OMNORA_MCP_MAX_BODY_BYTES: "${OMNORA_MCP_MAX_BODY_BYTES:-1048576}"
       OMNORA_ROUTE_SHARE_ENABLED: "${OMNORA_ROUTE_SHARE_ENABLED:-false}"
       OMNORA_ROUTE_MCP_ENABLED: "${OMNORA_ROUTE_MCP_ENABLED:-false}"
     volumes:
       - ./aliyun-test/config:/etc/omnora
       - ./aliyun-test/data:/var/lib/omnora
-      - ./aliyun-test/managed:/srv/omnora/managed
-      # Aliyun test intentionally mounts external dirs read-write so folder create
-      # and upload can be exercised. Production should keep external mounts :ro
-      # unless write access is deliberately required.
-      - ./aliyun-test/mounts:/mnt/omnora
+      - ./aliyun-test/managed:/srv/omnora/managed:rw
+      # Keep the predeclared root writable; Omnora applies the selected mount
+      # mode when the administrator registers each child directory.
+      - ./aliyun-test/mounts:/mnt/omnora:rw

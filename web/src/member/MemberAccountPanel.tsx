@@ -8,6 +8,7 @@ import {
   disableTOTP,
   getAccount,
   getPreferences,
+  isReauthenticationCanceled,
   listSessions,
   setupTOTP,
   type ThemePreference,
@@ -15,8 +16,11 @@ import {
   updatePreferences,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
+import { useRecentReauth } from './RecentReauthProvider';
+import { applyThemePreference } from './theme';
 
 function describeError(error: unknown) {
+  if (isReauthenticationCanceled(error)) return '';
   if (error instanceof ApiError) {
     const body = error.body as { error?: { message?: string; code?: string } } | undefined;
     const message = body?.error?.message?.trim();
@@ -33,30 +37,9 @@ function formatDate(value: string | undefined, locale: MemberLocale) {
   return Number.isNaN(date.valueOf()) ? '--' : new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
 
-const systemDarkQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
-let currentTheme: ThemePreference = 'system';
-
-function resolveTheme(theme: ThemePreference): 'light' | 'dark' {
-  if (theme === 'system') {
-    return systemDarkQuery?.matches ? 'dark' : 'light';
-  }
-  return theme;
-}
-
-function applyTheme() {
-  document.documentElement.setAttribute('data-theme', resolveTheme(currentTheme));
-}
-
-// Re-resolve a "system" preference when the OS color scheme changes.
-systemDarkQuery?.addEventListener?.('change', applyTheme);
-
-export function applyThemePreference(theme: ThemePreference) {
-  currentTheme = theme;
-  applyTheme();
-}
-
 export default function MemberAccountPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [account, setAccount] = useState<AccountPayload | null>(null);
   const [sessions, setSessions] = useState<AccountSessionPayload[]>([]);
   const [theme, setTheme] = useState<ThemePreference>('system');
@@ -64,7 +47,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '', revokeTokens: false, revokeShares: false });
+  const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '', totpCode: '', revokeTokens: false, revokeShares: false });
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [passwordError, setPasswordError] = useState('');
 
@@ -113,10 +96,11 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
       await updateAccountPassword({
         currentPassword: passwordForm.current,
         newPassword: passwordForm.next,
+        totpCode: passwordForm.totpCode.trim() || undefined,
         revokeTokens: passwordForm.revokeTokens,
         revokeShares: passwordForm.revokeShares,
       });
-      setPasswordForm({ current: '', next: '', confirm: '', revokeTokens: false, revokeShares: false });
+      setPasswordForm({ current: '', next: '', confirm: '', totpCode: '', revokeTokens: false, revokeShares: false });
       setNotice(text.accountPasswordUpdated);
       await load();
     } catch (caught) {
@@ -130,7 +114,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
     setTotpError('');
     setTotpBusy(true);
     try {
-      const response = await setupTOTP();
+      const response = await runSensitive(() => setupTOTP());
       setTotpSetup({ secret: response.secret ?? '', otpauthUri: response.otpauthUri });
     } catch (caught) {
       setTotpError(describeError(caught));
@@ -144,7 +128,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
     setTotpBusy(true);
     setTotpError('');
     try {
-      await confirmTOTP(totpCode.trim());
+      await runSensitive(() => confirmTOTP(totpCode.trim()));
       setTotpSetup(null);
       setTotpCode('');
       await load();
@@ -160,7 +144,7 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
     setTotpBusy(true);
     setTotpError('');
     try {
-      await disableTOTP(disablePassword, disableCode.trim());
+      await runSensitive(() => disableTOTP(disablePassword, disableCode.trim()));
       setDisableOpen(false);
       setDisablePassword('');
       setDisableCode('');
@@ -214,10 +198,12 @@ export default function MemberAccountPanel({ locale }: { locale: MemberLocale })
 
       <section className="member-account-section">
         <h2>{text.accountPasswordSection}</h2>
+        {account?.passwordResetRecommended && <p className="member-readonly">{text.accountPasswordRecommended}</p>}
         <form className="member-admin-form" onSubmit={onChangePassword}>
           <label>{text.accountCurrentPassword}<input type="password" value={passwordForm.current} onChange={(event) => setPasswordForm({ ...passwordForm, current: event.target.value })} autoComplete="current-password" required /></label>
           <label>{text.accountNewPassword}<input type="password" value={passwordForm.next} onChange={(event) => setPasswordForm({ ...passwordForm, next: event.target.value })} autoComplete="new-password" required /></label>
           <label>{text.accountConfirmPassword}<input type="password" value={passwordForm.confirm} onChange={(event) => setPasswordForm({ ...passwordForm, confirm: event.target.value })} autoComplete="new-password" required /></label>
+          {account?.totpEnabled && <label>{text.accountTotpCode}<input type="text" value={passwordForm.totpCode} onChange={(event) => setPasswordForm({ ...passwordForm, totpCode: event.target.value })} inputMode="numeric" autoComplete="one-time-code" required /></label>}
           <label className="member-admin-checkbox"><input type="checkbox" checked={passwordForm.revokeTokens} onChange={(event) => setPasswordForm({ ...passwordForm, revokeTokens: event.target.checked })} />{text.accountRevokeTokens}</label>
           <label className="member-admin-checkbox"><input type="checkbox" checked={passwordForm.revokeShares} onChange={(event) => setPasswordForm({ ...passwordForm, revokeShares: event.target.checked })} />{text.accountRevokeShares}</label>
           {passwordError && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {passwordError}</div>}

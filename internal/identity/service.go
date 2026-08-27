@@ -8,19 +8,22 @@ import (
 	"time"
 
 	"omnora/internal/domain"
+	"omnora/internal/personalstorage"
 )
 
 const timestampLayout = time.RFC3339Nano
 
 type Service struct {
-	db     *sql.DB
-	clock  func() time.Time
-	hasher PasswordHasher
+	db              *sql.DB
+	clock           func() time.Time
+	hasher          PasswordHasher
+	personalStorage *personalstorage.Service
 }
 
 type Options struct {
 	Clock              func() time.Time
 	PasswordIterations int
+	ManagedDir         string
 }
 
 func New(db *sql.DB, opts Options) *Service {
@@ -29,9 +32,10 @@ func New(db *sql.DB, opts Options) *Service {
 		clock = time.Now
 	}
 	return &Service{
-		db:     db,
-		clock:  clock,
-		hasher: PasswordHasher{Iterations: opts.PasswordIterations},
+		db:              db,
+		clock:           clock,
+		hasher:          PasswordHasher{Iterations: opts.PasswordIterations},
+		personalStorage: personalstorage.New(db, opts.ManagedDir),
 	}
 }
 
@@ -94,19 +98,26 @@ WHERE identity_initialization.consumed_at IS NULL
 	return InitializationSecret{Token: token, TokenHash: tokenHash, ExpiresAt: expiresAt}, nil
 }
 
-func (s *Service) Initialize(ctx context.Context, req InitializationRequest) (AccountWithPersonalSpace, error) {
+func (s *Service) Initialize(ctx context.Context, req InitializationRequest) (AccountWithPersonalDirectory, error) {
+	return s.InitializeSecure(ctx, req, nil)
+}
+
+func (s *Service) InitializeSecure(ctx context.Context, req InitializationRequest, auditWriter AccountAuditWriter) (AccountWithPersonalDirectory, error) {
+	if _, err := s.personalStorage.EnsureDefaultMount(ctx); err != nil {
+		return AccountWithPersonalDirectory{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	defer tx.Rollback()
 
 	var accountCount int
 	if err := tx.QueryRowContext(ctx, "SELECT COUNT(1) FROM accounts WHERE status <> 'deleted'").Scan(&accountCount); err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	if accountCount != 0 {
-		return AccountWithPersonalSpace{}, ErrAlreadyInitialized
+		return AccountWithPersonalDirectory{}, ErrAlreadyInitialized
 	}
 
 	var tokenHash, expiresAtText string
@@ -117,18 +128,18 @@ FROM identity_initialization
 WHERE id = 1
 `).Scan(&tokenHash, &expiresAtText, &consumedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return AccountWithPersonalSpace{}, ErrInitializationUnavailable
+		return AccountWithPersonalDirectory{}, ErrInitializationUnavailable
 	}
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	expiresAt, err := parseTime(expiresAtText)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	now := s.now()
 	if consumedAt.Valid || !now.Before(expiresAt) || !secretMatches(req.Token, tokenHash) {
-		return AccountWithPersonalSpace{}, ErrInvalidCredential
+		return AccountWithPersonalDirectory{}, ErrInvalidCredential
 	}
 
 	result, err := tx.ExecContext(ctx, `
@@ -138,44 +149,69 @@ WHERE id = 1
   AND consumed_at IS NULL
 `, formatTime(now))
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	if rows != 1 {
-		return AccountWithPersonalSpace{}, ErrInitializationUnavailable
+		return AccountWithPersonalDirectory{}, ErrInitializationUnavailable
 	}
 
-	created, err := s.createAccountTx(ctx, tx, CreateAccountRequest{
+	prepared, err := s.createAccountTx(ctx, tx, CreateAccountRequest{
 		Email:       req.Email,
 		DisplayName: req.DisplayName,
 		Password:    req.Password,
 		Role:        domain.AccountRoleAdmin,
 	})
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
+	}
+	created := prepared.result
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx, created); err != nil {
+			prepared.cleanup()
+			return AccountWithPersonalDirectory{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return AccountWithPersonalSpace{}, err
+		prepared.cleanup()
+		return AccountWithPersonalDirectory{}, err
 	}
 	return created, nil
 }
 
-func (s *Service) CreateAccount(ctx context.Context, req CreateAccountRequest) (AccountWithPersonalSpace, error) {
+func (s *Service) CreateAccount(ctx context.Context, req CreateAccountRequest) (AccountWithPersonalDirectory, error) {
+	return s.CreateAccountSecure(ctx, req, nil)
+}
+
+// CreateAccountSecure creates the account and personal directory and optionally
+// records its success audit event before committing the same transaction.
+func (s *Service) CreateAccountSecure(ctx context.Context, req CreateAccountRequest, auditWriter AccountAuditWriter) (AccountWithPersonalDirectory, error) {
+	if _, err := s.personalStorage.EnsureDefaultMount(ctx); err != nil {
+		return AccountWithPersonalDirectory{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
 	}
 	defer tx.Rollback()
 
-	created, err := s.createAccountTx(ctx, tx, req)
+	prepared, err := s.createAccountTx(ctx, tx, req)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return AccountWithPersonalDirectory{}, err
+	}
+	created := prepared.result
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx, created); err != nil {
+			prepared.cleanup()
+			return AccountWithPersonalDirectory{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return AccountWithPersonalSpace{}, err
+		prepared.cleanup()
+		return AccountWithPersonalDirectory{}, err
 	}
 	return created, nil
 }
@@ -189,11 +225,12 @@ func (s *Service) CreateSession(ctx context.Context, req SessionRequest) (Sessio
 	}
 
 	var active int
+	var role string
 	if err := s.db.QueryRowContext(ctx, `
-SELECT COUNT(1)
+SELECT COUNT(1), COALESCE(MAX(role), '')
 FROM accounts
 WHERE id = ? AND status = 'active'
-`, req.AccountID).Scan(&active); err != nil {
+`, req.AccountID).Scan(&active, &role); err != nil {
 		return SessionToken{}, err
 	}
 	if active != 1 {
@@ -213,18 +250,35 @@ WHERE id = ? AND status = 'active'
 	if entry == "" {
 		entry = DefaultSessionEntry
 	}
+	purpose := req.Purpose
+	if !purpose.Valid() {
+		return SessionToken{}, fieldError("purpose", "is invalid")
+	}
+	if purpose == SessionPurposeTOTPEnrollment && role != "admin" {
+		return SessionToken{}, fieldError("purpose", "totp enrollment is restricted to administrators")
+	}
+	var credentialGeneration int64
+	if err := s.db.QueryRowContext(ctx, `
+SELECT CAST(value AS INTEGER)
+FROM system_state
+WHERE key = 'credential_generation'
+`).Scan(&credentialGeneration); err != nil {
+		return SessionToken{}, err
+	}
 	session := Session{
-		ID:        sessionID,
-		AccountID: req.AccountID,
-		TokenHash: hashSecret(token),
-		Entry:     entry,
-		CreatedAt: now,
-		ExpiresAt: now.Add(req.TTL),
+		ID:                   sessionID,
+		AccountID:            req.AccountID,
+		TokenHash:            hashSecret(token),
+		Entry:                entry,
+		Purpose:              purpose,
+		CredentialGeneration: credentialGeneration,
+		CreatedAt:            now,
+		ExpiresAt:            now.Add(req.TTL),
 	}
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO identity_sessions (id, account_id, token_hash, entry, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?)
-`, session.ID, session.AccountID, session.TokenHash, session.Entry, formatTime(session.CreatedAt), formatTime(session.ExpiresAt))
+INSERT INTO identity_sessions (id, account_id, token_hash, entry, purpose, credential_generation, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, session.ID, session.AccountID, session.TokenHash, session.Entry, session.Purpose, session.CredentialGeneration, formatTime(session.CreatedAt), formatTime(session.ExpiresAt))
 	if err != nil {
 		return SessionToken{}, err
 	}
@@ -239,8 +293,12 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Acc
 
 	var account Account
 	var createdAt, updatedAt string
+	var totpRequired, passwordResetRequired, totpResetRequired int
+	var totpConfirmedAt sql.NullString
 	err = s.db.QueryRowContext(ctx, `
-SELECT id, email, display_name, role, status, password_hash, created_at, updated_at
+SELECT id, email, display_name, role, status, password_hash,
+       totp_required, totp_confirmed_at, password_reset_required, totp_reset_required,
+       created_at, updated_at
 FROM accounts
 WHERE email = ? AND status = 'active'
 `, normalizedEmail).Scan(
@@ -250,6 +308,10 @@ WHERE email = ? AND status = 'active'
 		&account.Role,
 		&account.Status,
 		&account.PasswordHash,
+		&totpRequired,
+		&totpConfirmedAt,
+		&passwordResetRequired,
+		&totpResetRequired,
 		&createdAt,
 		&updatedAt,
 	)
@@ -258,6 +320,15 @@ WHERE email = ? AND status = 'active'
 	}
 	if err != nil {
 		return Account{}, err
+	}
+	account.TOTPRequired = totpRequired == 1
+	account.PasswordResetRequired = passwordResetRequired == 1
+	account.TOTPResetRequired = totpResetRequired == 1
+	if totpConfirmedAt.Valid {
+		account.TOTPConfirmedAt, err = parseTime(totpConfirmedAt.String)
+		if err != nil {
+			return Account{}, err
+		}
 	}
 	if !s.hasher.Verify(password, account.PasswordHash) {
 		return Account{}, ErrInvalidCredential
@@ -282,22 +353,31 @@ func (s *Service) VerifySession(ctx context.Context, token string) (Session, err
 
 	var session Session
 	var createdAt, expiresAt string
-	var lastUsedAt, revokedAt sql.NullString
+	var lastUsedAt, reauthenticatedAt, revokedAt sql.NullString
+	var purpose string
+	var credentialGeneration int64
 	err := s.db.QueryRowContext(ctx, `
-SELECT s.id, s.account_id, s.token_hash, s.entry, s.created_at, s.expires_at, s.last_used_at, s.revoked_at
+SELECT s.id, s.account_id, s.token_hash, s.entry, s.purpose, s.credential_generation,
+       s.created_at, s.expires_at, s.last_used_at, s.reauthenticated_at, s.revoked_at
 FROM identity_sessions s
 JOIN accounts a ON a.id = s.account_id
 WHERE s.token_hash = ?
   AND s.revoked_at IS NULL
+  AND s.expires_at > ?
   AND a.status = 'active'
-`, tokenHash).Scan(
+  AND s.purpose IN ('full', 'totp_enrollment')
+  AND s.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
+	`, tokenHash, formatTime(now)).Scan(
 		&session.ID,
 		&session.AccountID,
 		&session.TokenHash,
 		&session.Entry,
+		&purpose,
+		&credentialGeneration,
 		&createdAt,
 		&expiresAt,
 		&lastUsedAt,
+		&reauthenticatedAt,
 		&revokedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -306,6 +386,8 @@ WHERE s.token_hash = ?
 	if err != nil {
 		return Session{}, err
 	}
+	session.Purpose = SessionPurpose(purpose)
+	session.CredentialGeneration = credentialGeneration
 	session.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
 		return Session{}, err
@@ -323,6 +405,12 @@ WHERE s.token_hash = ?
 			return Session{}, err
 		}
 	}
+	if reauthenticatedAt.Valid {
+		session.ReauthenticatedAt, err = parseTime(reauthenticatedAt.String)
+		if err != nil {
+			return Session{}, err
+		}
+	}
 	if revokedAt.Valid {
 		session.RevokedAt, err = parseTime(revokedAt.String)
 		if err != nil {
@@ -333,8 +421,8 @@ WHERE s.token_hash = ?
 	if _, err := s.db.ExecContext(ctx, `
 UPDATE identity_sessions
 SET last_used_at = ?
-WHERE id = ? AND revoked_at IS NULL
-`, formatTime(now), session.ID); err != nil {
+WHERE id = ? AND revoked_at IS NULL AND expires_at > ?
+`, formatTime(now), session.ID, formatTime(now)); err != nil {
 		return Session{}, err
 	}
 	session.LastUsedAt = now
@@ -357,31 +445,36 @@ func (s *Service) VerifyPassword(password, encodedHash string) bool {
 	return s.hasher.Verify(password, encodedHash)
 }
 
-func (s *Service) createAccountTx(ctx context.Context, tx *sql.Tx, req CreateAccountRequest) (AccountWithPersonalSpace, error) {
+type preparedAccount struct {
+	result  AccountWithPersonalDirectory
+	cleanup func()
+}
+
+func (s *Service) createAccountTx(ctx context.Context, tx *sql.Tx, req CreateAccountRequest) (preparedAccount, error) {
 	email, err := normalizeEmail(req.Email)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 	displayName, err := normalizeDisplayName(req.DisplayName)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 	if err := validatePassword(req.Password); err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 	role, err := normalizeRole(req.Role)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 	passwordHash, err := s.hasher.Hash(req.Password)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 
 	now := s.now()
 	accountID, err := newID("acct")
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
 	account := Account{
 		ID:           accountID,
@@ -399,40 +492,23 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `, account.ID, account.Email, account.DisplayName, account.Role, account.Status, account.PasswordHash, formatTime(now), formatTime(now))
 	if err != nil {
 		if isUniqueViolation(err) {
-			return AccountWithPersonalSpace{}, ErrAccountExists
+			return preparedAccount{}, ErrAccountExists
 		}
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
-
-	spaceID, err := newID("spc")
+	directory, cleanup, err := s.personalStorage.ProvisionAccount(ctx, tx, account.ID)
 	if err != nil {
-		return AccountWithPersonalSpace{}, err
+		return preparedAccount{}, err
 	}
-	space := Space{
-		ID:             spaceID,
-		Kind:           "personal",
-		Name:           displayName + "'s space",
-		OwnerAccountID: account.ID,
-		Status:         "active",
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO spaces (id, kind, name, owner_account_id, status, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-`, space.ID, space.Kind, space.Name, space.OwnerAccountID, space.Status, formatTime(now), formatTime(now))
-	if err != nil {
-		return AccountWithPersonalSpace{}, err
-	}
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO space_members (space_id, account_id, permission, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?)
-`, space.ID, account.ID, domain.SpacePermissionManager, formatTime(now), formatTime(now))
-	if err != nil {
-		return AccountWithPersonalSpace{}, err
-	}
-
-	return AccountWithPersonalSpace{Account: account, PersonalSpace: space}, nil
+	return preparedAccount{
+		result: AccountWithPersonalDirectory{
+			Account: account,
+			PersonalDirectory: PersonalDirectory{
+				AccountID: directory.AccountID, RelativePath: directory.RelativePath, State: directory.State,
+			},
+		},
+		cleanup: cleanup,
+	}, nil
 }
 
 func (s *Service) now() time.Time {

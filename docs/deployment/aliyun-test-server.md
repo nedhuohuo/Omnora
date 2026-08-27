@@ -43,7 +43,11 @@ Matching env values on the host (`deploy/aliyun-test.env`):
 
 ```text
 OMNORA_BIND=0.0.0.0
+OMNORA_PUBLIC_URL=http://120.26.88.7:8080
+OMNORA_ALLOW_INSECURE_PUBLIC_HTTP=true
 ```
+
+`OMNORA_PUBLIC_URL` can be set after the first boot once the public address is known. Until it is set, the container still starts and serves `/healthz` / `/readyz`, but business routes stay closed (`public_url_required`). Non-loopback `http://` origins also need `OMNORA_ALLOW_INSECURE_PUBLIC_HTTP=true` (disposable QA only). Prefer a TLS reverse proxy and HTTPS public URL when possible.
 
 This is a disposable test-box choice, not a production security model. The checked-in QA env example sets `OMNORA_ROUTE_SHARE_ENABLED=true` so public share-link flows can be exercised; keep `OMNORA_ROUTE_MCP_ENABLED=false` unless a specific MCP test requires it. `OMNORA_DEPLOY_ENV=aliyun-test` is an environment label, not a security boundary. The actual boundary remains the Docker bind address, route-group switches, Aliyun security group, host firewall, and any reverse-proxy policy.
 
@@ -68,12 +72,53 @@ mkdir -p deploy/aliyun-test/{config,data,managed,mounts}
 sudo chown -R 1000:1000 deploy/aliyun-test
 ```
 
-Edit `deploy/aliyun-test.env` on the server and set fresh values for:
+Edit `deploy/aliyun-test.env` on the server if you want to provide explicit values for:
 
 ```text
 OMNORA_INITIALIZATION_TOKEN
 OMNORA_TOTP_ENCRYPTION_KEY
 ```
+
+Both values may be left blank on a new test deployment. The container entrypoint
+generates them and persists them in `aliyun-test/config/runtime.env`; preserve
+that file when recreating the container. The recommended retrieval method is to
+read that protected file only on the server:
+
+```bash
+sed -n 's/^OMNORA_INITIALIZATION_TOKEN=//p' aliyun-test/config/runtime.env
+# Or, while the container is running:
+docker exec omnora-aliyun-test sh -c \
+  'sed -n "s/^OMNORA_INITIALIZATION_TOKEN=//p" /etc/omnora/runtime.env'
+```
+
+If the deployment console cannot read the protected file, explicitly set this
+high-risk compatibility switch in `aliyun-test.env` before recreating the
+container:
+
+```text
+OMNORA_LOG_INITIALIZATION_TOKEN=true
+```
+
+只有 `OMNORA_LOG_INITIALIZATION_TOKEN=true` 且数据库确认尚未初始化时，
+the backend writes the complete token once per startup to the WARN log field
+`initialization_token`. The default must remain `false`. A missing database,
+empty token, failed initialization check, or initialized database never logs the
+token. TOTP encryption and audit HMAC keys are never logged under any setting.
+
+The full token will remain in Docker log storage, rotated logs, and any external
+log collector. After first setup, restore the setting to `false`, recreate the
+container, and remove retained token-bearing logs according to the log system's
+retention policy. This opt-in does not change `runtime.env` persistence or
+permissions.
+
+It writes matching instance markers to
+`aliyun-test/config/.omnora-instance-id`, `aliyun-test/data/.omnora-instance-id`,
+and `aliyun-test/managed/.omnora-instance-id`. When config and data markers
+match but the managed directory is empty, the entrypoint safely creates the
+managed marker during startup. A non-empty managed directory without its
+matching marker is rejected so an unrelated personal-storage directory cannot
+be silently adopted. When restoring an existing data directory, keep using the
+original TOTP encryption key.
 
 Start the test server (this host uses Docker Compose 1.29.2, so prefer `docker-compose`):
 
@@ -112,20 +157,50 @@ docker-compose --env-file aliyun-test.env -f docker-compose.yml -f docker-compos
 
 | Container path | Host path | Purpose |
 | --- | --- | --- |
-| `/srv/omnora/managed` | `deploy/aliyun-test/managed` | Managed mounts (always read-write in the container) |
+| `/srv/omnora/managed` | `deploy/aliyun-test/managed` | Reserved single `personal_default` mount, per-account personal directories, and personal trash |
 | `/mnt/omnora` | `deploy/aliyun-test/mounts` | Predeclared external mount root (read-write on this test box) |
 
-Register external mounts under `/mnt/omnora/...`, or managed mounts under `/srv/omnora/managed/...`. Do not point mounts at `/srv/omnora/data` or other paths that are not bind-mounted into the container.
+Register external common mounts only under `/mnt/omnora/...`. Never register `/srv/omnora/managed` or one of its account directories as a common mount; it is system-managed personal storage. Do not point mounts at `/srv/omnora/data` or other paths that are not bind-mounted into the container.
+
+### Slot mounts (recommended NAS layout)
+
+The recommended external-mount layout binds each NAS folder to its own slot
+(independent mount point) under `/mnt/omnora` instead of mounting the whole
+predeclared root. The full design rationale, registration flow, and
+troubleshooting checklist live in [mount-slots.md](mount-slots.md):
+
+```yaml
+volumes:
+  - /volume1/photo:/mnt/omnora/slot1:rw
+  - /volume1/music:/mnt/omnora/slot2:rw
+  # Leave unbound slots out of the volumes list entirely; do not add an empty
+  # default source for them.
+```
+
+Omnora exposes a slot in the host-directory suggestions only when it has its
+own mount-table entry (an independent bind mount): unbound slots stay hidden
+even when an empty directory exists at the path, and bound empty folders are
+shown. Remove the whole-root bind (`./mounts:/mnt/omnora:rw`) when adopting
+this layout — with the whole root bound, slots are not independent mount
+points and are never treated as bound.
+
+Under the 2026-08-08 account-mount target model, registering a mount uses the
+selected slot or deeper directory itself as the mount root. Omnora must not
+create a per-space or other implicit business subdirectory. Each common mount
+has its own account grants, and overlapping parent/child roots remain invalid.
+The current runtime follows this account-mount behavior; see [mount-slots.md](mount-slots.md).
 
 Effective write access is still `Docker volume mode ∩ Omnora mount mode`. If you later switch the Compose bind back to `:ro`, existing `read_write` mounts will fail create/upload until the volume is remounted read-write.
 
 For reinstall or container recreation tests, keep `deploy/aliyun-test/config`,
 `deploy/aliyun-test/data`, `deploy/aliyun-test/managed`, and
 `deploy/aliyun-test/mounts` in place and mount them back to the same container
-paths. Existing files under registered managed and external mounts must remain
-browsable and downloadable without re-registering the mount. If a directory is
+paths. Existing files in account “My Files” and registered external common mounts must remain
+browsable and downloadable without replacing personal-directory mappings or re-registering the external mount. If a directory is
 replaced or mounted to a different container path, Omnora should mark that mount
-unavailable until an administrator confirms and re-verifies the intended source.
+unavailable until a governing administrator confirms and re-verifies the intended source.
+Any administrator may handle a normal mount; restricted and default personal
+mounts require the initial administrator.
 
 ## Guardrails
 

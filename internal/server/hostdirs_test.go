@@ -27,6 +27,16 @@ func TestAdminHostDirectorySuggestionsStayInsideConfiguredRoots(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(external, "readme.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(nested, "photo.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write nested file: %v", err)
+	}
+	// Test directories are not bind mounts, so every external slot stays
+	// hidden regardless of content; the bind detection itself is covered by
+	// the mountid package tests.
+	emptySlot := filepath.Join(external, "empty-slot")
+	if err := os.Mkdir(emptySlot, 0o755); err != nil {
+		t.Fatalf("mkdir empty slot: %v", err)
+	}
 
 	handler := New(config.Config{
 		Routes:            map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
@@ -61,11 +71,20 @@ func TestAdminHostDirectorySuggestionsStayInsideConfiguredRoots(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if len(payload.Roots) != 2 {
+		if len(payload.Roots) != 1 {
 			t.Fatalf("roots = %#v", payload.Roots)
 		}
-		if !containsHostPath(payload.Entries, managed) || !containsHostPath(payload.Entries, external) {
+		if got := hostDirectoryRootKind(payload.RootDetails, managed); got != "" {
+			t.Fatalf("managed root kind = %q, want hidden; details = %#v", got, payload.RootDetails)
+		}
+		if got := hostDirectoryRootKind(payload.RootDetails, external); got != "external" {
+			t.Fatalf("external root kind = %q, want external; details = %#v", got, payload.RootDetails)
+		}
+		if !containsHostPath(payload.Entries, external) || containsHostPath(payload.Entries, managed) {
 			t.Fatalf("entries = %#v", payload.Entries)
+		}
+		if got := hostDirectoryEntryKind(payload.Entries, external); got != "external" {
+			t.Fatalf("external entry kind = %q, want external; entries = %#v", got, payload.Entries)
 		}
 		if containsHostPath(payload.Entries, outside) {
 			t.Fatalf("outside path leaked: %#v", payload.Entries)
@@ -84,8 +103,11 @@ func TestAdminHostDirectorySuggestionsStayInsideConfiguredRoots(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if !containsHostPath(payload.Entries, nested) {
-			t.Fatalf("entries = %#v, want %s", payload.Entries, nested)
+		if containsHostPath(payload.Entries, nested) {
+			t.Fatalf("external slot without a bind mount must not be suggested: %#v", payload.Entries)
+		}
+		if containsHostPath(payload.Entries, emptySlot) {
+			t.Fatalf("external slot without a bind mount must not be suggested: %#v", payload.Entries)
 		}
 	})
 
@@ -114,6 +136,63 @@ func containsHostPath(entries []hostDirectoryEntry, path string) bool {
 		}
 	}
 	return false
+}
+
+func hostDirectoryRootKind(roots []hostDirectoryRoot, path string) string {
+	for _, root := range roots {
+		if root.Path == path {
+			return root.Kind
+		}
+	}
+	return ""
+}
+
+func hostDirectoryEntryKind(entries []hostDirectoryEntry, path string) string {
+	for _, entry := range entries {
+		if entry.Path == path {
+			return entry.Kind
+		}
+	}
+	return ""
+}
+
+func TestAdminHostDirectorySuggestionsExcludeManagedPersonalRoot(t *testing.T) {
+	db, _ := newAPITestServer(t)
+	admin, _ := createAPITestAccounts(t, db)
+	workspace, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(workspace, ".managed-personal-root")
+	external := filepath.Join(workspace, ".external-common-root")
+	for _, root := range []string{managed, external} {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(root) })
+	}
+	handler := New(config.Config{
+		Storage:           config.StorageConfig{ManagedDir: managed, PredeclaredMountRoot: external},
+		Routes:            map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+		RouteEnvOverrides: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+	}, db)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/host-directories?path=/", nil)
+	req.AddCookie(issueAPITestSession(t, db, admin.ID))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload hostDirectorySuggestions
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if containsHostPath(payload.Entries, managed) || hostDirectoryRootKind(payload.RootDetails, managed) != "" {
+		t.Fatalf("managed personal root leaked: %#v", payload)
+	}
+	if hostDirectoryRootKind(payload.RootDetails, external) != "external" {
+		t.Fatalf("external root missing: %#v", payload.RootDetails)
+	}
 }
 
 func TestProbeMountWritableRejectsReadOnlyRoot(t *testing.T) {

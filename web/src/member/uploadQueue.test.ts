@@ -3,9 +3,10 @@ import { describe, expect, it } from 'vitest';
 import { resumedUploadProgress, uploadStorageKey } from './uploadQueue';
 
 describe('member upload queue', () => {
-  it('keys resumable uploads by the selected file identity and destination', () => {
+  it('keys resumable uploads by the content source and destination', () => {
     const file = { name: 'report.pdf', size: 100, lastModified: 42 };
-    expect(uploadStorageKey('space-1', 'mount-1', 'docs', file)).toContain('space-1.mount-1.docs.report.pdf.100.42');
+    expect(uploadStorageKey('common_mount:mount-1', 'docs', file)).toContain('common_mount:mount-1.docs.report.pdf.100.42');
+    expect(uploadStorageKey('common_mount:mount-1', 'docs', file)).not.toContain('space-1');
   });
 
   it('starts a resumed upload at the persisted part progress', () => {

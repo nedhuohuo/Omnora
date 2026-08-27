@@ -2,16 +2,13 @@ import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import {
   type AdminOverviewPayload,
   type AdminRouteGroupItem,
-  type AdminSpaceMemberPayload,
-  type AdminSpacePayload,
   type AdminUserPayload,
   type AiTokenListItem,
   ApiError,
   type BackupPayload,
   type SharePayload,
-  type SpaceMemberRole,
+  isReauthenticationCanceled,
   createAdminBackup,
-  createAdminSpace,
   createAdminUser,
   deleteAdminAiToken,
   disableAdminUser,
@@ -20,21 +17,19 @@ import {
   listAdminAiTokens,
   listAdminBackups,
   listAdminShares,
-  listAdminSpaces,
   listAdminUsers,
-  listSpaceMembers,
-  putSpaceMember,
-  removeSpaceMember,
   restoreAdminBackup,
   revokeAdminShare,
   revokeAdminUserSessions,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
+import { useRecentReauth } from './RecentReauthProvider';
 import { joinReadableLabels, readableLabel } from './displayLabels';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
 function describeError(error: unknown) {
+  if (isReauthenticationCanceled(error)) return '';
   if (error instanceof ApiError) {
     const body = error.body as { error?: { message?: string; code?: string } } | undefined;
     const message = body?.error?.message?.trim();
@@ -61,7 +56,7 @@ function shareStatusLabel(status: string | undefined, text: LocaleText) {
 }
 
 function shareLocationLabel(share: SharePayload) {
-  return joinReadableLabels([share.spaceName, share.mountName]);
+  return joinReadableLabels([share.source === 'personal' ? 'Personal files' : '', share.mountName]);
 }
 
 function shareCreatorLabel(share: SharePayload, text: LocaleText) {
@@ -98,15 +93,6 @@ function backupCreatorLabel(backup: BackupPayload) {
   return {
     primary: label || displayName || email || '--',
     secondary: email && email !== label && email !== displayName ? email : '',
-  };
-}
-
-function spaceMemberLabel(member: AdminSpaceMemberPayload) {
-  const email = readableLabel(member.email);
-  const displayName = readableLabel(member.displayName);
-  return {
-    primary: email || displayName || '--',
-    secondary: email && displayName && displayName !== email ? displayName : '',
   };
 }
 
@@ -174,8 +160,8 @@ export function AdminOverviewPanel({ locale }: { locale: MemberLocale }) {
           <CountList title={text.overviewMountHealth} counts={overview?.mountsByHealth} />
           <CountList title={text.overviewJobs} counts={overview?.jobsByStatus} />
           <div className="member-overview-group">
-            <h2>{text.overviewSpaces}</h2>
-            <p className="member-overview-metric">{overview?.spaces ?? 0}</p>
+            <h2>{text.overviewCommonMounts}</h2>
+            <p className="member-overview-metric">{overview?.commonMounts ?? 0}</p>
           </div>
           <div className="member-overview-group">
             <h2>{text.overviewLatestBackup}</h2>
@@ -189,7 +175,9 @@ export function AdminOverviewPanel({ locale }: { locale: MemberLocale }) {
             <div className="member-overview-group">
               <h2>{text.overviewRouteGroups}</h2>
               <ul className="member-overview-list">
-                {overview.routeGroups.map((group: AdminRouteGroupItem) => (
+                {overview.routeGroups
+                  .filter((group: AdminRouteGroupItem) => group.id !== 'member_web' && group.id !== 'admin_web')
+                  .map((group: AdminRouteGroupItem) => (
                   <li key={group.id}><span className={`member-status-dot ${group.exposed ? 'ok' : 'muted'}`} />{group.label}<strong>{group.exposed ? text.routeExposed : text.routeClosed}</strong></li>
                 ))}
               </ul>
@@ -205,6 +193,7 @@ export function AdminOverviewPanel({ locale }: { locale: MemberLocale }) {
 
 export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [users, setUsers] = useState<AdminUserPayload[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -259,7 +248,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     setCreating(true);
     setError('');
     try {
-      await createAdminUser(form);
+      await runSensitive(() => createAdminUser(form));
       setForm({ email: '', displayName: '', password: '', role: 'member' });
       setFormOpen(false);
       await load();
@@ -275,9 +264,9 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     setError('');
     try {
       if (user.status === 'active') {
-        await disableAdminUser(user.id);
+        await runSensitive(() => disableAdminUser(user.id));
       } else {
-        await enableAdminUser(user.id);
+        await runSensitive(() => enableAdminUser(user.id));
       }
       await load();
     } catch (caught) {
@@ -290,7 +279,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
     setLoading(true);
     setError('');
     try {
-      await revokeAdminUserSessions(user.id);
+      await runSensitive(() => revokeAdminUserSessions(user.id));
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -318,7 +307,7 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
               <td>{user.totpRequired ? text.accountTotpEnabled : text.accountTotpDisabledLabel}</td>
               <td>{user.role === 'admin' ? text.userStatusActive : '--'}</td>
               <td><div className="member-admin-table-actions">
-                <button className="member-table-action" type="button" onClick={() => void onToggleStatus(user)} disabled={loading}>{user.status === 'active' ? text.userDisable : text.userEnable}</button>
+                {!(user.protected && user.status === 'active') && <button className="member-table-action" type="button" onClick={() => void onToggleStatus(user)} disabled={loading}>{user.status === 'active' ? text.userDisable : text.userEnable}</button>}
                 <button className="member-table-action member-table-danger" type="button" onClick={() => void onRevokeSessions(user)} disabled={loading}>{text.userRevokeSessions}</button>
               </div></td>
             </tr>
@@ -339,168 +328,6 @@ export function AdminUsersPanel({ locale }: { locale: MemberLocale }) {
             <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={closeForm}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.userSubmit}</button></div>
           </form>
         </div>
-      )}
-    </div>
-  );
-}
-
-// -- Spaces and ACL -------------------------------------------------------------------
-
-export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
-  const text = localeMessages[locale];
-  const [spaces, setSpaces] = useState<AdminSpacePayload[]>([]);
-  const [selectedSpaceId, setSelectedSpaceId] = useState('');
-  const [members, setMembers] = useState<AdminSpaceMemberPayload[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [spaceName, setSpaceName] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [memberAccountId, setMemberAccountId] = useState('');
-  const [memberPermission, setMemberPermission] = useState<SpaceMemberRole>('viewer');
-
-  const loadSpaces = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const response = await listAdminSpaces();
-      setSpaces(response.items);
-      setSelectedSpaceId((current) => (response.items.some((space) => space.id === current) ? current : (response.items[0]?.id ?? '')));
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const loadMembers = useCallback(async (spaceId: string) => {
-    if (!spaceId) {
-      setMembers([]);
-      return;
-    }
-    try {
-      const response = await listSpaceMembers(spaceId);
-      setMembers(response.items ?? []);
-    } catch (caught) {
-      setError(describeError(caught));
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadSpaces();
-  }, [loadSpaces]);
-
-  useEffect(() => {
-    void loadMembers(selectedSpaceId);
-  }, [loadMembers, selectedSpaceId]);
-
-  async function onCreateSpace(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!spaceName.trim()) return;
-    setCreating(true);
-    setError('');
-    try {
-      await createAdminSpace({ name: spaceName.trim() });
-      setSpaceName('');
-      await loadSpaces();
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  async function onSetMember(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selectedSpaceId || !memberAccountId.trim()) return;
-    setLoading(true);
-    setError('');
-    try {
-      await putSpaceMember(selectedSpaceId, memberAccountId.trim(), memberPermission);
-      setMemberAccountId('');
-      await loadMembers(selectedSpaceId);
-    } catch (caught) {
-      setError(describeError(caught));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onUpdatePermission(accountId: string, permission: SpaceMemberRole) {
-    setError('');
-    try {
-      await putSpaceMember(selectedSpaceId, accountId, permission);
-      await loadMembers(selectedSpaceId);
-    } catch (caught) {
-      setError(describeError(caught));
-    }
-  }
-
-  async function onRemoveMember(accountId: string) {
-    setError('');
-    try {
-      await removeSpaceMember(selectedSpaceId, accountId);
-      await loadMembers(selectedSpaceId);
-    } catch (caught) {
-      setError(describeError(caught));
-    }
-  }
-
-  return (
-    <div className="member-admin-workspace">
-      <div className="member-heading">
-        <div><h1>{text.spacesAdminTitle}</h1><p>{text.spacesAdminDetail}</p></div>
-        <button className="member-secondary-action" type="button" onClick={() => void loadSpaces()} disabled={loading}>{text.refresh}</button>
-      </div>
-      {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
-
-      <form className="member-admin-inline-form" onSubmit={onCreateSpace}>
-        <label>{text.spaceName}<input value={spaceName} onChange={(event) => setSpaceName(event.target.value)} required /></label>
-        <button className="member-primary" type="submit" disabled={creating}>{text.spaceCreate}</button>
-      </form>
-
-      {spaces.length === 0 ? <div className="member-empty">{text.spaceNoSpacesAdmin}</div> : (
-        <>
-          <label className="member-admin-inline-form"><span>{text.spaceSelect}</span>
-            <select value={selectedSpaceId} onChange={(event) => setSelectedSpaceId(event.target.value)}>
-              {spaces.map((space) => <option key={space.id} value={space.id}>{space.name} ({space.type})</option>)}
-            </select>
-          </label>
-
-          <h2>{text.spaceMembersTitle}</h2>
-          {members.length === 0 ? <div className="member-empty">{text.spaceNoMembers}</div> : (
-            <table className="member-admin-table">
-              <thead><tr><th>{text.userColumnEmail}</th><th>{text.spaceMemberRole}</th><th>{text.actions}</th></tr></thead>
-              <tbody>{members.map((member) => {
-                const account = spaceMemberLabel(member);
-                return (
-                  <tr key={member.accountId}>
-                    <td>{account.primary}{account.secondary && <small>{account.secondary}</small>}</td>
-                    <td>
-                      <select value={member.permission} onChange={(event) => void onUpdatePermission(member.accountId, event.target.value as SpaceMemberRole)}>
-                        <option value="viewer">{text.spaceRoleViewer}</option>
-                        <option value="editor">{text.spaceRoleEditor}</option>
-                        <option value="manager">{text.spaceRoleManager}</option>
-                      </select>
-                    </td>
-                    <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onRemoveMember(member.accountId)}>{text.spaceMemberRemove}</button></td>
-                  </tr>
-                );
-              })}</tbody>
-            </table>
-          )}
-
-          <form className="member-admin-inline-form" onSubmit={onSetMember}>
-            <label>{text.spaceMemberAccountId}<input value={memberAccountId} onChange={(event) => setMemberAccountId(event.target.value)} required /></label>
-            <label>{text.spaceMemberRole}
-              <select value={memberPermission} onChange={(event) => setMemberPermission(event.target.value as SpaceMemberRole)}>
-                <option value="viewer">{text.spaceRoleViewer}</option>
-                <option value="editor">{text.spaceRoleEditor}</option>
-                <option value="manager">{text.spaceRoleManager}</option>
-              </select>
-            </label>
-            <button className="member-primary" type="submit" disabled={loading}>{text.spaceMemberAdd}</button>
-          </form>
-        </>
       )}
     </div>
   );
@@ -618,7 +445,7 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
       {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
       {loading ? <div className="member-loading">{text.loading}</div> : tokens.length === 0 ? <div className="member-empty">{text.tokenGovNoTokens}</div> : (
         <table className="member-admin-table">
-          <thead><tr><th>{text.tokenColumnName}</th><th>{text.tokenGovColumnOwner}</th><th>{text.tokenColumnScopes}</th><th>{text.tokenColumnStatus}</th><th>{text.actions}</th></tr></thead>
+          <thead><tr><th>{text.tokenColumnName}</th><th>{text.tokenGovColumnOwner}</th><th>{text.tokenColumnScopes}</th><th>{text.tokenColumnExpires}</th><th>{text.tokenColumnLastUsed}</th><th>{text.tokenColumnStatus}</th><th>{text.actions}</th></tr></thead>
           <tbody>{tokens.map((token) => {
             const owner = tokenOwnerLabel(token);
             return (
@@ -626,6 +453,8 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
                 <td>{token.name}</td>
                 <td>{owner.primary}{owner.secondary && <small>{owner.secondary}</small>}</td>
                 <td>{(token.scopes ?? []).join(', ') || '--'}</td>
+                <td>{token.expiresAt ? formatDate(token.expiresAt, locale) : text.tokenNeverExpires}</td>
+                <td>{token.lastUsedAt ? formatDate(token.lastUsedAt, locale) : '--'}</td>
                 <td>{tokenStatusLabel(token.status, text)}</td>
                 <td><button className="member-table-action member-table-danger" type="button" onClick={() => void onDelete(token)} disabled={loading}>{text.tokenRevoke}</button></td>
               </tr>
@@ -641,6 +470,7 @@ export function AdminTokenGovernancePanel({ locale }: { locale: MemberLocale }) 
 
 export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [backups, setBackups] = useState<BackupPayload[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -672,7 +502,7 @@ export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
     setError('');
     setNotice('');
     try {
-      await createAdminBackup();
+      await runSensitive(() => createAdminBackup());
       await load();
     } catch (caught) {
       setError(describeError(caught));
@@ -687,8 +517,8 @@ export function AdminBackupsPanel({ locale }: { locale: MemberLocale }) {
     setError('');
     setNotice('');
     try {
-      await restoreAdminBackup(restoreTarget.id, confirmPhrase.trim());
-      setNotice(text.backupRestored);
+      const accepted = await runSensitive(() => restoreAdminBackup(restoreTarget.id, confirmPhrase.trim()));
+      setNotice(accepted.requestId ? `${text.backupRestored} · ${accepted.state ?? 'preparing'} · ${accepted.requestId}` : text.backupRestored);
       setRestoreTarget(null);
       setConfirmPhrase('');
       await load();

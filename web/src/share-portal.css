@@ -1,14 +1,30 @@
 .share-portal { min-height: 100vh; background: var(--bg); color: var(--text); }
-.share-portal-topbar { display: flex; align-items: center; justify-content: space-between; height: 60px; padding: 0 24px; border-bottom: 1px solid var(--border); background: var(--surface); }
-.share-portal-stage { display: grid; place-items: start center; min-height: calc(100vh - 60px); padding: 40px 20px; }
-.share-portal-panel { width: min(720px, 100%); padding: 28px; border: 1px solid var(--border-card); border-radius: 8px; background: var(--surface); box-shadow: 0 18px 46px rgb(37 58 85 / 0.08); }
-.share-portal-panel h1 { margin: 0 0 12px; color: var(--text-strong); font-size: 20px; }
-.share-portal-panel p { margin: 0; color: var(--text-soft); font-size: 14px; line-height: 1.6; }
-.share-portal-panel form { display: grid; gap: 14px; margin-top: 16px; }
-.share-portal-panel label { display: grid; gap: 7px; color: var(--text-muted); font-size: 13px; }
-.share-portal-panel input { height: 37px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--input-bg); color: var(--text-body); }
-.share-portal-message { color: var(--text-soft); font-size: 14px; }
+.share-portal-topbar { display: flex; align-items: center; justify-content: space-between; height: var(--shell-topbar-height); padding: 0 var(--layout-page-inline); border-bottom: 1px solid var(--border); background: var(--surface); }
+.share-portal-stage { display: grid; place-items: start center; min-height: calc(100vh - var(--shell-topbar-height)); padding: var(--layout-page-block-start) var(--layout-page-inline); }
+.share-portal-panel { width: min(720px, 100%); padding: var(--layout-section); border: 1px solid var(--border-card); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-lg); }
+.share-portal-panel h1 { margin: 0 0 var(--space-3); color: var(--text-strong); font-size: var(--text-4xl); }
+.share-portal-panel p { margin: 0; color: var(--text-soft); font-size: var(--text-lg); line-height: 1.6; }
+.share-portal-panel form { display: grid; gap: var(--layout-group); margin-top: var(--layout-component); }
+.share-portal-panel label { display: grid; gap: var(--layout-inline); color: var(--text-muted); font-size: var(--text-md); }
+.share-portal-panel input { min-height: var(--control-md); padding: 0 var(--control-padding-inline); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--input-bg); color: var(--text-body); }
+.share-portal-message { color: var(--text-soft); font-size: var(--text-lg); }
 .share-portal-browser { width: min(960px, 100%); }
-.share-portal-file-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
-.share-portal-file-actions a { display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: 5px; color: var(--accent-text); text-decoration: none; font-size: 13px; }
+.share-portal-file-actions { display: flex; flex-wrap: wrap; gap: var(--layout-inline); margin-top: var(--layout-component); }
+.share-portal-file-actions a { display: inline-flex; align-items: center; min-height: var(--control-md); padding: 0 var(--control-padding-inline); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--accent-text); text-decoration: none; font-size: var(--text-md); }
 .share-portal-file-actions a.member-primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+.share-portal-md-preview { margin-top: var(--space-4); overflow: hidden; border: 1px solid var(--border-card); border-radius: var(--radius-md); background: #0b121d; }
+.share-portal-md-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-bottom: 1px solid rgb(255 255 255 / 0.12); color: #e8eef7; font-size: var(--text-md); }
+.share-portal-md-header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-portal-md-header button { padding: 0 var(--space-2); border: 0; background: transparent; color: #a9b6c7; cursor: pointer; font-size: var(--text-md); }
+.share-portal-md-header button:hover { color: #e8eef7; }
+
+@media (max-width: 900px) {
+  .share-portal-topbar { padding-inline: var(--space-6); }
+  .share-portal-stage { padding: var(--space-5) var(--space-6); }
+}
+
+@media (max-width: 560px) {
+  .share-portal-topbar { padding-inline: var(--space-4); }
+  .share-portal-stage { padding: var(--space-5) var(--space-4); }
+  .share-portal-panel { padding: var(--layout-section-compact); }
+}

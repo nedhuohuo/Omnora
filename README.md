@@ -1,6 +1,8 @@
 # Omnora / 万境
 
-万境是面向个人、家庭和小团队的轻量自托管数字空间。它以 NAS 文件为核心，为成员、访客和 AI 提供统一、受控的文件访问能力。
+万境是面向个人、家庭和小团队的轻量自托管文件服务。它以 NAS 文件为核心，为成员、访客和 AI 提供统一、受控的文件访问能力。
+
+> **设计状态：** 业务模型采用“唯一默认挂载中的个人目录 + 独立授权共用挂载 + 目录协作”，并采用受限挂载方案 B。代码、数据库和 OpenAPI 已按账号—挂载模型实现，详细边界见[账号、挂载与内容授权设计](docs/superpowers/specs/2026-08-08-account-mount-access-design.md)。
 
 > **项目状态：** 需求与架构设计已收敛；仓库已包含可运行的 Go 后端、React 前端、OpenAPI 契约和 Docker Compose 示例。成员端、管理端、分享、审计、AI Token 与 MCP 的首版闭环正在实现和验证中，尚无正式发布版本。
 
@@ -9,9 +11,9 @@
 已具备的主要工程能力：
 
 - Go 单进程服务：提供 Web 静态资源、REST API、OpenAPI、MCP 入口、文件传输和后台任务。
-- SQLite WAL 数据层：保存账号、空间、挂载、ACL、分享、Token、审计事件和轻量元数据。
-- React 前端：包含初始化 / 登录、成员文件空间、账号安全、分享管理、AI Token、管理员控制台和公开分享入口。
-- 管理控制面：支持成员与空间管理、挂载注册、索引任务、路由组开关、备份入口和审计记录查看。
+- SQLite WAL 数据层：保存账号、个人目录、挂载授权、目录协作、分享、Token、审计事件和轻量元数据。
+- React 前端：包含初始化 / 登录、成员文件、账号安全、分享管理、AI Token、管理员控制台和公开分享入口；成员导航和管理控制台均使用账号—挂载模型。
+- 管理控制面：支持成员、普通/受限挂载及授权、索引任务、路由组、备份和审计。
 - 部署材料：提供本地运行方式、Docker Compose 示例和阿里云测试环境覆盖文件。
 
 仍需按验收标准完成验证的范围：
@@ -20,14 +22,15 @@
 - 极空间 NAS 与普通 Linux Docker Compose 的完整部署验收。
 - `linux/amd64` 与 `linux/arm64` 镜像构建、发布和正式版本标记。
 
-## 特性
+## 首版特性（账号—挂载模型）
 
-- **空间与挂载：** 用空间组织个人文件、共享文件和 NAS 已有目录；一个空间可包含多个挂载，并由 ACL 控制成员访问。
+- **个人文件与共用挂载：** 系统默认挂载为每个账号自动提供一个个人目录；后续挂载都是按账号独立授权的共用存储。
+- **9 个挂载插槽：** `/mnt/omnora/slot1`–`slot9` 可分别绑定 NAS 文件夹；系统检测已绑定插槽，注册时直接使用管理员选择的目录，不创建隐式业务子目录。见[挂载插槽文档](docs/deployment/mount-slots.md)。
 - **管理员控制面：** 仅系统管理员可添加或修改挂载；添加时明确只读 / 读写，并手动决定是否启用轻量元数据索引。
-- **文件管理：** 账号、空间 ACL、文件浏览、大文件续传、托管挂载回收站与审计。
+- **文件管理：** 个人目录所有权、共用挂载 `viewer/editor`、个人目录协作、文件浏览、大文件续传、删除者个人回收站与审计；超过 200 MB 的文件只能走明确永久删除流程。
 - **受控分享：** 支持文件与文件夹分享，可选密码、有效期、访问 / 下载次数限制和主动撤销。
 - **浏览器预览：** 图片、PDF、文本、Markdown 和原生支持的音视频；Office 文件仅支持下载。
-- **AI 与 API：** 版本化 REST API、OpenAPI 3.1 与 Streamable HTTP MCP；AI Token 可限定操作范围与目录边界。
+- **AI 与 API：** 版本化 REST API、OpenAPI 3.1 与标准 Streamable HTTP MCP 入口（`2026-07-28`，兼容性测试覆盖 `2025-11-25`）；scope、工具、确认和传输规则以当前 MCP catalog 与 [MCP 文档](docs/mcp/README.md) 为准。
 - **部署入口：** Docker 端口发布或反向代理统一决定访问范围；应用内只维护路由组开关，不再提供额外 LAN / 代理入口配置。
 
 ### 首版非目标
@@ -69,6 +72,39 @@ Omnora/
 - Node.js 20+（仅本地前端开发和前端构建需要；NAS 运行时不包含 Node.js）
 - Docker Compose（可选，用于容器化部署验证）
 
+### 部署条件（必读）
+
+业务路由开启后，HTTP 信任边界由环境变量显式配置；**不要从转发头或当前公网 IP 推断**。
+
+| 条件 | 说明 |
+| --- | --- |
+| `OMNORA_PUBLIC_URL` | 浏览器/客户端访问的**稳定绝对 origin**（含 scheme，无 path/query）。**首次启动可留空**：进程会起来并提供 `/healthz`、`/readyz`，但业务路由保持关闭（`public_url_required`）。地址确定后再写入并**重启容器/进程**后生效。 |
+| 动态公网 IP + 端口转发 | **不要**把会变的公网 IP 写进 `OMNORA_PUBLIC_URL`。应使用 DDNS/固定域名，推荐 `https://files.example.com`（反代终止 TLS，Omnora 绑定 `127.0.0.1:8080`）。 |
+| `http://` 非 loopback | 默认拒绝。仅一次性测试盒可设 `OMNORA_ALLOW_INSECURE_PUBLIC_HTTP=true`；正式 NAS / 公网暴露不要长期开启。 |
+| Host / Origin | 未另配时从 `OMNORA_PUBLIC_URL` 派生精确白名单。局域网 IP 与公网域名不一致时，需额外配置 `OMNORA_ALLOWED_HOSTS` / `OMNORA_ALLOWED_ORIGINS`，或统一走同一域名。 |
+| `OMNORA_TRUSTED_PROXY_CIDRS` | 仅填写反代所在网段；为空表示**不信任**任何 `X-Forwarded-*`。禁止填 `0.0.0.0/0`。 |
+| MCP 白名单 | 启用 `OMNORA_ROUTE_MCP_ENABLED=true` 时**必须**同时设置 `OMNORA_MCP_ALLOWED_HOSTS` 为访问域名的精确 `host[:port]`（不支持通配符）；白名单为空时 `/mcp` 一律返回 `403 MCP host allowlist is not configured`。详见 [MCP 指南](docs/mcp/README.md)。 |
+| 审计密钥 | 业务路由开启时需要 `OMNORA_AUDIT_HMAC_KEY`（≥32 字节）。Compose 镜像入口可在首次启动生成并写入 `config/runtime.env`，重装时必须保留该文件。 |
+| 持久化目录 | `config/`、`data/`、`managed/`、`mounts/` 需跨容器重建保留；实例标记不一致时入口会拒绝启动。 |
+| NAS 镜像 | `deploy/docker-compose.nas.yml` **必须**设置 `OMNORA_IMAGE` 为已验证的 GHCR tag 或 digest，否则 Compose 直接失败。 |
+
+推荐 NAS 公网形态：
+
+```text
+浏览器 → https://你的DDNS域名 → 路由器 443 → NAS 反代 → 127.0.0.1:8080（Omnora）
+```
+
+对应最小 env：
+
+```bash
+OMNORA_BIND=127.0.0.1
+OMNORA_PUBLIC_URL=https://files.example.com
+OMNORA_TRUSTED_PROXY_CIDRS=127.0.0.1/32
+OMNORA_ALLOW_INSECURE_PUBLIC_HTTP=false
+```
+
+修改 `OMNORA_PUBLIC_URL`（及 Host/Origin/代理 CIDR）后必须重启服务。阿里云一次性 HTTP 测试盒见 [阿里云测试服务器](docs/deployment/aliyun-test-server.md)；NAS 验收记录格式见 [NAS 验证证据](docs/deployment/nas-verification.md)。
+
 ### 后端
 
 ```bash
@@ -81,12 +117,14 @@ go test ./...
 
 # 本地启动，默认监听 127.0.0.1:8080
 export OMNORA_DB_PATH=./data/omnora.db
+export OMNORA_PUBLIC_URL=http://127.0.0.1:8080
 export OMNORA_INITIALIZATION_TOKEN=dev-init-token
 export OMNORA_TOTP_ENCRYPTION_KEY=dev-local-totp-key-at-least-32-chars
+export OMNORA_AUDIT_HMAC_KEY=dev-local-audit-hmac-key-at-least-32b
 go run ./cmd/omnora
 ```
 
-启动后打开 `http://127.0.0.1:8080`，使用初始化令牌完成首个系统管理员创建。
+启动后打开 `http://127.0.0.1:8080`，使用初始化令牌完成首个系统管理员创建。本地 loopback 的 `http://` PublicURL 无需 `OMNORA_ALLOW_INSECURE_PUBLIC_HTTP`。
 
 ### 前端
 
@@ -102,16 +140,34 @@ npm run dev
 
 ```bash
 cd deploy
-cp aliyun-test.env.example aliyun-test.env   # 按需修改密钥与令牌
-# 基础单容器示例
-docker compose -f docker-compose.yml config
 
-# 阿里云测试覆盖（当前测试机对外暴露 8080，见部署文档）
+# 通用 / 源码构建示例（先 config 校验，再按需 up）
+cp aliyun-test.env.example aliyun-test.env   # 填入 PUBLIC_URL、密钥等
+docker compose --env-file aliyun-test.env -f docker-compose.yml config
+
+# NAS：拉取已验证镜像（必须先设置 OMNORA_IMAGE）
+export OMNORA_IMAGE=ghcr.io/nedhuohuo/omnora:sha-<verified-commit>
+docker compose --env-file nas.env -f docker-compose.nas.yml up -d
+
+# 阿里云测试覆盖（见部署文档；公网 HTTP 仅限一次性 QA）
 docker compose --env-file aliyun-test.env \
   -f docker-compose.yml -f docker-compose.aliyun-test.yml up -d
 ```
 
-正式镜像标签尚未发布；Compose 文件中的 `ghcr.io/omnora/omnora:0.1.0-dev` 为占位。阿里云测试服务器的边界与访问方式见 [阿里云测试服务器](docs/deployment/aliyun-test-server.md)（外部访问：`http://120.26.88.7:8080`）。
+正式发布镜像标签以 GHCR 上已验证的 tag/digest 为准。部署边界与访问方式见 [阿里云测试服务器](docs/deployment/aliyun-test-server.md) 与上文「部署条件」。
+
+### 挂载插槽（slot1–slot9）
+
+外部 NAS 数据推荐按插槽布局接入：在 compose 中把每个 NAS 文件夹单独映射为一个插槽（`/mnt/omnora/slot1` … `slot9`），而不是整根映射 `./mounts:/mnt/omnora`。已绑定插槽由系统通过 `mountinfo` 自动检测并在管理端展示，未绑定插槽自动隐藏；注册挂载时直接使用所选目录本身，账号隔离由挂载授权实现。
+
+```yaml
+volumes:
+  - /volume1/photo:/mnt/omnora/slot1:rw
+  - /volume1/music:/mnt/omnora/slot2:rw
+  # slot3 ~ slot9 按需添加；未使用的插槽整行不写
+```
+
+注意三点：插槽布局与整根映射互斥；插槽内软链接不会被跟随；更换插槽宿主源后挂载变为 `unavailable`，需管理员 reverify。完整设计思路、注册流程与排查清单见 [挂载插槽文档](docs/deployment/mount-slots.md)。
 
 ### 脚手架自检
 
@@ -126,17 +182,25 @@ docker compose --env-file aliyun-test.env \
 | 文档 | 内容 |
 | --- | --- |
 | [产品需求](docs/requirements/product-requirements.md) | 用户、场景、功能范围和非目标 |
-| [领域模型](docs/design/domain-model.md) | 空间、挂载、权限、对象和生命周期 |
+| [账号、挂载与内容授权设计](docs/superpowers/specs/2026-08-08-account-mount-access-design.md) | 默认个人目录、独立挂载授权、协作和受限挂载方案 B |
+| [领域模型](docs/design/domain-model.md) | 账号、个人目录、共用挂载、权限、对象和生命周期 |
 | [技术架构](docs/design/architecture.md) | 部署、模块、数据、任务和资源约束 |
 | [安全模型](docs/security/security-model.md) | 信任边界、认证授权和安全基线 |
 | [完整 Web 设计](docs/design/web-application-design.md) | 成员端、管理控制台、公开分享页 |
 | [项目框架设计](docs/superpowers/specs/2026-08-02-omnora-project-foundation-design.md) | 工程骨架、模块依赖与技术探针 |
 | [验收标准](docs/verification/acceptance-criteria.md) | 第一版发布门槛 |
 | [生产日志](docs/deployment/logging.md) | JSON 日志、请求 ID、代理日志关联和 NAS 证据 |
+| [阿里云测试服务器](docs/deployment/aliyun-test-server.md) | 测试机边界、公网 HTTP QA 与 Compose 文件 |
+| [NAS 验证证据](docs/deployment/nas-verification.md) | 发布候选在 NAS / Linux Compose 上的验收记录格式 |
+| [挂载插槽](docs/deployment/mount-slots.md) | 9 插槽外部挂载的设计思路、配置方式与使用边界 |
 | [重装数据连续性](docs/deployment/reinstall-data-continuity.md) | 重装后保留原路径文件可读可用 |
-| [OpenAPI](openapi/omnora.v1.yaml) | REST 契约草案 |
+| [REST API 指南](docs/api/README.md) | REST 接入方式、认证、流程和边界 |
+| [MCP 指南](docs/mcp/README.md) | 当前 Streamable HTTP 账号—挂载契约 |
+| [OpenAPI](openapi/omnora.v1.yaml) | REST 机器可读契约唯一手工源 |
 
-出现冲突时，以许可证、安全模型、领域模型、产品需求、技术架构、Web 设计、验收标准的顺序裁决，详见 [文档地图](docs/README.md)。
+`managed/` 专门承载唯一 `personal_default` 挂载、各账号隔离个人目录及个人回收站，必须持久化和备份，禁止作为普通共用挂载注册；`mounts/slot*` 只用于外部共用挂载。
+
+文档冲突按各文档的权威范围裁决；账号—挂载业务模型以已确认规格为准，详见[文档地图](docs/README.md#决策优先级)。
 
 ## 验证命令
 

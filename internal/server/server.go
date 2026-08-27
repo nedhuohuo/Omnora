@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"embed"
+	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -11,18 +14,48 @@ import (
 	"sync"
 	"time"
 
+	"omnora/internal/access"
+	"omnora/internal/aitoken"
+	"omnora/internal/audit"
+	"omnora/internal/buildinfo"
+	"omnora/internal/catalog"
 	"omnora/internal/config"
+	"omnora/internal/confirmation"
 	"omnora/internal/domain"
+	"omnora/internal/fileops"
 	"omnora/internal/httpx"
+	"omnora/internal/memberfiles"
+	"omnora/internal/membershare"
+	"omnora/internal/mountadmin"
+	"omnora/internal/personalstorage"
+	"omnora/internal/ratelimit"
 	"omnora/internal/store"
+	"omnora/internal/transferticket"
+	"omnora/internal/update"
 )
 
 type Server struct {
-	cfg       config.Config
-	db        *store.DB
-	mux       *http.ServeMux
-	routesMu  sync.RWMutex
-	listeners *ListenerManager
+	cfg               config.Config
+	db                *store.DB
+	mux               *http.ServeMux
+	startupErr        error
+	httpPolicy        *HTTPPolicy
+	httpTrustRequired bool
+	guard             *access.Guard
+	tokens            *aitoken.Service
+	confirmations     *confirmation.Service
+	transferTickets   *transferticket.Service
+	auditRecorder     audit.Recorder
+	authLimiter       *ratelimit.Limiter
+	memberFiles       *memberfiles.Service
+	memberShares      *membershare.Service
+	personalStorage   *personalstorage.Service
+	mountAdmin        *mountadmin.Service
+	updates           *update.Manager
+	routesMu          sync.RWMutex
+	listeners         *ListenerManager
+	shutdownOnce      sync.Once
+	shutdownCh        chan struct{}
 }
 
 const EntryHTTP = "http"
@@ -50,23 +83,180 @@ func New(cfg config.Config, db *store.DB, opts ...Option) http.Handler {
 // registers routes.
 func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 	s := &Server{
-		cfg: cfg,
-		db:  db,
-		mux: http.NewServeMux(),
+		cfg:        cfg,
+		db:         db,
+		mux:        http.NewServeMux(),
+		shutdownCh: make(chan struct{}),
 	}
+	if db != nil {
+		s.guard = access.NewGuard(db.SQL(), cfg.Storage.ManagedDir)
+		s.tokens = aitoken.NewService(db.SQL())
+		s.confirmations = confirmation.NewService(db.SQL())
+		s.transferTickets = transferticket.NewService(db.SQL(), s.tokens, s.guard)
+		s.auditRecorder = audit.NewRecorder(db.SQL())
+		s.memberShares = membershare.NewService(db.SQL(), s.guard, membershare.WithAITokenService(s.tokens))
+		s.personalStorage = personalstorage.New(db.SQL(), cfg.Storage.ManagedDir)
+		s.mountAdmin = mountadmin.New(db.SQL(), cfg.Storage.PredeclaredMountRoot)
+		if strings.TrimSpace(cfg.Storage.ManagedDir) != "" {
+			if _, err := s.personalStorage.EnsureDefaultMount(context.Background()); err != nil {
+				s.startupErr = err
+			}
+		}
+		fileOpsCoordinator := fileops.NewCoordinator(db.SQL(), fileops.WithShareInvalidator(s.memberShares))
+		if err := fileops.NewJournal(db.SQL()).QuarantineUnfinished(context.Background()); err != nil {
+			s.startupErr = err
+		}
+		s.memberFiles = memberfiles.NewService(db.SQL(), s.guard, catalog.NewService(db.SQL()), memberfiles.WithAITokenService(s.tokens), memberfiles.WithShareInvalidator(s.memberShares), memberfiles.WithFileOpsCoordinator(fileOpsCoordinator))
+	}
+	if db != nil && strings.TrimSpace(cfg.Update.StateDir) != "" && strings.TrimSpace(cfg.Update.SigningPublicKeyFile) != "" {
+		currentVersion := buildinfo.CurrentVersion()
+		if !update.IsReleaseVersion(currentVersion) {
+			s.startupErr = fmt.Errorf("self-update requires a comparable release build version, got %q", currentVersion)
+		} else if publicKey, err := update.LoadSigningPublicKey(cfg.Update.SigningPublicKeyFile); err != nil {
+			s.startupErr = err
+		} else {
+			var schemaVersion int64
+			if err := db.SQL().QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&schemaVersion); err != nil {
+				s.startupErr = fmt.Errorf("read update schema version: %w", err)
+			} else {
+				s.updates = update.NewManager(
+					cfg.Update.StateDir,
+					cfg.Update.MaxPackageBytes,
+					update.WithCurrentVersion(currentVersion),
+					update.WithCurrentSchemaVersion(schemaVersion),
+					update.WithSigningPublicKey(publicKey),
+				)
+				if err := s.updates.EnsureDirs(); err != nil {
+					s.startupErr = err
+				} else if err := s.updates.RecoverInterruptedPreparation(); err != nil {
+					s.startupErr = err
+				}
+			}
+		}
+	}
+	s.authLimiter = ratelimit.New(ratelimit.Options{})
 	for _, opt := range opts {
 		opt(s)
 	}
+	if policy, err := newHTTPPolicy(cfg.HTTP); err != nil {
+		s.startupErr = err
+	} else {
+		s.httpPolicy = policy
+	}
 	if db != nil {
-		_ = s.hydrateRouteGroups(context.Background())
+		if err := s.hydrateRouteGroups(context.Background()); err != nil {
+			if s.startupErr == nil {
+				s.startupErr = err
+			}
+		}
 	}
 	s.routes()
 	return s
 }
 
+// StartupError reports a fail-closed initialization error that must prevent
+// workers and listeners from starting. New keeps the historical handler API;
+// the executable checks this gate before binding HTTP.
+func (s *Server) StartupError() error {
+	return s.startupErr
+}
+
+// RequireHTTPTrustBoundary asks the server to fail closed on business routes
+// when OMNORA_PUBLIC_URL (or an explicit host/origin allowlist) is unset. Unit
+// tests leave this unset so handlers stay callable without a public-origin
+// fixture; cmd/omnora enables it for real deployments.
+func (s *Server) RequireHTTPTrustBoundary() {
+	if s == nil {
+		return
+	}
+	s.httpTrustRequired = true
+}
+
+// MarkReady persists the final normal-process readiness gate after all
+// migration, identity-rollout, and route-hydration checks have passed.
+// Missing PublicURL is not fatal here: /readyz reports public_url_required
+// until the operator sets the post-deploy origin.
+func (s *Server) MarkReady(ctx context.Context) error {
+	if s.startupErr != nil {
+		return s.startupErr
+	}
+	if s.businessRoutesExposed() {
+		if err := s.cfg.ValidateBusinessExposure(); err != nil && !errors.Is(err, config.ErrPublicURLRequired) {
+			return err
+		}
+		if err := s.cfg.ValidateAuditHMACKey(); err != nil {
+			return err
+		}
+	}
+	if s.db == nil {
+		return nil
+	}
+	for _, key := range []string{"mcp_audit_risk", "audit_write_risk"} {
+		var risk string
+		err := s.db.SQL().QueryRowContext(ctx, `SELECT value FROM system_state WHERE key = ?`, key).Scan(&risk)
+		if err == nil {
+			return errors.New("audit readiness risk is present")
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	result, err := s.db.SQL().ExecContext(ctx, `
+UPDATE recovery_control
+SET ready = 1, updated_at = CURRENT_TIMESTAMP
+WHERE id = 1 AND state = 'normal'
+`)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return errors.New("recovery control is not in normal state")
+	}
+	return nil
+}
+
+// RequestShutdown asks the process entry point to begin a controlled exit.
+// A durable restore request must stop this process from continuing to serve
+// business routes against a database that an offline recovery worker is
+// about to replace wholesale; simply marking readiness false is not enough
+// because business routes are not otherwise gated on recovery state. Safe to
+// call multiple times or concurrently; only the first call has an effect.
+func (s *Server) RequestShutdown() {
+	if s == nil {
+		return
+	}
+	s.shutdownOnce.Do(func() {
+		close(s.shutdownCh)
+	})
+}
+
+// ShutdownRequested returns a channel that closes once RequestShutdown has
+// been called. The process entry point selects on it alongside OS signals so
+// it can drain listeners and exit the same way it would for SIGTERM.
+func (s *Server) ShutdownRequested() <-chan struct{} {
+	return s.shutdownCh
+}
+
+func (s *Server) businessRoutesExposed() bool {
+	for _, group := range domain.AllRouteGroups {
+		switch group {
+		case domain.RouteGroupMemberWeb, domain.RouteGroupAdminWeb, domain.RouteGroupShare,
+			domain.RouteGroupREST, domain.RouteGroupMCP, domain.RouteGroupOpenAPI:
+			if s.routeEnabled(group) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Handler returns the fully wrapped HTTP handler.
 func (s *Server) Handler() http.Handler {
-	return securityHeaders(requestID(accessLog(recoverPanic(s.mux))))
+	return securityHeaders(requestID(s.trustBoundary(accessLog(recoverPanic(s.mux)))))
 }
 
 func (s *Server) routes() {
@@ -78,21 +268,21 @@ func (s *Server) routes() {
 	s.handleWebGroup(domain.RouteGroupMemberWeb, "/app")
 	s.handleWebGroup(domain.RouteGroupAdminWeb, "/admin")
 	s.handleWebGroup(domain.RouteGroupShare, "/share")
-	s.handleProductGroup(domain.RouteGroupREST, "/api/v1")
-	s.handleProductGroup(domain.RouteGroupMCP, "/mcp")
+	s.handleRESTFallback()
+	s.mcpRoutes()
 	s.handleProductGroup(domain.RouteGroupOpenAPI, "/openapi")
 	s.mux.Handle("/", s.memberRoot())
 }
 
 func (s *Server) memberRoot() http.Handler {
-	spa := s.gate(domain.RouteGroupMemberWeb, http.HandlerFunc(s.serveGroupSPA))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	spa := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.isStaticAssetRequest(r.URL.Path) {
 			s.static(w, r)
 			return
 		}
-		spa.ServeHTTP(w, r)
+		s.serveGroupSPA(w, r)
 	})
+	return s.gate(domain.RouteGroupMemberWeb, spa)
 }
 
 func (s *Server) static(w http.ResponseWriter, r *http.Request) {
@@ -168,13 +358,27 @@ func (s *Server) handleProductGroup(group domain.RouteGroup, routePath string) {
 	s.mux.Handle(routePath+"/", handler)
 }
 
+func (s *Server) handleRESTFallback() {
+	handler := s.gate(domain.RouteGroupREST, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clean := path.Clean(r.URL.Path)
+		if clean == "/api/v1/spaces" || strings.HasPrefix(clean, "/api/v1/spaces/") ||
+			clean == "/api/v1/admin/spaces" || strings.HasPrefix(clean, "/api/v1/admin/spaces/") {
+			httpx.WriteError(w, r, http.StatusGone, "space_api_removed", "Space-scoped REST APIs were removed; use account content sources")
+			return
+		}
+		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "route was not found")
+	}))
+	s.mux.Handle("/api/v1", handler)
+	s.mux.Handle("/api/v1/", handler)
+}
+
 func (s *Server) gate(group domain.RouteGroup, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.routeEnabled(group) {
 			httpx.WriteError(w, r, http.StatusNotFound, "route_group_disabled", "route group is not exposed")
 			return
 		}
-		next.ServeHTTP(w, r)
+		s.routeSecurity(routeRuleFor(r), next).ServeHTTP(w, r)
 	})
 }
 
@@ -191,17 +395,56 @@ func (s *Server) setRouteEnabled(group domain.RouteGroup, enabled bool) {
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": buildinfo.CurrentVersion()})
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	if s.httpTrustRequired && s.businessRoutesExposed() {
+		if err := s.cfg.ValidateBusinessExposure(); err != nil {
+			if errors.Is(err, config.ErrPublicURLRequired) {
+				httpx.WriteError(w, r, http.StatusServiceUnavailable, "public_url_required", "OMNORA_PUBLIC_URL must be configured before serving business routes")
+				return
+			}
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "invalid_http_trust", err.Error())
+			return
+		}
+	}
 	if s.db != nil {
 		if err := s.db.Ping(r.Context()); err != nil {
 			httpx.WriteError(w, r, http.StatusServiceUnavailable, "database_unavailable", "database is not ready")
 			return
 		}
+		var risk string
+		err := s.db.SQL().QueryRowContext(r.Context(), `SELECT value FROM system_state WHERE key = 'mcp_audit_risk'`).Scan(&risk)
+		if err == nil {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "mcp_audit_degraded", "mcp_audit_degraded: MCP audit integrity requires investigation")
+			return
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "database_unavailable", "database is not ready")
+			return
+		}
+		if err := s.db.SQL().QueryRowContext(r.Context(), `SELECT value FROM system_state WHERE key = 'audit_write_risk'`).Scan(&risk); err == nil {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "audit_degraded", "audit integrity requires investigation")
+			return
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "database_unavailable", "database is not ready")
+			return
+		}
+		var recoveryState string
+		var recoveryReady int
+		if err := s.db.SQL().QueryRowContext(r.Context(), `
+SELECT state, ready FROM recovery_control WHERE id = 1
+`).Scan(&recoveryState, &recoveryReady); err != nil {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "recovery_unavailable", "recovery control is not ready")
+			return
+		}
+		if recoveryState != "normal" || recoveryReady != 1 {
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "recovery_not_ready", "recovery control is not ready")
+			return
+		}
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready", "version": buildinfo.CurrentVersion()})
 }
 
 func requestID(next http.Handler) http.Handler {
@@ -211,7 +454,13 @@ func requestID(next http.Handler) http.Handler {
 			requestID = httpx.NewRequestID()
 		}
 		w.Header().Set("X-Request-ID", requestID)
-		next.ServeHTTP(w, r.WithContext(httpx.WithRequestID(r.Context(), requestID)))
+		// Propagate the generated ID to protocol adapters through a cloned
+		// request header as well as context, without mutating the caller-owned
+		// request. MCP tool errors can then include the same stable ID.
+		cloned := r.Clone(httpx.WithRequestID(r.Context(), requestID))
+		cloned.Header = r.Header.Clone()
+		cloned.Header.Set("X-Request-ID", requestID)
+		next.ServeHTTP(w, cloned)
 	})
 }
 
@@ -234,7 +483,7 @@ func accessLog(next http.Handler) http.Handler {
 			slog.Int("status", recorder.status),
 			slog.Int64("duration_ms", duration.Milliseconds()),
 			slog.Int64("bytes", recorder.bytes),
-			slog.String("remote_addr", r.RemoteAddr),
+			slog.String("client_ip", clientIPFromRequest(r)),
 			slog.String("user_agent", r.UserAgent()),
 		)
 	})

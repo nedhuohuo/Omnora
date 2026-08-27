@@ -1,4 +1,8 @@
 .superpowers/
+.playwright-mcp/
+.qoder/
+.demo-mount/
+data/
 deploy/*.env
 !deploy/*.env.example
 deploy/aliyun-test/

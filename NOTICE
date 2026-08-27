@@ -14,3 +14,17 @@ or external code contributions are accepted.
 
 Third-party notices will be maintained with release artifacts as dependencies
 are introduced.
+
+## github.com/modelcontextprotocol/go-sdk v1.7.0
+
+The official Go MCP SDK is licensed under the Apache License, Version 2.0
+(Apache-2.0) for new code and contributions for which relicensing consent was
+obtained. Existing contributions whose authors have not granted relicensing
+permission remain under the MIT License. The SDK's license and attribution
+terms are included with the dependency distribution; this notice does not
+copy dependency source files.
+
+The SDK acknowledges the historical influence of
+github.com/mark3labs/mcp-go, originally authored by Ed Zynda, and its other
+contributors. That historical attribution remains subject to the applicable
+MIT License terms.

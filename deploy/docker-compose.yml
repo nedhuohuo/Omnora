@@ -7,16 +7,20 @@ services:
       dockerfile: Dockerfile
       args:
         GOPROXY: "${GOPROXY:-https://proxy.golang.org,direct}"
+        OMNORA_VERSION: "${OMNORA_VERSION:-dev}"
     image: omnora:aliyun-test
     container_name: omnora
     restart: unless-stopped
     init: true
-    user: "${PUID:-1000}:${PGID:-1000}"
     read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
     ports:
       # Bind to 127.0.0.1 for local/reverse-proxy-only access, or a private/public
       # host address when the service should be reachable directly.
@@ -28,13 +32,40 @@ services:
       OMNORA_DATA_DIR: /var/lib/omnora
       OMNORA_DB_PATH: /var/lib/omnora/omnora.db
       OMNORA_HTTP_ADDR: 0.0.0.0:8080
+      # Optional at first boot: set after the public origin is known. Until then
+      # the process serves /healthz and /readyz only; business routes stay closed.
+      # Prefer the reverse-proxy HTTPS origin; do not infer it from forwarded headers.
+      OMNORA_PUBLIC_URL: "${OMNORA_PUBLIC_URL:-}"
+      # Disposable QA only. Never enable for production or internet-facing NAS.
+      OMNORA_ALLOW_INSECURE_PUBLIC_HTTP: "${OMNORA_ALLOW_INSECURE_PUBLIC_HTTP:-false}"
+      OMNORA_ALLOWED_HOSTS: "${OMNORA_ALLOWED_HOSTS:-}"
+      OMNORA_ALLOWED_ORIGINS: "${OMNORA_ALLOWED_ORIGINS:-}"
+      OMNORA_TRUSTED_PROXY_CIDRS: "${OMNORA_TRUSTED_PROXY_CIDRS:-}"
+      # MCP is fail-closed: keep the route disabled or configure exact hosts
+      # before exposing it. Origins are optional for non-browser clients.
+      OMNORA_MCP_ALLOWED_HOSTS: "${OMNORA_MCP_ALLOWED_HOSTS:-}"
+      OMNORA_MCP_ALLOWED_ORIGINS: "${OMNORA_MCP_ALLOWED_ORIGINS:-}"
+      OMNORA_MCP_MAX_BODY_BYTES: "${OMNORA_MCP_MAX_BODY_BYTES:-1048576}"
       OMNORA_LOG_FORMAT: "${OMNORA_LOG_FORMAT:-json}"
       OMNORA_LOG_LEVEL: "${OMNORA_LOG_LEVEL:-info}"
-      OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:?set a one-time local initialization token}"
+      # Leave the secrets empty to let the image entrypoint generate and persist
+      # them in ./config/runtime.env.
+      OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:-}"
       OMNORA_INITIALIZATION_TOKEN_TTL: "${OMNORA_INITIALIZATION_TOKEN_TTL:-30m}"
-      OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:?set a TOTP encryption key}"
+      # High-risk opt-in: logs the full token only while the database confirms
+      # that initialization is still available. Keep false by default.
+      OMNORA_LOG_INITIALIZATION_TOKEN: "${OMNORA_LOG_INITIALIZATION_TOKEN:-false}"
+      OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:-}"
+      OMNORA_AUDIT_HMAC_KEY: "${OMNORA_AUDIT_HMAC_KEY:-}"
       OMNORA_MANAGED_STORAGE_DIR: /srv/omnora/managed
       OMNORA_PREDECLARED_MOUNT_ROOT: /mnt/omnora
+      OMNORA_UPDATE_DIR: /var/lib/omnora/updates
+      OMNORA_UPDATE_MAX_PACKAGE_BYTES: "${OMNORA_UPDATE_MAX_PACKAGE_BYTES:-536870912}"
+      OMNORA_UPDATE_SIGNING_PUBLIC_KEY_FILE: "${OMNORA_UPDATE_SIGNING_PUBLIC_KEY_FILE:-}"
+      OMNORA_UPDATE_HEALTH_URL: "${OMNORA_UPDATE_HEALTH_URL:-http://127.0.0.1:8080/readyz}"
+      OMNORA_UPDATE_HEALTH_TIMEOUT_SECONDS: "${OMNORA_UPDATE_HEALTH_TIMEOUT_SECONDS:-60}"
+      OMNORA_UPDATE_HEALTH_INTERVAL_SECONDS: "${OMNORA_UPDATE_HEALTH_INTERVAL_SECONDS:-2}"
+      OMNORA_UPDATE_STABILITY_SECONDS: "${OMNORA_UPDATE_STABILITY_SECONDS:-30}"
       OMNORA_ROUTE_ADMIN_WEB_ENABLED: "${OMNORA_ROUTE_ADMIN_WEB_ENABLED:-true}"
       OMNORA_ROUTE_MEMBER_WEB_ENABLED: "${OMNORA_ROUTE_MEMBER_WEB_ENABLED:-true}"
       OMNORA_ROUTE_SHARE_ENABLED: "${OMNORA_ROUTE_SHARE_ENABLED:-false}"
@@ -43,14 +74,14 @@ services:
       OMNORA_ROUTE_OPENAPI_ENABLED: "${OMNORA_ROUTE_OPENAPI_ENABLED:-true}"
     volumes:
       # Keep these host directories stable across reinstall/container recreation.
-      # Deleting or remapping them creates a new Omnora instance and can make
-      # previously registered mount paths unavailable until re-verified.
+      # The entrypoint writes a shared instance marker to config and data and
+      # refuses to start if those bind mounts no longer belong to one instance.
       - ./config:/etc/omnora
       - ./data:/var/lib/omnora
-      - ./managed:/srv/omnora/managed
-      # Bind NAS directories under /mnt/omnora before registering them in Omnora.
-      # After reinstall, bind each original source back to the same container path.
-      # Keep external mounts read-only unless write access is intentionally required.
+      - ./managed:/srv/omnora/managed:rw
+      # Keep the predeclared mount root writable at container startup. Omnora
+      # applies each registered mount's read_only/read_write policy in code.
+      - ./mounts:/mnt/omnora:rw
     tmpfs:
       - /tmp:size=128m,mode=1777
     logging:

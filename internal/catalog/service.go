@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"omnora/internal/contentref"
 	"omnora/internal/storage"
 )
 
@@ -51,7 +52,7 @@ func NewService(db *sql.DB) Service {
 
 type Mount struct {
 	ID               string
-	SpaceID          string
+	Source           contentref.Source
 	Root             string
 	Status           string
 	IndexEnabled     bool
@@ -68,7 +69,7 @@ const (
 
 type Entry struct {
 	ID                  string
-	SpaceID             string
+	Source              contentref.Source
 	MountID             string
 	RelativePath        string
 	Name                string
@@ -134,11 +135,10 @@ func (s Service) ScanBatch(ctx context.Context, mount Mount, opts ScanOptions) (
 
 	stmt, err := tx.PrepareContext(ctx, `
 INSERT INTO catalog_entries(
-	id, space_id, mount_id, relative_path, name, entry_kind, preview_kind,
+	id, mount_id, relative_path, name, entry_kind, preview_kind,
 	size_bytes, modified_at, identity_fingerprint, indexed_at, deleted_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 ON CONFLICT(mount_id, relative_path) DO UPDATE SET
-	space_id = excluded.space_id,
 	name = excluded.name,
 	entry_kind = excluded.entry_kind,
 	preview_kind = excluded.preview_kind,
@@ -156,7 +156,6 @@ ON CONFLICT(mount_id, relative_path) DO UPDATE SET
 	for _, entry := range entries {
 		if _, err := stmt.ExecContext(ctx,
 			entry.ID,
-			entry.SpaceID,
 			entry.MountID,
 			entry.RelativePath,
 			entry.Name,
@@ -186,7 +185,6 @@ ON CONFLICT(mount_id, relative_path) DO UPDATE SET
 }
 
 type SearchOptions struct {
-	SpaceID    string
 	Query      string
 	Limit      int
 	Cursor     string
@@ -205,16 +203,16 @@ type SearchResult struct {
 }
 
 type SearchItem struct {
-	ID                  string    `json:"id"`
-	SpaceID             string    `json:"spaceId"`
-	MountID             string    `json:"mountId"`
-	RelativePath        string    `json:"relativePath"`
-	Name                string    `json:"name"`
-	Kind                EntryKind `json:"kind"`
-	PreviewKind         string    `json:"previewKind"`
-	SizeBytes           int64     `json:"sizeBytes"`
-	ModifiedAt          time.Time `json:"modifiedAt"`
-	IdentityFingerprint string    `json:"identityFingerprint"`
+	ID                  string            `json:"id"`
+	Source              contentref.Source `json:"source"`
+	MountID             string            `json:"mountId,omitempty"`
+	RelativePath        string            `json:"relativePath"`
+	Name                string            `json:"name"`
+	Kind                EntryKind         `json:"kind"`
+	PreviewKind         string            `json:"previewKind"`
+	SizeBytes           int64             `json:"sizeBytes"`
+	ModifiedAt          time.Time         `json:"modifiedAt"`
+	IdentityFingerprint string            `json:"identityFingerprint"`
 }
 
 type ExcludedMount struct {
@@ -227,9 +225,6 @@ func (s Service) Search(ctx context.Context, opts SearchOptions) (SearchResult, 
 	if s.db == nil {
 		return SearchResult{}, errors.New("catalog database is nil")
 	}
-	if strings.TrimSpace(opts.SpaceID) == "" {
-		return SearchResult{}, errors.New("space id is required")
-	}
 	boundaries, err := normalizeSearchBoundaries(opts.Boundaries)
 	if err != nil {
 		return SearchResult{}, err
@@ -241,7 +236,7 @@ func (s Service) Search(ctx context.Context, opts SearchOptions) (SearchResult, 
 		return SearchResult{}, err
 	}
 
-	excluded, err := s.excludedMounts(ctx, opts.SpaceID)
+	excluded, err := s.excludedMounts(ctx, boundaries)
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -253,18 +248,18 @@ func (s Service) Search(ctx context.Context, opts SearchOptions) (SearchResult, 
 	}
 
 	querySQL := `
-	SELECT ce.id, ce.space_id, ce.mount_id, ce.relative_path, ce.name, ce.entry_kind,
+	SELECT ce.id, CASE m.purpose WHEN 'personal_default' THEN 'personal' ELSE 'common_mount' END,
+		ce.mount_id, ce.relative_path, ce.name, ce.entry_kind,
 		ce.preview_kind, ce.size_bytes, ce.modified_at, ce.identity_fingerprint
 	FROM catalog_entries ce
 	JOIN mounts m ON m.id = ce.mount_id
-WHERE ce.space_id = ?
-	AND ce.deleted_at IS NULL
+WHERE ce.deleted_at IS NULL
 	AND m.status = 'active'
 		AND m.index_enabled = 1
 		AND COALESCE(m.mount_identity_json, '') <> ''
 		AND (? = '%' OR lower(ce.name) LIKE ? ESCAPE '\')
 `
-	args := []any{opts.SpaceID, like, like}
+	args := []any{like, like}
 	if len(boundaries) > 0 {
 		clauses := make([]string, 0, len(boundaries))
 		for _, boundary := range boundaries {
@@ -301,7 +296,7 @@ WHERE ce.space_id = ?
 		var modifiedAt string
 		if err := rows.Scan(
 			&item.ID,
-			&item.SpaceID,
+			&item.Source,
 			&item.MountID,
 			&item.RelativePath,
 			&item.Name,
@@ -337,24 +332,31 @@ WHERE ce.space_id = ?
 	}, nil
 }
 
-func (s Service) excludedMounts(ctx context.Context, spaceID string) ([]ExcludedMount, error) {
+func (s Service) excludedMounts(ctx context.Context, boundaries []SearchBoundary) ([]ExcludedMount, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, display_name, status, index_enabled, COALESCE(mount_identity_json, '')
 FROM mounts
-WHERE space_id = ? AND status <> 'deleted'
+WHERE status <> 'deleted'
 ORDER BY display_name, id
-`, spaceID)
+`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	excluded := []ExcludedMount{}
+	allowed := make(map[string]bool, len(boundaries))
+	for _, boundary := range boundaries {
+		allowed[boundary.MountID] = true
+	}
 	for rows.Next() {
 		var mountID, name, status, identity string
 		var indexEnabled int
 		if err := rows.Scan(&mountID, &name, &status, &indexEnabled, &identity); err != nil {
 			return nil, err
+		}
+		if len(allowed) > 0 && !allowed[mountID] {
+			continue
 		}
 		reason := exclusionReason(status, indexEnabled == 1, identity != "")
 		if reason == "" {
@@ -391,7 +393,8 @@ func exclusionReason(status string, indexEnabled, identityVerified bool) string 
 }
 
 func validateMount(mount Mount) error {
-	if strings.TrimSpace(mount.ID) == "" || strings.TrimSpace(mount.SpaceID) == "" || strings.TrimSpace(mount.Root) == "" {
+	if strings.TrimSpace(mount.ID) == "" || strings.TrimSpace(mount.Root) == "" ||
+		mount.Source != contentref.SourcePersonal && mount.Source != contentref.SourceCommonMount {
 		return ErrInvalidMount
 	}
 	if mount.Status != MountStatusActive || !mount.IndexEnabled || !mount.IdentityVerified {
@@ -480,7 +483,7 @@ func newEntry(mount Mount, relativePath, name string, kind EntryKind, info os.Fi
 	}
 	return Entry{
 		ID:                  stableID(mount.ID, relativePath),
-		SpaceID:             mount.SpaceID,
+		Source:              mount.Source,
 		MountID:             mount.ID,
 		RelativePath:        relativePath,
 		Name:                name,

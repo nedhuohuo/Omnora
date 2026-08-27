@@ -17,11 +17,13 @@ func configureLogger(cfg config.LogConfig, output io.Writer) {
 	case "error":
 		level = slog.LevelError
 	}
+	slog.SetDefault(newLogger(cfg.Format, level, output))
+}
 
+func newLogger(format string, level slog.Leveler, output io.Writer) *slog.Logger {
 	options := &slog.HandlerOptions{Level: level}
-	if cfg.Format == "json" {
-		slog.SetDefault(slog.New(slog.NewJSONHandler(output, options)))
-		return
+	if format == "json" {
+		return slog.New(slog.NewJSONHandler(output, options))
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(output, options)))
+	return slog.New(slog.NewTextHandler(output, options))
 }

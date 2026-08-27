@@ -21,6 +21,7 @@ Strict mode also requires:
   - multi-architecture Docker buildx verification
   - deployed HTTP health/readiness checks via OMNORA_DEPLOYED_BASE_URL
   - a completed NAS verification evidence file via OMNORA_NAS_VERIFICATION_RECORD
+  - live MCP Inspector verification when OMNORA_MCP_URL and OMNORA_MCP_AI_TOKEN are supplied
 
 Environment:
   GOCACHE                         default: /private/tmp/omnora-go-cache
@@ -28,6 +29,9 @@ Environment:
   OMNORA_VERIFY_IMAGE_PLATFORMS   set to 1 to run image verification without --strict
   OMNORA_DEPLOYED_BASE_URL        deployed base URL, for example http://120.26.88.7:8080
   OMNORA_NAS_VERIFICATION_RECORD  path to a completed NAS evidence record
+  OMNORA_MCP_URL                  live MCP /mcp endpoint for conditional Inspector smoke
+  OMNORA_MCP_AI_TOKEN             short-lived scoped AI Token (never printed)
+  OMNORA_MCP_INSPECTOR_CHECKLIST  completed Inspector checklist evidence path
 USAGE
 }
 
@@ -77,6 +81,12 @@ step "Frontend test suite"
 step "Frontend production build"
 (cd "$ROOT/web" && npm run build)
 
+step "OpenAPI, REST, and MCP documentation checks"
+"$ROOT/scripts/verification/verify-api-docs.sh"
+
+step "Deterministic MCP protocol and SDK checks"
+"$ROOT/scripts/verification/verify-mcp-protocol.sh"
+
 step "Static release scaffold and Compose checks"
 if [ "$STRICT" -eq 1 ]; then
   OMNORA_REQUIRE_DOCKER_COMPOSE=1 "$ROOT/scripts/verification/verify-scaffolding.sh"
@@ -98,6 +108,32 @@ elif [ "$STRICT" -eq 1 ]; then
   fail "strict mode requires OMNORA_DEPLOYED_BASE_URL"
 else
   skip "deployed HTTP reachability; set OMNORA_DEPLOYED_BASE_URL or use --strict"
+fi
+
+if [ -n "${OMNORA_MCP_URL:-}" ] || [ -n "${OMNORA_MCP_AI_TOKEN:-}" ]; then
+  if [ -z "${OMNORA_MCP_URL:-}" ] || [ -z "${OMNORA_MCP_AI_TOKEN:-}" ]; then
+    fail "OMNORA_MCP_URL and OMNORA_MCP_AI_TOKEN must be supplied together"
+  fi
+  if [ -z "${OMNORA_MCP_INSPECTOR_CHECKLIST:-}" ] || [ ! -f "$OMNORA_MCP_INSPECTOR_CHECKLIST" ]; then
+    fail "live MCP Inspector verification requires a completed OMNORA_MCP_INSPECTOR_CHECKLIST file"
+  fi
+  inspector_template="$ROOT/docs/verification/mcp-inspector-checklist.md"
+  expected_inspector_checks=$(grep -Ec '^[[:space:]]*-[[:space:]]+\[[xX ]\]' "$inspector_template")
+  checked_inspector_checks=$(grep -Eoc '^[[:space:]]*-[[:space:]]+\[[xX]\]' "$OMNORA_MCP_INSPECTOR_CHECKLIST" || true)
+  if [ "$checked_inspector_checks" -ne "$expected_inspector_checks" ]; then
+    fail "OMNORA_MCP_INSPECTOR_CHECKLIST must contain all $expected_inspector_checks checked acceptance items"
+  fi
+  if grep -Eq '^[[:space:]]*-[[:space:]]+\[ \]' "$OMNORA_MCP_INSPECTOR_CHECKLIST"; then
+    fail "OMNORA_MCP_INSPECTOR_CHECKLIST still contains unchecked acceptance items"
+  fi
+  grep -Eiq '^[[:space:]]*(status|状态)[[:space:]]*:[[:space:]]*(complete|completed|通过|已完成)[[:space:]]*$' "$OMNORA_MCP_INSPECTOR_CHECKLIST" \
+    || fail "OMNORA_MCP_INSPECTOR_CHECKLIST needs an explicit complete status"
+  grep -Eiq '^[[:space:]]*(redacted evidence|脱敏摘要)[[:space:]]*:[[:space:]]*[^[:space:]]' "$OMNORA_MCP_INSPECTOR_CHECKLIST" \
+    || fail "OMNORA_MCP_INSPECTOR_CHECKLIST needs a non-empty redacted evidence summary"
+  step "Live MCP Inspector modern smoke"
+  "$ROOT/scripts/verification/verify-mcp-inspector.sh"
+else
+  skip "live MCP Inspector smoke; set OMNORA_MCP_URL, OMNORA_MCP_AI_TOKEN, and OMNORA_MCP_INSPECTOR_CHECKLIST"
 fi
 
 if [ -n "${OMNORA_NAS_VERIFICATION_RECORD:-}" ]; then

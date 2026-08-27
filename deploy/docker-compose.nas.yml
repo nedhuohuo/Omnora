@@ -2,16 +2,21 @@
 # building from source on the NAS.
 services:
   omnora:
-    image: ghcr.io/nedhuohuo/omnora:codex-aliyun-test-deploy
+    # Pin this deployment explicitly to the release tag or digest being
+    # verified. Never silently fall back to an image from an older checkout.
+    image: "${OMNORA_IMAGE:?set OMNORA_IMAGE to the verified GHCR tag or digest}"
     container_name: omnora
     restart: unless-stopped
     init: true
-    user: "${PUID:-1000}:${PGID:-1000}"
     read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
     ports:
       - "${OMNORA_BIND:-0.0.0.0}:8080:8080"
     environment:
@@ -21,13 +26,38 @@ services:
       OMNORA_DATA_DIR: /var/lib/omnora
       OMNORA_DB_PATH: /var/lib/omnora/omnora.db
       OMNORA_HTTP_ADDR: 0.0.0.0:8080
+      # Optional at first boot: set after the public origin is known. Until then
+      # the process serves /healthz and /readyz only; business routes stay closed.
+      # Prefer the reverse-proxy HTTPS origin; do not infer it from forwarded headers.
+      OMNORA_PUBLIC_URL: "${OMNORA_PUBLIC_URL:-}"
+      OMNORA_ALLOWED_HOSTS: "${OMNORA_ALLOWED_HOSTS:-}"
+      OMNORA_ALLOWED_ORIGINS: "${OMNORA_ALLOWED_ORIGINS:-}"
+      OMNORA_TRUSTED_PROXY_CIDRS: "${OMNORA_TRUSTED_PROXY_CIDRS:-}"
+      # MCP is fail-closed: keep the route disabled or configure exact hosts
+      # before exposing it. Origins are optional for non-browser clients.
+      OMNORA_MCP_ALLOWED_HOSTS: "${OMNORA_MCP_ALLOWED_HOSTS:-}"
+      OMNORA_MCP_ALLOWED_ORIGINS: "${OMNORA_MCP_ALLOWED_ORIGINS:-}"
+      OMNORA_MCP_MAX_BODY_BYTES: "${OMNORA_MCP_MAX_BODY_BYTES:-1048576}"
       OMNORA_LOG_FORMAT: "${OMNORA_LOG_FORMAT:-json}"
       OMNORA_LOG_LEVEL: "${OMNORA_LOG_LEVEL:-info}"
-      OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:?set a one-time local initialization token}"
+      # Leave the secrets empty to let the image entrypoint generate and persist
+      # them in ./config/runtime.env.
+      OMNORA_INITIALIZATION_TOKEN: "${OMNORA_INITIALIZATION_TOKEN:-}"
       OMNORA_INITIALIZATION_TOKEN_TTL: "${OMNORA_INITIALIZATION_TOKEN_TTL:-30m}"
-      OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:?set a TOTP encryption key}"
+      # High-risk opt-in: logs the full token only while the database confirms
+      # that initialization is still available. Keep false by default.
+      OMNORA_LOG_INITIALIZATION_TOKEN: "${OMNORA_LOG_INITIALIZATION_TOKEN:-false}"
+      OMNORA_TOTP_ENCRYPTION_KEY: "${OMNORA_TOTP_ENCRYPTION_KEY:-}"
+      OMNORA_AUDIT_HMAC_KEY: "${OMNORA_AUDIT_HMAC_KEY:-}"
       OMNORA_MANAGED_STORAGE_DIR: /srv/omnora/managed
       OMNORA_PREDECLARED_MOUNT_ROOT: /mnt/omnora
+      OMNORA_UPDATE_DIR: /var/lib/omnora/updates
+      OMNORA_UPDATE_MAX_PACKAGE_BYTES: "${OMNORA_UPDATE_MAX_PACKAGE_BYTES:-536870912}"
+      OMNORA_UPDATE_SIGNING_PUBLIC_KEY_FILE: "${OMNORA_UPDATE_SIGNING_PUBLIC_KEY_FILE:-}"
+      OMNORA_UPDATE_HEALTH_URL: "${OMNORA_UPDATE_HEALTH_URL:-http://127.0.0.1:8080/readyz}"
+      OMNORA_UPDATE_HEALTH_TIMEOUT_SECONDS: "${OMNORA_UPDATE_HEALTH_TIMEOUT_SECONDS:-60}"
+      OMNORA_UPDATE_HEALTH_INTERVAL_SECONDS: "${OMNORA_UPDATE_HEALTH_INTERVAL_SECONDS:-2}"
+      OMNORA_UPDATE_STABILITY_SECONDS: "${OMNORA_UPDATE_STABILITY_SECONDS:-30}"
       OMNORA_ROUTE_ADMIN_WEB_ENABLED: "${OMNORA_ROUTE_ADMIN_WEB_ENABLED:-true}"
       OMNORA_ROUTE_MEMBER_WEB_ENABLED: "${OMNORA_ROUTE_MEMBER_WEB_ENABLED:-true}"
       OMNORA_ROUTE_SHARE_ENABLED: "${OMNORA_ROUTE_SHARE_ENABLED:-false}"
@@ -35,9 +65,14 @@ services:
       OMNORA_ROUTE_MCP_ENABLED: "${OMNORA_ROUTE_MCP_ENABLED:-false}"
       OMNORA_ROUTE_OPENAPI_ENABLED: "${OMNORA_ROUTE_OPENAPI_ENABLED:-true}"
     volumes:
+      # Keep config and data directories stable. The entrypoint refuses to
+      # start when their persistent instance markers no longer match.
       - ./config:/etc/omnora
       - ./data:/var/lib/omnora
-      - ./managed:/srv/omnora/managed
+      - ./managed:/srv/omnora/managed:rw
+      # The application controls the read_only/read_write policy for each
+      # registered child directory under this writable predeclared root.
+      - ./mounts:/mnt/omnora:rw
     tmpfs:
       - /tmp:size=128m,mode=1777
     logging:

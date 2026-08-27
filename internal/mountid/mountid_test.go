@@ -96,6 +96,40 @@ func TestCheckConflictsUsesPathComponentBoundaries(t *testing.T) {
 	}
 }
 
+func TestIsBindMountAtMatchesExactMountPoint(t *testing.T) {
+	dir := realTempDir(t)
+	mountInfo := filepath.Join(dir, "mountinfo")
+	const table = "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n" +
+		"2 1 8:2 /exports/photos /mnt/omnora/slot1 rw - ext4 /dev/sda2 rw\n" +
+		"3 1 8:3 /exports/music /mnt/omnora/slot2 rw - ext4 /dev/sda3 rw\n"
+	if err := os.WriteFile(mountInfo, []byte(table), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{"/mnt/omnora/slot1", "/mnt/omnora/slot2"} {
+		bound, err := isBindMountAt(path, mountInfo)
+		if err != nil || !bound {
+			t.Fatalf("isBindMountAt(%s) = %v, %v; want true", path, bound, err)
+		}
+	}
+	// A path that is covered by another mount point but has no entry of its
+	// own is not a bound slot.
+	bound, err := isBindMountAt("/mnt/omnora", mountInfo)
+	if err != nil || bound {
+		t.Fatalf("isBindMountAt(/mnt/omnora) = %v, %v; want false", bound, err)
+	}
+	// An entirely absent path is not bound.
+	bound, err = isBindMountAt("/mnt/omnora/slot9", mountInfo)
+	if err != nil || bound {
+		t.Fatalf("isBindMountAt(slot9) = %v, %v; want false", bound, err)
+	}
+	// A missing mountinfo table means nothing can be detected as bound.
+	bound, err = isBindMountAt("/mnt/omnora/slot1", missingMountInfoPath(t))
+	if err != nil || bound {
+		t.Fatalf("isBindMountAt(missing) = %v, %v; want false", bound, err)
+	}
+}
+
 func TestParseMountInfoCapturesFieldsAndEscapes(t *testing.T) {
 	const sample = "42 30 8:1 /source\\040root /mnt/data\\040one rw,relatime shared:7 - ext4 /dev/sda1 rw\n"
 

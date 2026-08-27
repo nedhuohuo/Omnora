@@ -48,7 +48,7 @@ WHERE id = ? AND status = 'active'
 	}
 	_, err = s.db.ExecContext(ctx, `
 UPDATE accounts
-SET password_hash = ?, updated_at = ?
+SET password_hash = ?, password_reset_required = 0, updated_at = ?
 WHERE id = ? AND status = 'active'
 `, newHash, formatTime(s.now()), accountID)
 	return err
@@ -59,9 +59,12 @@ WHERE id = ? AND status = 'active'
 // determine which session is "current" without exposing raw tokens.
 func (s *Service) ListSessions(ctx context.Context, accountID string) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, account_id, token_hash, entry, created_at, expires_at, last_used_at, revoked_at
-FROM identity_sessions
-WHERE account_id = ? AND revoked_at IS NULL AND expires_at > ?
+	SELECT id, account_id, token_hash, entry, purpose, credential_generation,
+	       created_at, expires_at, last_used_at, reauthenticated_at, revoked_at
+	FROM identity_sessions
+	WHERE account_id = ? AND revoked_at IS NULL AND expires_at > ?
+	  AND purpose IN ('full', 'totp_enrollment')
+	  AND credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
 ORDER BY created_at DESC
 `, accountID, formatTime(s.now()))
 	if err != nil {
@@ -72,11 +75,13 @@ ORDER BY created_at DESC
 	var sessions []Session
 	for rows.Next() {
 		var session Session
+		var purpose string
 		var createdAt, expiresAt string
-		var lastUsedAt, revokedAt sql.NullString
-		if err := rows.Scan(&session.ID, &session.AccountID, &session.TokenHash, &session.Entry, &createdAt, &expiresAt, &lastUsedAt, &revokedAt); err != nil {
+		var lastUsedAt, reauthenticatedAt, revokedAt sql.NullString
+		if err := rows.Scan(&session.ID, &session.AccountID, &session.TokenHash, &session.Entry, &purpose, &session.CredentialGeneration, &createdAt, &expiresAt, &lastUsedAt, &reauthenticatedAt, &revokedAt); err != nil {
 			return nil, err
 		}
+		session.Purpose = SessionPurpose(purpose)
 		session.CreatedAt, err = parseTime(createdAt)
 		if err != nil {
 			return nil, err
@@ -87,6 +92,12 @@ ORDER BY created_at DESC
 		}
 		if lastUsedAt.Valid {
 			session.LastUsedAt, err = parseTime(lastUsedAt.String)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if reauthenticatedAt.Valid {
+			session.ReauthenticatedAt, err = parseTime(reauthenticatedAt.String)
 			if err != nil {
 				return nil, err
 			}
@@ -122,27 +133,90 @@ WHERE id = ? AND account_id = ? AND revoked_at IS NULL
 // RevokeAllSessions revokes every active session for accountID except the
 // session identified by keepSessionID (pass an empty string to revoke all).
 func (s *Service) RevokeAllSessions(ctx context.Context, accountID, keepSessionID string) error {
+	return s.RevokeAllSessionsSecure(ctx, accountID, keepSessionID, nil)
+}
+
+// RevokeAllSessionsSecure fences every active session and optionally writes
+// the success audit row in the same transaction.
+func (s *Service) RevokeAllSessionsSecure(ctx context.Context, accountID, keepSessionID string, auditWriter TxAuditWriter) error {
 	if accountID == "" {
 		return fieldError("account_id", "is required")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 UPDATE identity_sessions
 SET revoked_at = ?
 WHERE account_id = ? AND revoked_at IS NULL AND id <> ?
-`, formatTime(s.now()), accountID, keepSessionID)
-	return err
+`, formatTime(s.now()), accountID, keepSessionID); err != nil {
+		return err
+	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // DisableTOTP clears TOTP enrollment for an account so login no longer
 // requires a code.
 func (s *Service) DisableTOTP(ctx context.Context, accountID string) error {
+	return s.DisableTOTPSecure(ctx, accountID, nil)
+}
+
+// DisableTOTPSecure clears TOTP and writes an optional success audit event in
+// the same transaction. Password and current-code verification stay outside
+// the write transaction at the HTTP boundary. Administrators and members may
+// both disable TOTP; it is never a role requirement.
+func (s *Service) DisableTOTPSecure(ctx context.Context, accountID string, auditWriter TxAuditWriter) error {
 	if accountID == "" {
 		return fieldError("account_id", "is required")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var status string
+	if err := tx.QueryRowContext(ctx, `
+SELECT status
+FROM accounts
+WHERE id = ?
+`, accountID).Scan(&status); errors.Is(err, sql.ErrNoRows) {
+		return ErrInvalidCredential
+	} else if err != nil {
+		return err
+	} else if status != "active" {
+		return ErrInvalidCredential
+	}
+	result, err := tx.ExecContext(ctx, `
 UPDATE accounts
-SET totp_required = 0, totp_secret_ciphertext = NULL, totp_confirmed_at = NULL, updated_at = ?
+SET totp_required = 0,
+    totp_secret_ciphertext = NULL,
+    totp_confirmed_at = NULL,
+    totp_pending_secret_ciphertext = NULL,
+    totp_pending_expires_at = NULL,
+    updated_at = ?
 WHERE id = ? AND status = 'active'
 `, formatTime(s.now()), accountID)
-	return err
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrInvalidCredential
+	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

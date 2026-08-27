@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"omnora/internal/identity"
@@ -82,72 +81,6 @@ func TestAdminCreateUser(t *testing.T) {
 	svc := identity.New(db.SQL(), identity.Options{})
 	if _, err := svc.Authenticate(context.Background(), "new-user@example.test", apiTestPassword); err != nil {
 		t.Fatalf("expected new user to authenticate, got error: %v", err)
-	}
-}
-
-func TestAdminPutSpaceMemberResolvesEmailAndRejectsUnknownAccount(t *testing.T) {
-	db, handler := newAPITestServer(t)
-	admin, member := createAPITestAccounts(t, db)
-	adminCookie := issueAPITestSession(t, db, admin.ID)
-	ctx := context.Background()
-	if _, err := db.SQL().ExecContext(ctx, `
-INSERT INTO spaces(id, kind, name, owner_account_id, status)
-VALUES ('shared-acl', 'shared', 'ACL Space', ?, 'active')
-`, admin.ID); err != nil {
-		t.Fatalf("insert space: %v", err)
-	}
-	if _, err := db.SQL().ExecContext(ctx, `
-INSERT INTO space_members(space_id, account_id, permission)
-VALUES ('shared-acl', ?, 'manager')
-`, admin.ID); err != nil {
-		t.Fatalf("insert owner membership: %v", err)
-	}
-
-	body, err := json.Marshal(map[string]string{"permission": "manager"})
-	if err != nil {
-		t.Fatalf("marshal put member request: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/spaces/shared-acl/members/"+strings.ToUpper(member.Email), bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(adminCookie)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("put member by email status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var added spaceMemberDTO
-	if err := json.Unmarshal(rec.Body.Bytes(), &added); err != nil {
-		t.Fatalf("decode added member: %v", err)
-	}
-	if added.AccountID != member.ID || added.Email != member.Email || added.DisplayName != member.DisplayName || added.Permission != "manager" {
-		t.Fatalf("added member = %#v, want resolved account with manager permission", added)
-	}
-	var permission string
-	if err := db.SQL().QueryRowContext(ctx, `
-SELECT permission FROM space_members WHERE space_id = 'shared-acl' AND account_id = ?
-`, member.ID).Scan(&permission); err != nil {
-		t.Fatalf("query added membership: %v", err)
-	}
-	if permission != "manager" {
-		t.Fatalf("permission = %q, want manager", permission)
-	}
-
-	missingReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/spaces/shared-acl/members/missing@example.test", bytes.NewReader(body))
-	missingReq.Header.Set("Content-Type", "application/json")
-	missingReq.AddCookie(adminCookie)
-	missingRec := httptest.NewRecorder()
-	handler.ServeHTTP(missingRec, missingReq)
-	if missingRec.Code != http.StatusNotFound {
-		t.Fatalf("put missing member status = %d, want %d, body = %s", missingRec.Code, http.StatusNotFound, missingRec.Body.String())
-	}
-
-	missingSpaceReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/spaces/missing-space/members/"+member.ID, bytes.NewReader(body))
-	missingSpaceReq.Header.Set("Content-Type", "application/json")
-	missingSpaceReq.AddCookie(adminCookie)
-	missingSpaceRec := httptest.NewRecorder()
-	handler.ServeHTTP(missingSpaceRec, missingSpaceReq)
-	if missingSpaceRec.Code != http.StatusNotFound {
-		t.Fatalf("put member into missing space status = %d, want %d, body = %s", missingSpaceRec.Code, http.StatusNotFound, missingSpaceRec.Body.String())
 	}
 }
 

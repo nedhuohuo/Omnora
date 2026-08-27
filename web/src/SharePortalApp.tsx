@@ -12,7 +12,8 @@ import {
   sharePortalDownloadURL,
 } from './api';
 import { getStoredLocale, localeMessages, saveLocale, type MemberLocale } from './member/i18n';
-import './member/member-files.css';
+import FileTypeIcon from './member/FileTypeIcon';
+import MarkdownPreview from './member/MarkdownPreview';
 import './share-portal.css';
 
 type PortalStatus = 'checking' | 'password-required' | 'secret-missing' | 'unavailable' | 'ready';
@@ -38,6 +39,13 @@ function childPath(parentPath: string, name: string) {
   return parentPath === '.' || !parentPath ? name : `${parentPath}/${name}`;
 }
 
+// 将 markdown 文档内的相对资源路径改写为分享根下同目录文件的 inline 预览链接。
+function shareMarkdownAssetURL(mdPath: string, src: string): string {
+  if (!src || /^(?:[a-z][a-z0-9+.-]*:|\/)/i.test(src)) return src;
+  const dir = breadcrumbSegments(mdPath).slice(0, -1).join('/');
+  return sharePortalDownloadURL([dir, src].filter(Boolean).join('/'), true);
+}
+
 function formatBytes(bytes: number | undefined) {
   if (bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return '--';
   if (bytes === 0) return '0 B';
@@ -60,6 +68,8 @@ export default function SharePortalApp() {
   const [entries, setEntries] = useState<SharePortalEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [mdPreview, setMdPreview] = useState<{ path: string; name: string; text: string | null; failed: boolean } | null>(null);
+  const filePreviewKind = current?.previewKind ?? 'unknown_download';
 
   function changeLocale(next: MemberLocale) {
     saveLocale(next);
@@ -150,9 +160,37 @@ export default function SharePortalApp() {
     }
   }
 
+  // 分享目标是 markdown 文件时，进入文件视图即自动拉取内容并在页面内渲染。
+  useEffect(() => {
+    if (status !== 'ready' || !current || mode !== 'file' || filePreviewKind !== 'markdown' || !current.allowPreview) return;
+    setMdPreview({ path: '', name: current.path || text.portalBackToRoot, text: null, failed: false });
+  }, [status, current, mode, filePreviewKind, text.portalBackToRoot]);
+
+  // 拉取 markdown 内容；path 为空串时表示分享目标本身。
+  useEffect(() => {
+    if (!mdPreview || mdPreview.text !== null || mdPreview.failed) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(sharePortalDownloadURL(mdPreview.path, true), { credentials: 'same-origin' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const body = await response.text();
+        if (!cancelled) setMdPreview((current) => (current ? { ...current, text: body } : current));
+      } catch {
+        if (!cancelled) setMdPreview((current) => (current ? { ...current, failed: true } : current));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mdPreview]);
+
+  function openMdPreview(path: string, name: string) {
+    setMdPreview({ path, name, text: null, failed: false });
+  }
+
   const crumbs = breadcrumbSegments(path);
   const rootLabel = current?.path || text.portalBackToRoot;
-  const filePreviewKind = current?.previewKind ?? 'unknown_download';
 
   return (
     <main className="share-portal">
@@ -204,13 +242,18 @@ export default function SharePortalApp() {
             <h1>{rootLabel}</h1>
             {!current.allowDownload && <p className="member-readonly">{text.portalDownloadDisabledHint}</p>}
             <div className="share-portal-file-actions">
-              {current.allowPreview && canPreview(filePreviewKind) ? (
+              {current.allowPreview && filePreviewKind === 'markdown' ? null : current.allowPreview && canPreview(filePreviewKind) ? (
                 <a className="member-primary" href={sharePortalDownloadURL('', true)} target="_blank" rel="noreferrer">{text.portalPreview}</a>
               ) : current.allowPreview ? (
                 <span className="member-error">{text.portalPreviewUnavailable}</span>
               ) : null}
               {current.allowDownload && <a href={sharePortalDownloadURL('')}>{text.portalDownload}</a>}
             </div>
+            {filePreviewKind === 'markdown' && current.allowPreview && mdPreview && (
+              <div className="share-portal-md-preview">
+                {mdPreview.failed ? <p className="member-preview-error">{text.previewFailed}</p> : mdPreview.text === null ? <p className="member-preview-loading">{text.loading}</p> : <MarkdownPreview text={mdPreview.text} resolveAsset={(src) => shareMarkdownAssetURL(mdPreview.path, src)} />}
+              </div>
+            )}
           </section>
         )}
 
@@ -237,7 +280,7 @@ export default function SharePortalApp() {
                     <tr key={entryPath}>
                       <td>
                         <div className="member-file-name">
-                          <span className={`member-file-icon ${entry.kind}`}>{entry.kind === 'dir' ? 'DIR' : entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>
+                          <FileTypeIcon kind={entry.kind} name={entry.name} className={`member-file-icon ${entry.kind}`} />
                           {entry.kind === 'dir' ? <button type="button" onClick={() => void loadChildren(entryPath)}>{entry.name}</button> : <span>{entry.name}</span>}
                         </div>
                       </td>
@@ -248,7 +291,9 @@ export default function SharePortalApp() {
                           <button type="button" onClick={() => void loadChildren(entryPath)}>{text.open}</button>
                         ) : (
                           <>
-                            {current.allowPreview && canPreview(entry.previewKind) ? (
+                            {current.allowPreview && entry.previewKind === 'markdown' ? (
+                              <button type="button" onClick={() => openMdPreview(entryPath, entry.name)}>{text.portalPreview}</button>
+                            ) : current.allowPreview && canPreview(entry.previewKind) ? (
                               <a href={sharePortalDownloadURL(entryPath, true)} target="_blank" rel="noreferrer">{text.portalPreview}</a>
                             ) : (
                               current.allowPreview ? <span className="member-error">{text.portalPreviewUnavailable}</span> : null
@@ -261,6 +306,12 @@ export default function SharePortalApp() {
                   );
                 })}</tbody>
               </table>
+            )}
+            {mdPreview && (
+              <div className="share-portal-md-preview">
+                <div className="share-portal-md-header"><strong>{mdPreview.name}</strong><button type="button" onClick={() => setMdPreview(null)}>{text.closePreview}</button></div>
+                {mdPreview.failed ? <p className="member-preview-error">{text.previewFailed}</p> : mdPreview.text === null ? <p className="member-preview-loading">{text.loading}</p> : <MarkdownPreview text={mdPreview.text} resolveAsset={(src) => shareMarkdownAssetURL(mdPreview.path, src)} />}
+              </div>
             )}
           </section>
         )}

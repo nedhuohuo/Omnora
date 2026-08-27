@@ -1,27 +1,32 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import {
+  type AiTokenScope,
   type AiTokenBoundary,
   type AiTokenListItem,
+  type MemberContentSourcesPayload,
   ApiError,
   createAiToken,
   deleteAiToken,
+  isReauthenticationCanceled,
   listAiTokens,
-  listMounts,
-  listSpaces,
+  listMemberContentSources,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
-import type { MemberMount, MemberSpace } from './types';
+import { useRecentReauth } from './RecentReauthProvider';
 import { createClientId } from './clientId';
 import { copyText } from './clipboard';
-import { joinReadableLabels, readableLabel } from './displayLabels';
-
-// Canonical backend scopes (see internal/aitoken/types.go). The UI presents a
-// simplified "read" / "upload" choice; read expands to the full read-only set.
-const READ_SCOPES = ['spaces:read', 'files:list', 'files:metadata', 'files:text', 'search:read'];
+import { readableLabel } from './displayLabels';
+import {
+  MCP_PRESETS,
+  buildInspectorConnection,
+  type InspectorConnection,
+  type McpPreset,
+} from './mcpIntegration';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
 function describeError(error: unknown) {
+  if (isReauthenticationCanceled(error)) return '';
   if (error instanceof ApiError) {
     const body = error.body as { error?: { message?: string; code?: string } } | undefined;
     const message = body?.error?.message?.trim();
@@ -47,32 +52,55 @@ function tokenStatusLabel(status: string | undefined, text: LocaleText) {
   return status ? (labels[status] ?? status) : text.tokenStatusActive;
 }
 
-type BoundaryDraft = { key: string; spaceId: string; mountId: string; path: string };
+export type BoundaryDraft = {
+  key: string;
+  source: AiTokenBoundary['source'];
+  mountId: string;
+  path: string;
+};
 
-function boundarySummary(boundary: AiTokenBoundary, spaces: MemberSpace[], mountsBySpace: Record<string, MemberMount[]>) {
-  const path = boundary.path && boundary.path !== '.' ? boundary.path : '/';
-  const spaceName = readableLabel(boundary.spaceName) || spaces.find((space) => space.id === boundary.spaceId)?.name;
-  const mountName = readableLabel(boundary.mountName) || mountsBySpace[boundary.spaceId]?.find((mount) => mount.id === boundary.mountId)?.name;
-  const location = joinReadableLabels([spaceName, mountName]);
-  return location ? `${location} · ${path}` : path;
+export function boundaryPayload(boundary: BoundaryDraft): AiTokenBoundary {
+  const path = boundary.path.trim();
+  if (boundary.source === 'all_account_content') return { source: 'all_account_content' };
+  if (boundary.source === 'personal') {
+    return { source: 'personal', ...(path ? { path } : {}) };
+  }
+  return { source: 'common_mount', mountId: boundary.mountId, ...(path ? { path } : {}) };
+}
+
+export function boundarySummary(
+  boundary: AiTokenBoundary,
+  sources: MemberContentSourcesPayload | null,
+  allAccountContentLabel: string,
+) {
+  if (boundary.source === 'all_account_content') return allAccountContentLabel;
+  const location = boundary.source === 'personal'
+    ? (sources?.personal.label ?? '')
+    : (readableLabel(boundary.mountName)
+      || sources?.commonMounts.find((mount) => mount.mountId === boundary.mountId)?.displayName
+      || '');
+  const path = boundary.path && boundary.path !== '.' ? boundary.path : '';
+  if (location && path) return `${location} · ${path}`;
+  return location || path || '/';
 }
 
 export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) {
   const text = localeMessages[locale];
+  const { runSensitive } = useRecentReauth();
   const [tokens, setTokens] = useState<AiTokenListItem[]>([]);
-  const [spaces, setSpaces] = useState<MemberSpace[]>([]);
-  const [mountsBySpace, setMountsBySpace] = useState<Record<string, MemberMount[]>>({});
+  const [contentSources, setContentSources] = useState<MemberContentSourcesPayload | null>(null);
   const [name, setName] = useState('');
-  const [scopeRead, setScopeRead] = useState(true);
-  const [scopeUpload, setScopeUpload] = useState(false);
+  const [preset, setPreset] = useState<Exclude<McpPreset, 'permanentDelete'>>('readOnly');
+  const [permanentDelete, setPermanentDelete] = useState(false);
   const [expiresAt, setExpiresAt] = useState('');
   const [boundaries, setBoundaries] = useState<BoundaryDraft[]>([]);
   const [formOpen, setFormOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [createdToken, setCreatedToken] = useState('');
+  const [createdToken, setCreatedToken] = useState<{ bearerToken: string; connection: InspectorConnection } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [connectionCopied, setConnectionCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AiTokenListItem | null>(null);
 
@@ -80,22 +108,13 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setLoading(true);
     setError('');
     try {
-      const [tokenResponse, spaceResponse] = await Promise.all([listAiTokens(), listSpaces()]);
+      const [tokenResponse, sourceResponse] = await Promise.all([
+        listAiTokens(),
+        listMemberContentSources(),
+      ]);
       const nextTokens = tokenResponse.items ?? [];
       setTokens(nextTokens);
-      setSpaces(spaceResponse.items);
-      const tokenSpaceIds = Array.from(new Set(nextTokens.flatMap((token) => (token.boundaries ?? []).map((boundary) => boundary.spaceId)).filter(Boolean)));
-      if (tokenSpaceIds.length > 0) {
-        const mountEntries = await Promise.all(tokenSpaceIds.map(async (spaceId) => {
-          try {
-            const response = await listMounts(spaceId);
-            return [spaceId, response.items] as const;
-          } catch {
-            return [spaceId, []] as const;
-          }
-        }));
-        setMountsBySpace((current) => ({ ...current, ...Object.fromEntries(mountEntries) }));
-      }
+      setContentSources(sourceResponse);
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -108,8 +127,9 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
   }, [load]);
 
   function addBoundary() {
-    const firstSpace = spaces[0]?.id ?? '';
-    setBoundaries((current) => [...current, { key: createClientId(), spaceId: firstSpace, mountId: '', path: '' }]);
+    setBoundaries((current) => [...current, {
+      key: createClientId(), source: 'all_account_content', mountId: '', path: '',
+    }]);
   }
 
   function removeBoundary(key: string) {
@@ -120,50 +140,42 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setBoundaries((current) => current.map((boundary) => (boundary.key === key ? { ...boundary, ...patch } : boundary)));
   }
 
-  useEffect(() => {
-    boundaries.forEach((boundary) => {
-      if (boundary.spaceId && !mountsBySpace[boundary.spaceId]) {
-        void listMounts(boundary.spaceId).then((response) => {
-          setMountsBySpace((current) => ({ ...current, [boundary.spaceId]: response.items }));
-        }).catch(() => undefined);
-      }
-    });
-  }, [boundaries, mountsBySpace]);
-
   function resetForm() {
     setName('');
-    setScopeRead(true);
-    setScopeUpload(false);
+    setPreset('readOnly');
+    setPermanentDelete(false);
     setExpiresAt('');
     setBoundaries([]);
   }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!name.trim() || !expiresAt) return;
+    if (!name.trim()) return;
     setCreating(true);
     setError('');
     try {
-      const validBoundaries = boundaries.filter((boundary) => boundary.spaceId && boundary.mountId);
+      const validBoundaries = boundaries.filter((boundary) => (
+        boundary.source !== 'common_mount' || Boolean(boundary.mountId)
+      ));
       if (validBoundaries.length === 0) {
         setError(text.tokenBoundaryRequired);
         return;
       }
-      const scopes = [
-        ...(scopeRead ? READ_SCOPES : []),
-        ...(scopeUpload ? ['uploads:create'] : []),
+      const scopes: AiTokenScope[] = [
+        ...MCP_PRESETS[preset],
+        ...(permanentDelete ? MCP_PRESETS.permanentDelete : []),
       ];
-      const result = await createAiToken({
+      const result = await runSensitive(() => createAiToken({
         name: name.trim(),
-        scopes: scopes.length > 0 ? scopes : READ_SCOPES,
-        boundaries: validBoundaries.map((boundary) => ({
-          spaceId: boundary.spaceId,
-          mountId: boundary.mountId,
-          path: boundary.path.trim() || '.',
-        })),
-        expiresAt: new Date(expiresAt).toISOString(),
-      });
-      setCreatedToken(result.bearerToken ?? result.secret ?? '');
+        scopes,
+        boundaries: validBoundaries.map(boundaryPayload),
+        // An empty expiry means the token never expires.
+        ...(expiresAt ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
+      }));
+      const connection = buildInspectorConnection(globalThis.location?.origin ?? '', result.bearerToken);
+      setCreatedToken({ bearerToken: result.bearerToken, connection });
+      setCopied(false);
+      setConnectionCopied(false);
       setFormOpen(false);
       resetForm();
       await load();
@@ -172,6 +184,19 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     } finally {
       setCreating(false);
     }
+  }
+
+  const presetOptions: Array<{ id: Exclude<McpPreset, 'permanentDelete'>; label: string; detail: string }> = [
+    { id: 'readOnly', label: text.tokenPresetReadOnly, detail: text.tokenPresetReadOnlyDetail },
+    { id: 'fileManagement', label: text.tokenPresetFileManagement, detail: text.tokenPresetFileManagementDetail },
+    { id: 'shareManagement', label: text.tokenPresetShareManagement, detail: text.tokenPresetShareManagementDetail },
+  ];
+
+  function closeCreatedToken() {
+    setCreatedToken(null);
+    setCopied(false);
+    setConnectionCopied(false);
+    setCopyFailed(false);
   }
 
   async function onDelete() {
@@ -202,13 +227,16 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
 
       {loading ? <div className="member-loading">{text.loading}</div> : tokens.length === 0 ? <div className="member-empty">{text.tokenListEmpty}</div> : (
         <table className="member-admin-table">
-          <thead><tr><th>{text.tokenColumnName}</th><th>{text.tokenColumnScopes}</th><th>{text.tokenColumnBoundary}</th><th>{text.tokenColumnExpires}</th><th>{text.tokenColumnStatus}</th><th>{text.actions}</th></tr></thead>
+          <thead><tr><th>{text.tokenColumnName}</th><th>{text.tokenColumnScopes}</th><th>{text.tokenColumnBoundary}</th><th>{text.tokenColumnExpires}</th><th>{text.tokenColumnLastUsed}</th><th>{text.tokenColumnStatus}</th><th>{text.actions}</th></tr></thead>
           <tbody>{tokens.map((token) => (
             <tr key={token.id}>
               <td>{token.name}</td>
               <td>{(token.scopes ?? []).join(', ') || '--'}</td>
-              <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => boundarySummary(boundary, spaces, mountsBySpace)).join('; ')}</td>
-              <td>{formatDate(token.expiresAt, locale, '--')}</td>
+              <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => (
+                boundarySummary(boundary, contentSources, text.tokenBoundaryAllAccountContent)
+              )).join('; ')}</td>
+              <td>{formatDate(token.expiresAt, locale, text.tokenNeverExpires)}</td>
+              <td>{formatDate(token.lastUsedAt, locale, '--')}</td>
               <td>{tokenStatusLabel(token.status, text)}</td>
               <td><button className="member-table-action member-table-danger" type="button" onClick={() => setDeleteTarget(token)} disabled={loading}>{text.tokenRevoke}</button></td>
             </tr>
@@ -221,22 +249,45 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
           <form className="member-modal member-admin-form" onSubmit={onSubmit}>
             <h2 className="member-admin-form-wide">{text.tokenCreate}</h2>
             <label className="member-admin-form-wide">{text.tokenName}<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
-            <label className="member-admin-checkbox"><input type="checkbox" checked={scopeRead} onChange={(event) => setScopeRead(event.target.checked)} />{text.tokenScopeRead}</label>
-            <label className="member-admin-checkbox"><input type="checkbox" checked={scopeUpload} onChange={(event) => setScopeUpload(event.target.checked)} />{text.tokenScopeUpload}</label>
-            <label className="member-admin-form-wide">{text.tokenExpiresAt}<input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} required /></label>
+            <fieldset className="member-admin-form-wide member-mcp-presets">
+              <legend>{text.tokenPresetTitle}</legend>
+              <div className="member-mcp-preset-grid">
+                {presetOptions.map((option) => (
+                  <label className={`member-mcp-preset ${preset === option.id ? 'selected' : ''}`} key={option.id}>
+                    <input type="radio" name="mcp-preset" value={option.id} checked={preset === option.id} onChange={() => setPreset(option.id)} />
+                    <span><strong>{option.label}</strong><small>{option.detail}</small></span>
+                  </label>
+                ))}
+                <label className={`member-mcp-preset member-mcp-preset-danger ${permanentDelete ? 'selected' : ''}`}>
+                  <input type="checkbox" checked={permanentDelete} onChange={(event) => setPermanentDelete(event.target.checked)} />
+                  <span><strong>{text.tokenPresetPermanentDelete}</strong><small>{text.tokenPresetPermanentDeleteDetail}</small></span>
+                </label>
+              </div>
+              <p className="member-mcp-warning">{text.tokenMcpHighRiskWarning}</p>
+            </fieldset>
+            <label className="member-admin-form-wide">{text.tokenExpiresAt}<input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /><small className="member-path-hint">{text.tokenExpiryOptional}</small></label>
 
             <div className="member-admin-form-wide member-token-boundaries">
               {boundaries.map((boundary) => (
                 <div className="member-token-boundary-row" key={boundary.key}>
-                  <select value={boundary.spaceId} onChange={(event) => updateBoundary(boundary.key, { spaceId: event.target.value, mountId: '' })}>
-                    <option value="" disabled>{text.tokenBoundarySpace}</option>
-                    {spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}
+                  <select value={boundary.source} onChange={(event) => updateBoundary(boundary.key, {
+                    source: event.target.value as BoundaryDraft['source'], mountId: '', path: '',
+                  })}>
+                    <option value="all_account_content">{text.tokenBoundaryAllAccountContent}</option>
+                    <option value="personal">{text.tokenBoundaryPersonal}</option>
+                    <option value="common_mount">{text.tokenBoundaryCommonMount}</option>
                   </select>
-                  <select value={boundary.mountId} onChange={(event) => updateBoundary(boundary.key, { mountId: event.target.value })}>
-                    <option value="" disabled>{text.tokenBoundaryMount}</option>
-                    {(mountsBySpace[boundary.spaceId] ?? []).map((mount) => <option key={mount.id} value={mount.id}>{mount.name}</option>)}
-                  </select>
-                  <input value={boundary.path} onChange={(event) => updateBoundary(boundary.key, { path: event.target.value })} placeholder={text.tokenBoundaryPath} />
+                  {boundary.source === 'common_mount' && (
+                    <select value={boundary.mountId} onChange={(event) => updateBoundary(boundary.key, { mountId: event.target.value })}>
+                      <option value="" disabled>{text.tokenBoundaryMount}</option>
+                      {(contentSources?.commonMounts ?? []).map((mount) => (
+                        <option key={mount.mountId} value={mount.mountId}>{mount.displayName}</option>
+                      ))}
+                    </select>
+                  )}
+                  {boundary.source !== 'all_account_content' && (
+                    <input value={boundary.path} onChange={(event) => updateBoundary(boundary.key, { path: event.target.value })} placeholder={text.tokenBoundaryPath} />
+                  )}
                   <button type="button" onClick={() => removeBoundary(boundary.key)} aria-label={text.tokenBoundaryRemove} title={text.tokenBoundaryRemove}>×</button>
                 </div>
               ))}
@@ -254,13 +305,25 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
           <div className="member-modal member-share-result">
             <h2>{text.tokenCreatedTitle}</h2>
             <p className="member-modal-hint">{text.tokenCreatedHint}</p>
-            <code className="member-share-url">{createdToken}</code>
+            <code className="member-share-url">{createdToken.bearerToken}</code>
             <div className="member-share-result-actions">
-              <button type="button" onClick={() => void copyText(createdToken).then((ok) => { setCopied(ok); setCopyFailed(!ok); })}>{text.tokenCopy}</button>
+              <button type="button" onClick={() => void copyText(createdToken.bearerToken).then((ok) => { setCopied(ok); setCopyFailed(!ok); })}>{text.tokenCopy}</button>
             </div>
             {copied && <p className="member-admin-notice">{text.tokenCopied}</p>}
             {copyFailed && <p className="member-error">{text.tokenCopyFailed}</p>}
-            <div><button className="member-primary" type="button" onClick={() => { setCreatedToken(''); setCopied(false); setCopyFailed(false); }}>{text.tokenClose}</button></div>
+            <div className="member-mcp-connection">
+              <h3>{text.tokenMcpConnectionTitle}</h3>
+              <dl className="member-mcp-connection-meta">
+                <div><dt>{text.tokenMcpEndpoint}</dt><dd>{createdToken.connection.endpoint}</dd></div>
+                <div><dt>{text.tokenMcpTransport}</dt><dd>{createdToken.connection.transport}</dd></div>
+                <div><dt>{text.tokenMcpMode}</dt><dd>{createdToken.connection.era}</dd></div>
+                <div><dt>{text.tokenMcpOAuth}</dt><dd>{createdToken.connection.oauth}</dd></div>
+              </dl>
+              <pre>{createdToken.connection.text}</pre>
+              <button type="button" onClick={() => void copyText(createdToken.connection.text).then((ok) => { setConnectionCopied(ok); setCopyFailed(!ok); })}>{text.tokenMcpCopyConnection}</button>
+              {connectionCopied && <p className="member-admin-notice">{text.tokenCopied}</p>}
+            </div>
+            <div className="member-modal-actions"><button className="member-primary" type="button" onClick={closeCreatedToken}>{text.tokenClose}</button></div>
           </div>
         </div>
       )}
@@ -271,7 +334,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
             <h2>{text.tokenRevokeConfirmTitle}</h2>
             <p className="member-modal-hint">{text.tokenRevokeConfirmDetail}</p>
             <p className="member-modal-hint"><strong>{deleteTarget.name}</strong></p>
-            <div><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDelete()} disabled={loading}>{text.tokenRevoke}</button></div>
+            <div className="member-modal-actions"><button type="button" onClick={() => setDeleteTarget(null)}>{text.cancel}</button><button className="member-modal-danger" type="button" onClick={() => void onDelete()} disabled={loading}>{text.tokenRevoke}</button></div>
           </div>
         </div>
       )}

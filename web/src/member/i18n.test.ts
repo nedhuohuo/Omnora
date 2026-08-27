@@ -54,6 +54,28 @@ describe('member locale', () => {
 
     expect(enKeys).toEqual(zhKeys);
   });
+
+  it('keeps account-level mount management copy free of business Space terminology', () => {
+    expect(localeMessages['zh-CN'].mountManagementDetail).not.toContain('空间');
+    expect(localeMessages['en-US'].mountManagementDetail).not.toMatch(/\bSpace\b/);
+  });
+
+  it('distinguishes mount mode from account content permission', () => {
+    expect(localeMessages['zh-CN'].mountMode).toBe('挂载读写模式');
+    expect(localeMessages['zh-CN'].mountGrantPermission).toBe('所选账号的访问权限');
+    expect(localeMessages['zh-CN'].contentViewer).toBe('查看');
+    expect(localeMessages['zh-CN'].contentEditor).toBe('编辑');
+    expect(localeMessages['en-US'].mountMode).toBe('Mount read/write mode');
+    expect(localeMessages['en-US'].mountGrantPermission).toBe('Access permission for selected accounts');
+  });
+
+  it('describes MCP as standard Streamable HTTP without claiming OAuth support', () => {
+    expect(localeMessages['zh-CN'].tokenMcpStatusDetail).toContain('Streamable HTTP');
+    expect(localeMessages['zh-CN'].routeDescMcp).toContain('OAuth');
+    expect(localeMessages['zh-CN'].tokenMcpAuth).toContain('认证');
+    expect(localeMessages['en-US'].tokenMcpStatusDetail).toContain('OAuth is not implemented');
+    expect(localeMessages['en-US'].routeDescOpenapi).toContain('Raw OpenAPI 3.1 YAML');
+  });
 });
 
 describe('directory response formatting', () => {

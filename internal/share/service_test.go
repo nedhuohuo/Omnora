@@ -217,6 +217,94 @@ func TestExchangeVisitLimitIsAtomicAndUnavailableWhenExhausted(t *testing.T) {
 	assertSessionCount(t, db, "share-5", 1)
 }
 
+func TestExchangeRejectsShareFromStaleCredentialGeneration(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	insertShare(t, db, testShare{
+		ID:             "share-6",
+		PublicID:       "public-6",
+		FragmentSecret: "fragment-secret",
+		MaxVisits:      sql.NullInt64{Int64: 2, Valid: true},
+		ExpiresAt:      now.Add(time.Hour),
+		// Minted under an older credential epoch than the one system_state
+		// now reports (e.g. a password reset happened after issuance).
+		CredentialGeneration: 1,
+	})
+	setCredentialGeneration(t, db, 2)
+
+	service := NewService(db, WithClock(func() time.Time { return now }))
+	_, err := service.Exchange(ctx, ExchangeRequest{
+		PublicID:       "public-6",
+		FragmentSecret: "fragment-secret",
+	})
+	assertExchangeCode(t, err, CodeShareUnavailable)
+	assertVisitCount(t, db, "share-6", 0)
+	assertSessionCount(t, db, "share-6", 0)
+}
+
+func TestVerifySessionRejectsSessionAfterCredentialGenerationBump(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	insertShare(t, db, testShare{
+		ID:             "share-7",
+		PublicID:       "public-7",
+		FragmentSecret: "fragment-secret",
+		MaxVisits:      sql.NullInt64{Int64: 2, Valid: true},
+		ExpiresAt:      now.Add(time.Hour),
+	})
+
+	service := NewService(db, WithClock(func() time.Time { return now }), WithSessionTTL(10*time.Minute))
+	result, err := service.Exchange(ctx, ExchangeRequest{
+		PublicID:       "public-7",
+		FragmentSecret: "fragment-secret",
+	})
+	if err != nil {
+		t.Fatalf("Exchange() error = %v", err)
+	}
+
+	if _, err := service.VerifySession(ctx, result.SessionToken); err != nil {
+		t.Fatalf("VerifySession() before generation bump error = %v, want success", err)
+	}
+
+	// Simulate an account-wide security event that bumps the credential
+	// epoch: every previously issued share session must stop working even
+	// though its row was never touched.
+	setCredentialGeneration(t, db, 2)
+
+	principal, err := service.VerifySession(ctx, result.SessionToken)
+	if err == nil {
+		t.Fatalf("VerifySession() after generation bump = %+v, want error", principal)
+	}
+	assertExchangeCode(t, err, CodeShareUnavailable)
+}
+
+func TestIncrementDownloadRejectsAfterCredentialGenerationBump(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	insertShare(t, db, testShare{
+		ID:             "share-8",
+		PublicID:       "public-8",
+		FragmentSecret: "fragment-secret",
+		ExpiresAt:      now.Add(time.Hour),
+	})
+
+	service := NewService(db, WithClock(func() time.Time { return now }))
+	setCredentialGeneration(t, db, 2)
+	if err := service.IncrementDownload(ctx, "share-8", 1); err == nil {
+		t.Fatal("IncrementDownload() after generation bump unexpectedly succeeded")
+	}
+	var usedDownloads int
+	if err := db.QueryRow("SELECT used_downloads FROM shares WHERE id = ?", "share-8").Scan(&usedDownloads); err != nil {
+		t.Fatalf("query used_downloads: %v", err)
+	}
+	if usedDownloads != 0 {
+		t.Fatalf("used_downloads = %d, want 0", usedDownloads)
+	}
+}
+
 func TestHashHelpersUseConstantTimeVerifiers(t *testing.T) {
 	secretHash := HashSecret("secret")
 	if secretHash == "secret" {
@@ -252,6 +340,10 @@ type testShare struct {
 	MaxVisits      sql.NullInt64
 	UsedVisits     int
 	ExpiresAt      time.Time
+	// CredentialGeneration defaults to 1 (the system_state default seeded by
+	// migration 001) when left zero, matching what a real share created by
+	// membershare.Service.CreateSecure would carry.
+	CredentialGeneration int
 }
 
 func openTestDB(t *testing.T) *sql.DB {
@@ -284,29 +376,40 @@ ON CONFLICT(id) DO NOTHING
 		t.Fatalf("insert account: %v", err)
 	}
 	_, err = db.ExecContext(ctx, `
-INSERT INTO spaces(id, kind, name, owner_account_id, status)
-VALUES ('space-1', 'shared', 'Space', 'account-1', 'active')
-ON CONFLICT(id) DO NOTHING
-`)
-	if err != nil {
-		t.Fatalf("insert space: %v", err)
-	}
-	_, err = db.ExecContext(ctx, `
-INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status)
-VALUES ('mount-1', 'space-1', 'Mount', '/tmp/omnora', 'managed', 'read_only', 'active')
+INSERT INTO mounts(id, display_name, root_path, purpose, storage_kind, governance, mode, share_enabled, status)
+VALUES ('mount-1', 'Mount', '/tmp/omnora', 'common', 'external', 'normal', 'read_only', 1, 'active')
 ON CONFLICT(id) DO NOTHING
 `)
 	if err != nil {
 		t.Fatalf("insert mount: %v", err)
 	}
 	_, err = db.ExecContext(ctx, `
+INSERT INTO mount_grants(mount_id, account_id, permission)
+VALUES ('mount-1', 'account-1', 'editor')
+ON CONFLICT(mount_id, account_id) DO UPDATE SET permission='editor'
+`)
+	if err != nil {
+		t.Fatalf("insert grant: %v", err)
+	}
+	credentialGeneration := share.CredentialGeneration
+	if credentialGeneration == 0 {
+		credentialGeneration = 1
+	}
+	_, err = db.ExecContext(ctx, `
 INSERT INTO shares(
-	id, public_id, secret_hash, password_hash, creator_account_id, space_id, mount_id,
-	relative_path, max_visits, used_visits, expires_at
-) VALUES (?, ?, ?, ?, 'account-1', 'space-1', 'mount-1', 'docs', ?, ?, ?)
-`, share.ID, share.PublicID, HashSecret(share.FragmentSecret), share.PasswordHash, share.MaxVisits, share.UsedVisits, formatSQLiteTime(share.ExpiresAt))
+	id, public_id, secret_hash, password_hash, creator_account_id, mount_id,
+	relative_path, max_visits, used_visits, expires_at, credential_generation
+) VALUES (?, ?, ?, ?, 'account-1', 'mount-1', 'docs', ?, ?, ?, ?)
+`, share.ID, share.PublicID, HashSecret(share.FragmentSecret), share.PasswordHash, share.MaxVisits, share.UsedVisits, formatSQLiteTime(share.ExpiresAt), credentialGeneration)
 	if err != nil {
 		t.Fatalf("insert share: %v", err)
+	}
+}
+
+func setCredentialGeneration(t *testing.T, db *sql.DB, generation int) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE system_state SET value = ? WHERE key = 'credential_generation'`, generation); err != nil {
+		t.Fatalf("update credential_generation: %v", err)
 	}
 }
 

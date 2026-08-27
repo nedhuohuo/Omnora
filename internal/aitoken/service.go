@@ -9,6 +9,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"omnora/internal/contentref"
 )
 
 const timestampLayout = time.RFC3339Nano
@@ -19,6 +21,12 @@ type Service struct {
 }
 
 type Option func(*Service)
+
+// TxAuditWriter lets callers commit a token mutation and its success audit
+// event atomically without coupling this service to the audit package.
+type TxAuditWriter func(context.Context, *sql.Tx) error
+
+type TokenAuditWriter func(context.Context, *sql.Tx, Token) error
 
 func WithClock(clock func() time.Time) Option {
 	return func(s *Service) {
@@ -46,13 +54,21 @@ func InstallSchema(ctx context.Context, db *sql.DB) error {
 
 func AllowlistedScopes() []Scope {
 	return []Scope{
-		ScopeSpacesRead,
+		ScopeMountsRead,
 		ScopeFilesList,
 		ScopeFilesMetadata,
 		ScopeFilesText,
 		ScopeFilesDownloadTicket,
 		ScopeSearchRead,
 		ScopeUploadsCreate,
+		ScopeFilesWrite,
+		ScopeFilesTrash,
+		ScopeTrashRead,
+		ScopeFilesRestore,
+		ScopeFilesPurge,
+		ScopeSharesRead,
+		ScopeSharesCreate,
+		ScopeSharesRevoke,
 	}
 }
 
@@ -77,13 +93,19 @@ func ValidateScopes(scopes []Scope) ([]Scope, error) {
 }
 
 func (s *Service) Create(ctx context.Context, req CreateRequest) (IssuedToken, error) {
+	return s.CreateSecure(ctx, req, nil)
+}
+
+func (s *Service) CreateSecure(ctx context.Context, req CreateRequest, auditWriter TokenAuditWriter) (IssuedToken, error) {
 	if s == nil || s.db == nil {
 		return IssuedToken{}, ErrInvalidInput
 	}
 	accountID := strings.TrimSpace(req.AccountID)
 	name := strings.TrimSpace(req.Name)
 	now := s.now().UTC().Round(0)
-	if accountID == "" || name == "" || !now.Before(req.ExpiresAt) {
+	// A zero ExpiresAt means the token never expires; any other value must be
+	// strictly in the future.
+	if accountID == "" || name == "" || (!req.ExpiresAt.IsZero() && !now.Before(req.ExpiresAt)) {
 		return IssuedToken{}, ErrInvalidInput
 	}
 	scopes, err := ValidateScopes(req.Scopes)
@@ -101,6 +123,17 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (IssuedToken, e
 	}
 	if active != 1 {
 		return IssuedToken{}, ErrInvalidInput
+	}
+	if err := s.validateBoundaryAuthorizations(ctx, accountID, boundaries); err != nil {
+		return IssuedToken{}, err
+	}
+	var credentialGeneration int64
+	if err := s.db.QueryRowContext(ctx, `
+SELECT CAST(value AS INTEGER)
+FROM system_state
+WHERE key = 'credential_generation'
+`).Scan(&credentialGeneration); err != nil {
+		return IssuedToken{}, err
 	}
 
 	publicID, err := newPrefixedID("ait")
@@ -121,15 +154,16 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (IssuedToken, e
 	}
 
 	token := Token{
-		ID:         tokenID,
-		PublicID:   publicID,
-		SecretHash: hashSecret(secret),
-		AccountID:  accountID,
-		Name:       name,
-		Scopes:     scopes,
-		Boundaries: boundaries,
-		CreatedAt:  now,
-		ExpiresAt:  req.ExpiresAt.UTC().Round(0),
+		ID:                   tokenID,
+		PublicID:             publicID,
+		SecretHash:           hashSecret(secret),
+		AccountID:            accountID,
+		Name:                 name,
+		Scopes:               scopes,
+		Boundaries:           boundaries,
+		CredentialGeneration: credentialGeneration,
+		CreatedAt:            now,
+		ExpiresAt:            req.ExpiresAt.UTC().Round(0),
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -139,18 +173,23 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (IssuedToken, e
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, created_at, expires_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, token.ID, token.PublicID, token.SecretHash, token.AccountID, token.Name, scopeJSON, formatTime(token.CreatedAt), formatTime(token.ExpiresAt), formatTime(now))
+	INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, credential_generation, created_at, expires_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, token.ID, token.PublicID, token.SecretHash, token.AccountID, token.Name, scopeJSON, token.CredentialGeneration, formatTime(token.CreatedAt), formatTokenExpiry(token.ExpiresAt), formatTime(now))
 	if err != nil {
 		return IssuedToken{}, err
 	}
 	for _, boundary := range boundaries {
 		_, err = tx.ExecContext(ctx, `
-INSERT INTO ai_token_boundaries(token_id, space_id, mount_id, relative_path)
+INSERT INTO ai_token_boundaries(token_id, source, mount_id, relative_path)
 VALUES (?, ?, ?, ?)
-`, token.ID, boundary.SpaceID, boundary.MountID, boundary.RelativePath)
+`, token.ID, boundary.Source, boundaryMountArgument(boundary), boundary.RelativePath)
 		if err != nil {
+			return IssuedToken{}, err
+		}
+	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx, token); err != nil {
 			return IssuedToken{}, err
 		}
 	}
@@ -175,7 +214,7 @@ func (s *Service) VerifyBearer(ctx context.Context, bearer string) (Principal, e
 		return Principal{}, err
 	}
 	now := s.now().UTC().Round(0)
-	if token.RevokedAt.Valid || !now.Before(token.ExpiresAt) || !secretMatches(secret, token.SecretHash) {
+	if token.RevokedAt.Valid || (!token.ExpiresAt.IsZero() && !now.Before(token.ExpiresAt)) || !secretMatches(secret, token.SecretHash) {
 		return Principal{}, ErrInvalidToken
 	}
 
@@ -206,17 +245,65 @@ WHERE id = ? AND revoked_at IS NULL
 	}, nil
 }
 
+// RefreshPrincipal reloads a token by its internal ID for a real-time
+// authorization check. It deliberately does not advance last_used_at; callers
+// use it to revalidate an already-authenticated transfer operation.
+func (s *Service) RefreshPrincipal(ctx context.Context, tokenID string) (Principal, error) {
+	if s == nil || s.db == nil || strings.TrimSpace(tokenID) == "" {
+		return Principal{}, ErrInvalidToken
+	}
+	token, err := s.loadTokenByID(ctx, strings.TrimSpace(tokenID))
+	if err != nil {
+		return Principal{}, err
+	}
+	now := s.now().UTC().Round(0)
+	if token.RevokedAt.Valid || (!token.ExpiresAt.IsZero() && !now.Before(token.ExpiresAt)) {
+		return Principal{}, ErrInvalidToken
+	}
+	return Principal{
+		AccountID:  token.AccountID,
+		TokenID:    token.ID,
+		PublicID:   token.PublicID,
+		Scopes:     token.Scopes,
+		Boundaries: token.Boundaries,
+		ExpiresAt:  token.ExpiresAt,
+		LastUsedAt: token.LastUsedAt,
+	}, nil
+}
+
 func (s *Service) Revoke(ctx context.Context, tokenID string) error {
+	return s.RevokeSecure(ctx, tokenID, nil)
+}
+
+func (s *Service) RevokeSecure(ctx context.Context, tokenID string, auditWriter TxAuditWriter) error {
 	if s == nil || s.db == nil || strings.TrimSpace(tokenID) == "" {
 		return ErrInvalidInput
 	}
 	now := s.now().UTC().Round(0)
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
 UPDATE ai_tokens
 SET revoked_at = ?, updated_at = ?
 WHERE id = ? AND revoked_at IS NULL
 `, formatTime(now), formatTime(now), strings.TrimSpace(tokenID))
-	return err
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return ErrInvalidInput
+	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Service) loadToken(ctx context.Context, publicID string) (loadedToken, error) {
@@ -227,12 +314,13 @@ func (s *Service) loadToken(ctx context.Context, publicID string) (loadedToken, 
 	var scopesJSON, createdAt, expiresAt string
 	var lastUsedAt sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-SELECT t.id, t.public_id, t.secret_hash, t.account_id, t.name, t.scopes,
-       t.created_at, t.expires_at, t.last_used_at, t.revoked_at
+	SELECT t.id, t.public_id, t.secret_hash, t.account_id, t.name, t.scopes,
+	       t.credential_generation, t.created_at, t.expires_at, t.last_used_at, t.revoked_at
 FROM ai_tokens t
 JOIN accounts a ON a.id = t.account_id
 WHERE t.public_id = ?
   AND a.status = 'active'
+  AND t.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
 `, publicID).Scan(
 		&token.ID,
 		&token.PublicID,
@@ -240,6 +328,7 @@ WHERE t.public_id = ?
 		&token.AccountID,
 		&token.Name,
 		&scopesJSON,
+		&token.CredentialGeneration,
 		&createdAt,
 		&expiresAt,
 		&lastUsedAt,
@@ -260,9 +349,74 @@ WHERE t.public_id = ?
 	if err != nil {
 		return loadedToken{}, err
 	}
-	token.ExpiresAt, err = parseTime(expiresAt)
+	// An empty stored value means the token never expires.
+	if expiresAt != "" {
+		token.ExpiresAt, err = parseTime(expiresAt)
+		if err != nil {
+			return loadedToken{}, err
+		}
+	}
+	if lastUsedAt.Valid {
+		token.LastUsedAt, err = parseTime(lastUsedAt.String)
+		if err != nil {
+			return loadedToken{}, err
+		}
+	}
+	token.Boundaries, err = s.loadBoundaries(ctx, token.ID)
 	if err != nil {
 		return loadedToken{}, err
+	}
+	return token, nil
+}
+
+func (s *Service) loadTokenByID(ctx context.Context, tokenID string) (loadedToken, error) {
+	if s == nil || s.db == nil {
+		return loadedToken{}, ErrInvalidToken
+	}
+	var token loadedToken
+	var scopesJSON, createdAt, expiresAt string
+	var lastUsedAt sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+	SELECT t.id, t.public_id, t.secret_hash, t.account_id, t.name, t.scopes,
+	       t.credential_generation, t.created_at, t.expires_at, t.last_used_at, t.revoked_at
+FROM ai_tokens t
+JOIN accounts a ON a.id = t.account_id
+WHERE t.id = ?
+  AND a.status = 'active'
+  AND t.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
+`, tokenID).Scan(
+		&token.ID,
+		&token.PublicID,
+		&token.SecretHash,
+		&token.AccountID,
+		&token.Name,
+		&scopesJSON,
+		&token.CredentialGeneration,
+		&createdAt,
+		&expiresAt,
+		&lastUsedAt,
+		&token.RevokedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return loadedToken{}, ErrInvalidToken
+	}
+	if err != nil {
+		return loadedToken{}, err
+	}
+	token.Scopes, err = unmarshalScopes(scopesJSON)
+	if err != nil {
+		return loadedToken{}, ErrInvalidToken
+	}
+	token.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return loadedToken{}, err
+	}
+	// An empty stored value means the token never expires.
+	if expiresAt != "" {
+		token.ExpiresAt, err = parseTime(expiresAt)
+		if err != nil {
+			return loadedToken{}, err
+		}
 	}
 	if lastUsedAt.Valid {
 		token.LastUsedAt, err = parseTime(lastUsedAt.String)
@@ -279,11 +433,11 @@ WHERE t.public_id = ?
 
 func (s *Service) loadBoundaries(ctx context.Context, tokenID string) ([]DirectoryBoundary, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT space_id, mount_id, relative_path
-FROM ai_token_boundaries
-WHERE token_id = ?
-ORDER BY space_id, mount_id, relative_path
-`, tokenID)
+	SELECT source, COALESCE(mount_id, ''), relative_path
+	FROM ai_token_boundaries
+	WHERE token_id = ?
+	ORDER BY id
+	`, tokenID)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +446,7 @@ ORDER BY space_id, mount_id, relative_path
 	var boundaries []DirectoryBoundary
 	for rows.Next() {
 		var boundary DirectoryBoundary
-		if err := rows.Scan(&boundary.SpaceID, &boundary.MountID, &boundary.RelativePath); err != nil {
+		if err := rows.Scan(&boundary.Source, &boundary.MountID, &boundary.RelativePath); err != nil {
 			return nil, err
 		}
 		boundaries = append(boundaries, boundary)
@@ -300,7 +454,16 @@ ORDER BY space_id, mount_id, relative_path
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return boundaries, nil
+	normalized, err := normalizeBoundaries(boundaries)
+	if err != nil || len(normalized) != len(boundaries) {
+		return nil, ErrInvalidToken
+	}
+	for index := range boundaries {
+		if normalized[index] != boundaries[index] {
+			return nil, ErrInvalidToken
+		}
+	}
+	return normalized, nil
 }
 
 type loadedToken struct {
@@ -330,19 +493,35 @@ func normalizeBoundaries(boundaries []DirectoryBoundary) ([]DirectoryBoundary, e
 	seen := make(map[string]bool, len(boundaries))
 	normalized := make([]DirectoryBoundary, 0, len(boundaries))
 	for _, boundary := range boundaries {
-		spaceID := strings.TrimSpace(boundary.SpaceID)
+		source := contentref.Source(strings.TrimSpace(string(boundary.Source)))
 		mountID := strings.TrimSpace(boundary.MountID)
 		relativePath, err := normalizeRelativePath(boundary.RelativePath)
-		if err != nil || spaceID == "" || mountID == "" {
+		if err != nil {
 			return nil, ErrInvalidInput
 		}
-		key := spaceID + "\x00" + mountID + "\x00" + relativePath
+		switch source {
+		case contentref.SourcePersonal:
+			if mountID != "" {
+				return nil, ErrInvalidInput
+			}
+		case contentref.SourceCommonMount:
+			if mountID == "" {
+				return nil, ErrInvalidInput
+			}
+		case SourceAllAccountContent:
+			if mountID != "" || relativePath != "" {
+				return nil, ErrInvalidInput
+			}
+		default:
+			return nil, ErrInvalidInput
+		}
+		key := string(source) + "\x00" + mountID + "\x00" + relativePath
 		if seen[key] {
 			return nil, ErrInvalidInput
 		}
 		seen[key] = true
 		normalized = append(normalized, DirectoryBoundary{
-			SpaceID:      spaceID,
+			Source:       source,
 			MountID:      mountID,
 			RelativePath: relativePath,
 		})
@@ -355,22 +534,70 @@ func normalizeRelativePath(value string) (string, error) {
 	if value == "" || value == "." {
 		return "", nil
 	}
-	if strings.Contains(value, "\x00") || strings.HasPrefix(value, "/") {
+	if strings.Contains(value, "\x00") || path.IsAbs(value) || strings.ContainsRune(value, '\\') {
 		return "", ErrInvalidInput
+	}
+	for component := range strings.SplitSeq(value, "/") {
+		if component == ".." || component == ".omnora" {
+			return "", ErrInvalidInput
+		}
 	}
 	cleaned := path.Clean(value)
 	if cleaned == "." {
 		return "", nil
 	}
-	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
-		return "", ErrInvalidInput
-	}
-	for _, part := range strings.Split(cleaned, "/") {
-		if part == ".omnora" {
-			return "", ErrInvalidInput
+	return cleaned, nil
+}
+
+func (s *Service) validateBoundaryAuthorizations(ctx context.Context, accountID string, boundaries []DirectoryBoundary) error {
+	for _, boundary := range boundaries {
+		var authorized int
+		var err error
+		switch boundary.Source {
+		case contentref.SourcePersonal:
+			err = s.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM personal_directories pd
+JOIN mounts m ON m.id = 'personal-default'
+WHERE pd.account_id = ?
+  AND pd.state = 'ready'
+  AND pd.relative_path = pd.account_id
+  AND m.purpose = 'personal_default'
+  AND m.storage_kind = 'managed'
+  AND m.status = 'active'
+`, accountID).Scan(&authorized)
+		case contentref.SourceCommonMount:
+			err = s.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM mount_grants mg
+JOIN mounts m ON m.id = mg.mount_id
+WHERE mg.account_id = ?
+  AND mg.mount_id = ?
+  AND mg.permission IN ('viewer', 'editor')
+  AND m.purpose = 'common'
+  AND m.storage_kind = 'external'
+  AND m.status = 'active'
+`, accountID, boundary.MountID).Scan(&authorized)
+		case SourceAllAccountContent:
+			continue
+		default:
+			return ErrInvalidInput
+		}
+		if err != nil {
+			return err
+		}
+		if authorized != 1 {
+			return ErrInvalidInput
 		}
 	}
-	return cleaned, nil
+	return nil
+}
+
+func boundaryMountArgument(boundary DirectoryBoundary) any {
+	if boundary.Source == contentref.SourceCommonMount {
+		return boundary.MountID
+	}
+	return nil
 }
 
 func marshalScopes(scopes []Scope) (string, error) {
@@ -407,6 +634,15 @@ func newPrefixedID(prefix string) (string, error) {
 
 func formatTime(value time.Time) string {
 	return value.UTC().Format(timestampLayout)
+}
+
+// formatTokenExpiry renders the stored expires_at value. The zero value means
+// a token that never expires and is persisted as an empty string.
+func formatTokenExpiry(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return formatTime(value)
 }
 
 func parseTime(value string) (time.Time, error) {

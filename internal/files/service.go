@@ -1,18 +1,31 @@
 package files
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
+	"omnora/internal/access"
 	"omnora/internal/domain"
+	"omnora/internal/mountid"
 	"omnora/internal/storage"
 )
+
+func init() {
+	// .jsonl 不在 Go 内置 MIME 表中，不注册的话 inline 预览会回退为
+	// application/octet-stream，浏览器将下载而不是直接显示文件内容。
+	mime.AddExtensionType(".jsonl", "text/plain; charset=utf-8")
+}
 
 type EntryKind string
 
@@ -55,13 +68,14 @@ type DirectoryListing struct {
 }
 
 type Entry struct {
-	Name         string      `json:"name"`
-	RelativePath string      `json:"relativePath"`
-	Kind         EntryKind   `json:"kind"`
-	Size         int64       `json:"size"`
-	ModifiedAt   time.Time   `json:"modifiedAt"`
-	ReadOnly     bool        `json:"readOnly"`
-	PreviewKind  PreviewKind `json:"previewKind"`
+	Name              string      `json:"name"`
+	RelativePath      string      `json:"relativePath"`
+	Kind              EntryKind   `json:"kind"`
+	Size              int64       `json:"size"`
+	ModifiedAt        time.Time   `json:"modifiedAt"`
+	ReadOnly          bool        `json:"readOnly"`
+	PreviewKind       PreviewKind `json:"previewKind"`
+	ObjectFingerprint string      `json:"objectFingerprint,omitempty"`
 }
 
 type Service struct{}
@@ -129,13 +143,14 @@ func (Service) ListDirectory(mount Mount, relativePath string) (DirectoryListing
 		}
 
 		entries = append(entries, Entry{
-			Name:         name,
-			RelativePath: entryRelativePath,
-			Kind:         kind,
-			Size:         size,
-			ModifiedAt:   entryInfo.ModTime().UTC(),
-			ReadOnly:     readOnly,
-			PreviewKind:  classifyPreviewKind(name, kind),
+			Name:              name,
+			RelativePath:      entryRelativePath,
+			Kind:              kind,
+			Size:              size,
+			ModifiedAt:        entryInfo.ModTime().UTC(),
+			ReadOnly:          readOnly,
+			PreviewKind:       classifyPreviewKind(name, kind),
+			ObjectFingerprint: fingerprintFileInfo(entryInfo),
 		})
 	}
 
@@ -151,6 +166,84 @@ func (Service) ListDirectory(mount Mount, relativePath string) (DirectoryListing
 		ReadOnly:     readOnly,
 		Entries:      entries,
 	}, nil
+}
+
+// Stat returns metadata for one mount-relative object. It intentionally uses
+// os.Root/Lstat so callers can never turn a member locator into a host path
+// lookup. Symbolic links and objects other than regular files/directories are
+// rejected in the same way as directory listings.
+func (Service) Stat(mount Mount, relativePath string) (Entry, error) {
+	cleaned, err := storage.CleanRelativePath(relativePath)
+	if err != nil || strings.Contains(cleaned, `\`) {
+		if err != nil {
+			return Entry{}, err
+		}
+		return Entry{}, fmt.Errorf("invalid relative path")
+	}
+	root, readOnly, err := openMountRoot(mount)
+	if err != nil {
+		return Entry{}, err
+	}
+	defer root.Close()
+	if err := rejectSymlinkPath(root, cleaned); err != nil {
+		return Entry{}, err
+	}
+	info, err := root.Lstat(cleaned)
+	if err != nil {
+		return Entry{}, err
+	}
+	kind, ok := entryKind(info)
+	if !ok {
+		return Entry{}, ErrNotFile
+	}
+	name := path.Base(cleaned)
+	if cleaned == "." {
+		name = "."
+	}
+	size := info.Size()
+	if kind == EntryKindDir {
+		size = 0
+	}
+	return Entry{
+		Name:              name,
+		RelativePath:      cleaned,
+		Kind:              kind,
+		Size:              size,
+		ModifiedAt:        info.ModTime().UTC(),
+		ReadOnly:          readOnly,
+		PreviewKind:       classifyPreviewKind(name, kind),
+		ObjectFingerprint: fingerprintFileInfo(info),
+	}, nil
+}
+
+// fingerprintFileInfo is an opaque object identity used by higher-level
+// mutation and confirmation services. It contains metadata only and never a
+// host path or file contents.
+func fingerprintFileInfo(info os.FileInfo) string {
+	if info == nil {
+		return ""
+	}
+	digest := sha256.New()
+	fmt.Fprintf(digest, "%s|%d|%d|%d", info.Mode().String(), info.Size(), info.ModTime().UTC().UnixNano(), info.Mode().Perm())
+	if raw := info.Sys(); raw != nil {
+		value := reflect.Indirect(reflect.ValueOf(raw))
+		if !value.IsValid() || value.Kind() != reflect.Struct {
+			return fmt.Sprintf("sha256:%x", digest.Sum(nil))
+		}
+		for _, name := range []string{"Dev", "Ino"} {
+			field := value.FieldByName(name)
+			if field.IsValid() && field.CanUint() {
+				fmt.Fprintf(digest, "|%s=%d", name, field.Uint())
+			}
+		}
+	}
+	return fmt.Sprintf("sha256:%x", digest.Sum(nil))
+}
+
+// Fingerprint exposes the opaque identity format used by authorization and
+// upload publication without exposing host paths or file contents.
+func Fingerprint(info os.FileInfo) string {
+	return fingerprintFileInfo(info)
 }
 
 func (Service) CreateDirectory(mount Mount, parentPath, name string) (string, error) {
@@ -234,12 +327,15 @@ func moveWithinMount(mount Mount, from, to string) (string, error) {
 	if err := rejectSymlinkPath(root, path.Dir(cleanedTo)); err != nil {
 		return "", err
 	}
-	if _, err := root.Lstat(cleanedTo); err == nil {
-		return "", fmt.Errorf("%w: target already exists", ErrInvalidMount)
-	} else if !errors.Is(err, os.ErrNotExist) {
+	sourceInfo, err := root.Lstat(cleanedFrom)
+	if err != nil {
 		return "", err
 	}
-	if err := root.Rename(cleanedFrom, cleanedTo); err != nil {
+	kind, ok := entryKind(sourceInfo)
+	if !ok {
+		return "", ErrNotFile
+	}
+	if err := renameNoReplace(root, cleanedFrom, cleanedTo, kind); err != nil {
 		return "", err
 	}
 	return cleanedTo, nil
@@ -300,6 +396,104 @@ func (Service) OpenFile(mount Mount, relativePath string) (*os.File, os.FileInfo
 		return nil, nil, ErrNotFile
 	}
 	return file, info, nil
+}
+
+// OpenVerifiedRegularFile opens the regular file that a verified ticket
+// authorized, binding the returned descriptor to the mount identity recorded in
+// the mount row. It is the only mount-open primitive safe to stream bytes from
+// across the trust boundary:
+//
+//  1. The mount root is opened with os.OpenRoot and the root descriptor is kept
+//     for the whole operation, so every later lookup is descriptor-relative and
+//     cannot be redirected outside the root.
+//  2. The open root's own "." entry is statted and compared against the
+//     device/inode identity already stored in mount.IdentityJSON. This closes
+//     the window in which the mount root is replaced by another directory
+//     between authorization and open.
+//  3. The cleaned storage-relative path is opened from the root descriptor,
+//     rejecting escapes, the reserved namespace, symlink path components and
+//     non-regular leaf objects.
+//  4. The still-open leaf descriptor and its own Stat result are returned; the
+//     root descriptor is released as soon as the leaf is open. Every failure
+//     path closes every descriptor it opened.
+//
+// os.Root pins the root and intermediate directories and prevents resolving
+// outside the root, but it still allows symlinks inside the root. The identity
+// check here and the object-fingerprint check on the returned descriptor are
+// therefore both required: the caller must re-fingerprint the returned
+// descriptor and require it to equal the ticket fingerprint before serving any
+// byte.
+func OpenVerifiedRegularFile(mount access.AuthorizedMount) (*os.File, os.FileInfo, error) {
+	rootPath := strings.TrimSpace(mount.MountRoot)
+	if rootPath == "" {
+		return nil, nil, ErrInvalidMount
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidMount, err)
+	}
+	rootInfo, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, nil, fmt.Errorf("%w: %v", access.ErrMountIdentityUnverifiable, err)
+	}
+	if err := verifyMountRootIdentity(mount.IdentityJSON, rootInfo); err != nil {
+		_ = root.Close()
+		return nil, nil, err
+	}
+	cleaned, err := storage.CleanRelativePath(mount.StorageRelativePath)
+	if err != nil || cleaned == "." {
+		_ = root.Close()
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, ErrNotFile
+	}
+	if err := rejectSymlinkPath(root, cleaned); err != nil {
+		_ = root.Close()
+		return nil, nil, err
+	}
+	leaf, err := root.Open(cleaned)
+	if err != nil {
+		_ = root.Close()
+		return nil, nil, err
+	}
+	_ = root.Close()
+	info, err := leaf.Stat()
+	if err != nil {
+		_ = leaf.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = leaf.Close()
+		return nil, nil, ErrNotFile
+	}
+	return leaf, info, nil
+}
+
+// verifyMountRootIdentity compares the device/inode of an already-open mount
+// root descriptor against the identity captured at authorization time and
+// serialized into mount.IdentityJSON. A mismatch means the root directory was
+// replaced, so the object cannot be bound to the authorized mount.
+func verifyMountRootIdentity(identityJSON string, rootInfo os.FileInfo) error {
+	if strings.TrimSpace(identityJSON) == "" {
+		return access.ErrMountIdentityUnverifiable
+	}
+	var stored mountid.Identity
+	if err := json.Unmarshal([]byte(identityJSON), &stored); err != nil {
+		return access.ErrMountIdentityUnverifiable
+	}
+	stat, ok := rootInfo.Sys().(*syscall.Stat_t)
+	if !ok || stat == nil {
+		return access.ErrMountIdentityUnverifiable
+	}
+	if stored.Device == 0 || stored.Inode == 0 {
+		return access.ErrMountIdentityUnverifiable
+	}
+	if uint64(stat.Dev) != stored.Device || uint64(stat.Ino) != stored.Inode {
+		return access.ErrMountIdentityUnverifiable
+	}
+	return nil
 }
 
 func (Service) ValidateWritableTarget(mount Mount, relativePath string) error {
@@ -393,7 +587,7 @@ func rejectSymlinkPath(root *os.Root, relativePath string) error {
 
 func validateDirectoryName(name string) error {
 	name = strings.TrimSpace(name)
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
+	if name == "" || name == "." || name == ".." || name == storage.ReservedNamespace || strings.ContainsAny(name, "/\\") {
 		return errors.New("invalid directory name")
 	}
 	for _, r := range name {

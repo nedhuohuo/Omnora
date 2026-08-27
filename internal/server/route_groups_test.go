@@ -38,10 +38,13 @@ func TestAdminRouteGroupsListAndUpdate(t *testing.T) {
 	if err := json.Unmarshal(listRec.Body.Bytes(), &listBody); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if len(listBody.Items) != len(domain.AllRouteGroups) {
-		t.Fatalf("items = %d, want %d", len(listBody.Items), len(domain.AllRouteGroups))
+	if len(listBody.Items) != len(domain.AdminToggleableRouteGroups) {
+		t.Fatalf("items = %d, want %d", len(listBody.Items), len(domain.AdminToggleableRouteGroups))
 	}
 	for _, item := range listBody.Items {
+		if item.ID == string(domain.RouteGroupMemberWeb) || item.ID == string(domain.RouteGroupAdminWeb) {
+			t.Fatalf("list unexpectedly included deployment-only group %q", item.ID)
+		}
 		if item.ID == string(domain.RouteGroupMCP) {
 			if item.Exposed {
 				t.Fatal("mcp should start disabled in API test server")
@@ -50,6 +53,19 @@ func TestAdminRouteGroupsListAndUpdate(t *testing.T) {
 				t.Fatalf("mcp label = %q", item.Label)
 			}
 		}
+	}
+
+	rejectBody, err := json.Marshal(map[string]bool{"exposed": false})
+	if err != nil {
+		t.Fatalf("marshal reject update: %v", err)
+	}
+	rejectReq := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/route-groups/member_web", bytes.NewReader(rejectBody))
+	rejectReq.Header.Set("Content-Type", "application/json")
+	rejectReq.AddCookie(adminCookie)
+	rejectRec := httptest.NewRecorder()
+	handler.ServeHTTP(rejectRec, rejectReq)
+	if rejectRec.Code != http.StatusConflict {
+		t.Fatalf("member_web update status = %d, want 409, body = %s", rejectRec.Code, rejectRec.Body.String())
 	}
 
 	body, err := json.Marshal(map[string]bool{"exposed": true})

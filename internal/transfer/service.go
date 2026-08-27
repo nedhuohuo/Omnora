@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"omnora/internal/files"
 	"omnora/internal/storage"
 )
 
@@ -36,6 +38,8 @@ var (
 	ErrUploadTooLarge    = errors.New("upload exceeds expected size")
 	ErrIncompleteUpload  = errors.New("upload is incomplete")
 	ErrTargetExists      = errors.New("upload target already exists")
+	ErrTargetChanged     = errors.New("upload target changed")
+	ErrChecksumMismatch  = errors.New("upload checksum mismatch")
 )
 
 type Service struct {
@@ -54,9 +58,11 @@ type Options struct {
 }
 
 type CreateUploadSessionRequest struct {
-	TargetPath   string
-	ExpectedSize int64
-	Overwrite    bool
+	TargetPath                string
+	ExpectedSize              int64
+	Overwrite                 bool
+	ExpectedTargetFingerprint string
+	Checksum                  string
 }
 
 type UploadSession struct {
@@ -66,6 +72,7 @@ type UploadSession struct {
 	ReceivedSize int64
 	Parts        []UploadPart
 	CreatedAt    time.Time
+	Checksum     string
 }
 
 type UploadPart struct {
@@ -76,15 +83,18 @@ type UploadPart struct {
 type CompletedUpload struct {
 	TargetPath string
 	Size       int64
+	Checksum   string
 }
 
 type uploadManifest struct {
-	ID           string           `json:"id"`
-	TargetPath   string           `json:"targetPath"`
-	ExpectedSize int64            `json:"expectedSize"`
-	Overwrite    bool             `json:"overwrite"`
-	CreatedAt    time.Time        `json:"createdAt"`
-	Parts        map[string]int64 `json:"parts"`
+	ID                        string           `json:"id"`
+	TargetPath                string           `json:"targetPath"`
+	ExpectedSize              int64            `json:"expectedSize"`
+	Overwrite                 bool             `json:"overwrite"`
+	CreatedAt                 time.Time        `json:"createdAt"`
+	Parts                     map[string]int64 `json:"parts"`
+	Checksum                  string           `json:"checksum,omitempty"`
+	ExpectedTargetFingerprint string           `json:"expectedTargetFingerprint,omitempty"`
 }
 
 func NewService(options Options) (*Service, error) {
@@ -176,13 +186,25 @@ func (s *Service) CreateUploadSession(req CreateUploadSessionRequest) (UploadSes
 	if err != nil {
 		return UploadSession{}, err
 	}
+	checksum := strings.ToLower(strings.TrimSpace(req.Checksum))
+	checksum = strings.TrimPrefix(checksum, "sha256:")
 	manifest := uploadManifest{
-		ID:           id,
-		TargetPath:   targetPath,
-		ExpectedSize: req.ExpectedSize,
-		Overwrite:    req.Overwrite,
-		CreatedAt:    s.now().UTC(),
-		Parts:        map[string]int64{},
+		ID:                        id,
+		TargetPath:                targetPath,
+		ExpectedSize:              req.ExpectedSize,
+		Overwrite:                 req.Overwrite,
+		ExpectedTargetFingerprint: req.ExpectedTargetFingerprint,
+		CreatedAt:                 s.now().UTC(),
+		Parts:                     map[string]int64{},
+		Checksum:                  checksum,
+	}
+	if manifest.Checksum != "" && len(manifest.Checksum) != sha256.Size*2 {
+		return UploadSession{}, ErrInvalidTargetPath
+	}
+	for _, r := range manifest.Checksum {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return UploadSession{}, ErrInvalidTargetPath
+		}
 	}
 
 	if err := s.root.Mkdir(s.sessionDir(id), 0o700); err != nil {
@@ -284,6 +306,9 @@ func (s *Service) CompleteUpload(sessionID string) (CompletedUpload, error) {
 	if err := s.validateTarget(manifest.TargetPath, manifest.Overwrite); err != nil {
 		return CompletedUpload{}, err
 	}
+	if err := s.validateExpectedTarget(manifest); err != nil {
+		return CompletedUpload{}, err
+	}
 
 	finalFile, finalName, err := s.createTempFile(sessionID, "final-")
 	if err != nil {
@@ -306,6 +331,18 @@ func (s *Service) CompleteUpload(sessionID string) (CompletedUpload, error) {
 	if written != manifest.ExpectedSize {
 		return CompletedUpload{}, ErrIncompleteUpload
 	}
+	if manifest.Checksum != "" {
+		actual, checksumErr := s.fileChecksum(finalName)
+		if checksumErr != nil {
+			return CompletedUpload{}, checksumErr
+		}
+		if !strings.EqualFold(actual, manifest.Checksum) {
+			return CompletedUpload{}, ErrChecksumMismatch
+		}
+	}
+	if err := s.validateExpectedTarget(manifest); err != nil {
+		return CompletedUpload{}, err
+	}
 
 	if err := s.publish(finalName, manifest.TargetPath, manifest.Overwrite); err != nil {
 		return CompletedUpload{}, err
@@ -316,6 +353,7 @@ func (s *Service) CompleteUpload(sessionID string) (CompletedUpload, error) {
 	return CompletedUpload{
 		TargetPath: manifest.TargetPath,
 		Size:       written,
+		Checksum:   manifest.Checksum,
 	}, nil
 }
 
@@ -354,6 +392,19 @@ func (s *Service) assembleParts(writer io.Writer, manifest uploadManifest) (int6
 		}
 	}
 	return written, nil
+}
+
+func (s *Service) fileChecksum(relativePath string) (string, error) {
+	file, err := s.root.Open(relativePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.CopyBuffer(digest, file, make([]byte, s.bufferSize)); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", digest.Sum(nil)), nil
 }
 
 func (s *Service) verifyComplete(manifest uploadManifest) error {
@@ -426,10 +477,40 @@ func (s *Service) loadManifest(sessionID string) (uploadManifest, error) {
 	if manifest.ExpectedSize < 0 {
 		return uploadManifest{}, ErrInvalidTargetPath
 	}
+	if manifest.Checksum != "" {
+		if len(manifest.Checksum) != sha256.Size*2 {
+			return uploadManifest{}, ErrInvalidTargetPath
+		}
+		for _, r := range manifest.Checksum {
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+				return uploadManifest{}, ErrInvalidTargetPath
+			}
+		}
+	}
 	if manifest.Parts == nil {
 		manifest.Parts = map[string]int64{}
 	}
 	return manifest, nil
+}
+
+func (s *Service) validateExpectedTarget(manifest uploadManifest) error {
+	if manifest.ExpectedTargetFingerprint == "" {
+		return nil
+	}
+	info, err := s.root.Lstat(manifest.TargetPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ErrTargetChanged
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return ErrTargetChanged
+	}
+	if files.Fingerprint(info) != manifest.ExpectedTargetFingerprint {
+		return ErrTargetChanged
+	}
+	return nil
 }
 
 func (s *Service) saveManifest(manifest uploadManifest) error {
@@ -590,6 +671,7 @@ func (m uploadManifest) session() UploadSession {
 		ReceivedSize: m.receivedSize(),
 		Parts:        parts,
 		CreatedAt:    m.CreatedAt.UTC(),
+		Checksum:     m.Checksum,
 	}
 }
 
