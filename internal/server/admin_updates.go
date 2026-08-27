@@ -7,9 +7,13 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"omnora/internal/httpx"
+	"omnora/internal/recovery"
 	updatepkg "omnora/internal/update"
 )
 
@@ -31,7 +35,7 @@ func (s *Server) updateStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uploadUpdate(w http.ResponseWriter, r *http.Request) {
-	_, ok := s.requireAdmin(w, r)
+	session, ok := s.requireAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -78,7 +82,7 @@ func (s *Server) uploadUpdate(w http.ResponseWriter, r *http.Request) {
 		_ = part.Close()
 		if err != nil {
 			status := http.StatusBadRequest
-			if errors.Is(err, updatepkg.ErrPendingUpdate) {
+			if errors.Is(err, updatepkg.ErrPendingUpdate) || errors.Is(err, updatepkg.ErrUpdateBusy) {
 				status = http.StatusConflict
 			}
 			writeUpdatePackageError(w, r, err, status)
@@ -89,17 +93,36 @@ func (s *Server) uploadUpdate(w http.ResponseWriter, r *http.Request) {
 		writeUpdatePackageError(w, r, fmt.Errorf("package field is required"), http.StatusBadRequest)
 		return
 	}
-	if err := s.updates.Activate(release); err != nil {
-		if cancelErr := s.updates.CancelPending(); cancelErr != nil {
-			slog.ErrorContext(r.Context(), "cancel failed self-update", "error", cancelErr)
-		}
+	preparation, err := s.updates.BeginPreparation(release)
+	if err != nil {
+		cleanupStagedRelease(r, s.updates, release)
 		writeUpdatePackageError(w, r, err, http.StatusConflict)
 		return
 	}
-	if !s.recordAuditMutation(w, r, "admin_update_stage", "update", release.ID, fmt.Sprintf(`{"version":%q,"archive_sha256":%q}`, release.Version, release.ArchiveSHA256)) {
-		_ = s.updates.CancelPending()
+	preparationCommitted := false
+	defer func() {
+		if cancelErr := preparation.Cancel(); cancelErr != nil {
+			slog.ErrorContext(r.Context(), "cancel update preparation", "release_id", release.ID, "error", cancelErr)
+		}
+		if !preparationCommitted {
+			cleanupStagedRelease(r, s.updates, release)
+		}
+	}()
+	backupID, err := s.createPreUpdateBackup(r, session.AccountID, release)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "create pre-update backup", "release_id", release.ID, "error", err)
+		httpx.WriteError(w, r, http.StatusInternalServerError, "update_backup_failed", "the update was not queued because its database backup failed")
 		return
 	}
+	release.BackupID = backupID
+	if !s.recordAuditMutation(w, r, "admin_update_authorize", "update", release.ID, fmt.Sprintf(`{"version":%q,"archive_sha256":%q,"backup_id":%q,"state":"prepared"}`, release.Version, release.ArchiveSHA256, backupID)) {
+		return
+	}
+	if err := preparation.Commit(release); err != nil {
+		writeUpdatePackageError(w, r, err, http.StatusConflict)
+		return
+	}
+	preparationCommitted = true
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"state":   "pending_restart",
 		"release": release,
@@ -119,15 +142,25 @@ func (s *Server) rollbackUpdate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusServiceUnavailable, "update_disabled", "self-update is not available in this deployment")
 		return
 	}
-	if err := s.updates.RequestRollback(); err != nil {
+	rollbackToken, err := s.updates.RequestRollbackToken()
+	if err != nil {
 		status := http.StatusConflict
+		code := "rollback_unavailable"
+		message := "there is no installed update available for rollback"
+		if errors.Is(err, updatepkg.ErrUpdateBusy) {
+			code = "update_busy"
+			message = "another update operation is already in progress"
+		}
 		if errors.Is(err, updatepkg.ErrDisabled) {
 			status = http.StatusServiceUnavailable
 		}
-		httpx.WriteError(w, r, status, "rollback_unavailable", "there is no installed update available for rollback")
+		httpx.WriteError(w, r, status, code, message)
 		return
 	}
 	if !s.recordAuditMutation(w, r, "admin_update_rollback", "update", "active", fmt.Sprintf(`{"by":%q}`, session.AccountID)) {
+		if cancelErr := s.updates.CancelRollback(rollbackToken); cancelErr != nil {
+			slog.ErrorContext(r.Context(), "cancel unaudited update rollback", "error", cancelErr)
+		}
 		return
 	}
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
@@ -135,6 +168,67 @@ func (s *Server) rollbackUpdate(w http.ResponseWriter, r *http.Request) {
 		"message": "rollback queued; the service will restart and restore the previous release",
 	})
 	s.RequestShutdown()
+}
+
+func (s *Server) createPreUpdateBackup(r *http.Request, accountID string, release updatepkg.Release) (string, error) {
+	if s.db == nil || strings.TrimSpace(s.cfg.Database.Path) == "" {
+		return "", errors.New("database is not configured")
+	}
+	backupsDir := filepath.Join(strings.TrimSpace(s.cfg.Storage.ManagedDir), "backups")
+	artifact, err := recovery.NewBackupPublisher(s.db).Publish(r.Context(), backupsDir)
+	if err != nil {
+		return "", err
+	}
+	cleanupArtifact := true
+	defer func() {
+		if cleanupArtifact {
+			_ = removeRegularFile(artifact.Path)
+		}
+	}()
+	canonicalPath, err := filepath.Abs(filepath.Clean(artifact.Path))
+	if err != nil {
+		return "", fmt.Errorf("canonicalize pre-update backup: %w", err)
+	}
+	backupID := "bkp_" + artifact.ID
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	notes := "pre-update backup for release " + release.Version
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(r.Context(), `
+INSERT INTO backups(id, status, path, created_by, created_at, completed_at, notes, sha256, size_bytes, canonical_path, schema_version)
+VALUES (?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, backupID, artifact.Path, accountID, now, now, notes, artifact.SHA256, artifact.SizeBytes, canonicalPath, artifact.SchemaVersion); err != nil {
+		return "", err
+	}
+	if err := s.recordAuditTx(r.Context(), tx, r, accountID, "admin_update_backup_create", "backup", backupID, fmt.Sprintf(`{"release_id":%q,"version":%q}`, release.ID, release.Version)); err != nil {
+		s.markAuditRiskIfNeeded(r.Context(), err)
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	cleanupArtifact = false
+	return backupID, nil
+}
+
+func removeRegularFile(filePath string) error {
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("backup cleanup target is not a regular file")
+	}
+	return os.Remove(filePath)
+}
+
+func cleanupStagedRelease(r *http.Request, manager *updatepkg.Manager, release updatepkg.Release) {
+	if err := manager.DiscardRelease(release); err != nil {
+		slog.ErrorContext(r.Context(), "discard staged self-update release", "release_id", release.ID, "error", err)
+	}
 }
 
 func writeUpdatePackageError(w http.ResponseWriter, r *http.Request, err error, status int) {
@@ -146,6 +240,22 @@ func writeUpdatePackageError(w http.ResponseWriter, r *http.Request, err error, 
 	if errors.Is(err, updatepkg.ErrUnsupportedTarget) {
 		code = "unsupported_update_target"
 		message = "the update package targets a different platform"
+	}
+	if errors.Is(err, updatepkg.ErrInvalidSignature) {
+		code = "invalid_update_signature"
+		message = "the update package signature is not trusted"
+	}
+	if errors.Is(err, updatepkg.ErrIncompatibleSchema) {
+		code = "incompatible_update_schema"
+		message = "the update package requires a different database schema"
+	}
+	if errors.Is(err, updatepkg.ErrVersionNotNewer) {
+		code = "update_version_not_newer"
+		message = "the update package version must be newer than the running version"
+	}
+	if errors.Is(err, updatepkg.ErrPendingUpdate) || errors.Is(err, updatepkg.ErrUpdateBusy) {
+		code = "update_busy"
+		message = "another update operation is already in progress"
 	}
 	if errors.Is(err, updatepkg.ErrDisabled) {
 		code = "update_disabled"

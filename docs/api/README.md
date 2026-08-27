@@ -43,11 +43,11 @@ REST 使用三个不可混用的资源族：账号作用域“我的文件”、
 
 管理员版本更新使用会话 Cookie，并要求 CSRF、近期重新认证和管理员角色：
 
-- `GET /api/v1/admin/updates`：读取当前、待重启和失败状态；
-- `POST /api/v1/admin/updates`：以 `multipart/form-data` 的 `package` 字段上传 `.tar.gz` 发布包，成功返回 `202` 后服务受控重启；
+- `GET /api/v1/admin/updates`：读取准备中、待重启、当前版本和失败状态；
+- `POST /api/v1/admin/updates`：以 `multipart/form-data` 的 `package` 字段上传签名 `.tar.gz` 发布包，创建升级前数据库备份后返回 `202` 并受控重启；
 - `POST /api/v1/admin/updates/rollback`：排队恢复上一发布版本，成功返回 `202` 后服务受控重启。
 
-发布包只允许 `manifest.json`、`omnora` 和 `omnora-recovery`，并校验目标平台、大小和 SHA-256。更新文件保存在 `/var/lib/omnora/updates`，不会替换数据库、用户文件或只读镜像层。完整部署约束见[Web Self-Update](../deployment/self-update.md)。
+发布包只允许 `manifest.json`、`manifest.sig`、`omnora` 和 `omnora-recovery`，并校验 Ed25519 签名、目标平台、版本、数据库 Schema、大小和 SHA-256。更新文件保存在 `/var/lib/omnora/updates`，不会替换数据库、用户文件或只读镜像层。完整部署约束见[Web Self-Update](../deployment/self-update.md)。
 
 ## 路由与三种认证
 

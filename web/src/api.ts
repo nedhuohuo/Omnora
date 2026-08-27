@@ -481,14 +481,17 @@ export type UpdateReleasePayload = {
   version: string;
   targetOS: string;
   targetArch: string;
+  schemaVersion?: number;
+  backupId?: string;
   archiveSha256?: string;
   archiveSizeBytes?: number;
   uploadedAt?: string;
 };
 
 export type UpdateStatusPayload = {
-  state: 'disabled' | 'built_in' | 'pending_restart' | 'active' | 'rollback_pending' | 'failed' | string;
+  state: 'disabled' | 'built_in' | 'preparing' | 'pending_restart' | 'active' | 'rollback_pending' | 'failed' | string;
   current?: UpdateReleasePayload;
+  preparing?: UpdateReleasePayload;
   pending?: UpdateReleasePayload;
   failure?: string;
 };

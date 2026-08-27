@@ -49,8 +49,9 @@ type StorageConfig struct {
 }
 
 type UpdateConfig struct {
-	StateDir        string
-	MaxPackageBytes int64
+	StateDir             string
+	MaxPackageBytes      int64
+	SigningPublicKeyFile string
 }
 
 type HTTPConfig struct {
@@ -181,6 +182,7 @@ func LoadEnv() (Config, error) {
 		}
 		cfg.Update.MaxPackageBytes = maxBytes
 	}
+	cfg.Update.SigningPublicKeyFile = strings.TrimSpace(os.Getenv("OMNORA_UPDATE_SIGNING_PUBLIC_KEY_FILE"))
 	if value := strings.TrimSpace(os.Getenv("OMNORA_SQLITE_BUSY_TIMEOUT")); value != "" {
 		timeout, err := time.ParseDuration(value)
 		if err != nil {

@@ -16,6 +16,11 @@ UPDATE_ACTIVE_FILE="$UPDATE_DIR/active"
 UPDATE_PREVIOUS_FILE="$UPDATE_DIR/previous"
 UPDATE_ROLLBACK_FILE="$UPDATE_DIR/rollback"
 UPDATE_FAILURE_FILE="$UPDATE_DIR/failure"
+UPDATE_HEALTH_PENDING_FILE="$UPDATE_DIR/health-pending"
+UPDATE_HEALTH_URL="${OMNORA_UPDATE_HEALTH_URL:-http://127.0.0.1:8080/readyz}"
+UPDATE_HEALTH_TIMEOUT_SECONDS="${OMNORA_UPDATE_HEALTH_TIMEOUT_SECONDS:-60}"
+UPDATE_HEALTH_INTERVAL_SECONDS="${OMNORA_UPDATE_HEALTH_INTERVAL_SECONDS:-2}"
+UPDATE_STABILITY_SECONDS="${OMNORA_UPDATE_STABILITY_SECONDS:-30}"
 ROOT_CONFIG_DIR=/etc/omnora
 ROOT_DATA_DIR=/var/lib/omnora
 ROOT_MANAGED_DIR=/srv/omnora/managed
@@ -51,6 +56,7 @@ read_update_pointer() {
 	[ ! -L "$pointer_value" ] && [ -d "$pointer_value" ] || return 1
 	[ ! -L "$pointer_value/omnora" ] && [ -x "$pointer_value/omnora" ] || return 1
 	[ ! -L "$pointer_value/omnora-recovery" ] && [ -x "$pointer_value/omnora-recovery" ] || return 1
+	[ ! -L "$pointer_value/version" ] && [ -f "$pointer_value/version" ] || return 1
 	printf '%s' "$pointer_value"
 }
 
@@ -62,15 +68,22 @@ write_update_failure() {
 	mv "$failure_tmp_file" "$UPDATE_FAILURE_FILE" || true
 }
 
+write_update_health_pending() {
+	release_path="$1"
+	health_tmp_file="$(mktemp "$UPDATE_HEALTH_PENDING_FILE.tmp.XXXXXX")" || fail_persistence_check "cannot create update health marker"
+	printf '%s\n' "$release_path" > "$health_tmp_file" || fail_persistence_check "cannot write update health marker"
+	chmod 600 "$health_tmp_file" || fail_persistence_check "cannot protect update health marker"
+	mv "$health_tmp_file" "$UPDATE_HEALTH_PENDING_FILE" || fail_persistence_check "cannot publish update health marker"
+}
+
 apply_update_rollback() {
 	[ -e "$UPDATE_ROLLBACK_FILE" ] || return 0
 	if previous_release="$(read_update_pointer "$UPDATE_PREVIOUS_FILE")"; then
-		rm -f "$UPDATE_ACTIVE_FILE"
 		mv "$UPDATE_PREVIOUS_FILE" "$UPDATE_ACTIVE_FILE" || fail_persistence_check "cannot activate the previous Omnora release"
 	else
 		rm -f "$UPDATE_ACTIVE_FILE" "$UPDATE_PREVIOUS_FILE"
 	fi
-	rm -f "$UPDATE_ROLLBACK_FILE" "$UPDATE_FAILURE_FILE"
+	rm -f "$UPDATE_ROLLBACK_FILE" "$UPDATE_FAILURE_FILE" "$UPDATE_HEALTH_PENDING_FILE"
 }
 
 apply_pending_update() {
@@ -80,8 +93,8 @@ apply_pending_update() {
 		rm -f "$UPDATE_PENDING_FILE"
 		return 0
 	fi
+	write_update_health_pending "$pending_release"
 	if active_release="$(read_update_pointer "$UPDATE_ACTIVE_FILE")"; then
-		rm -f "$UPDATE_PREVIOUS_FILE"
 		mv "$UPDATE_ACTIVE_FILE" "$UPDATE_PREVIOUS_FILE" || fail_persistence_check "cannot preserve the previous Omnora release"
 	fi
 	if ! mv "$UPDATE_PENDING_FILE" "$UPDATE_ACTIVE_FILE"; then
@@ -340,17 +353,73 @@ if [ "$save_runtime_secrets" = true ]; then
 	printf 'Omnora generated runtime secrets in %s\n' "$SECRETS_FILE" >&2
 fi
 
+case "$UPDATE_HEALTH_TIMEOUT_SECONDS" in
+	''|*[!0-9]*) fail_persistence_check "OMNORA_UPDATE_HEALTH_TIMEOUT_SECONDS must be a positive integer" ;;
+esac
+case "$UPDATE_HEALTH_INTERVAL_SECONDS" in
+	''|*[!0-9]*) fail_persistence_check "OMNORA_UPDATE_HEALTH_INTERVAL_SECONDS must be a positive integer" ;;
+esac
+case "$UPDATE_STABILITY_SECONDS" in
+	''|*[!0-9]*) fail_persistence_check "OMNORA_UPDATE_STABILITY_SECONDS must be a non-negative integer" ;;
+esac
+[ "$UPDATE_HEALTH_TIMEOUT_SECONDS" -gt 0 ] || fail_persistence_check "OMNORA_UPDATE_HEALTH_TIMEOUT_SECONDS must be positive"
+[ "$UPDATE_HEALTH_INTERVAL_SECONDS" -gt 0 ] || fail_persistence_check "OMNORA_UPDATE_HEALTH_INTERVAL_SECONDS must be positive"
+
+terminate_candidate_for_rollback() {
+	termination_remaining=10
+	kill -TERM "$child_pid" 2>/dev/null || true
+	while kill -0 "$child_pid" 2>/dev/null && [ "$termination_remaining" -gt 0 ]; do
+		sleep 1
+		termination_remaining=$((termination_remaining - 1))
+	done
+	if kill -0 "$child_pid" 2>/dev/null; then
+		kill -KILL "$child_pid" 2>/dev/null || true
+	fi
+}
+
+rollback_candidate_release() {
+	rollback_reason="$1"
+	if previous_release="$(read_update_pointer "$UPDATE_PREVIOUS_FILE")"; then
+		mv "$UPDATE_PREVIOUS_FILE" "$UPDATE_ACTIVE_FILE" || fail_persistence_check "cannot restore the previous Omnora release"
+		APP_COMMAND="$previous_release/omnora"
+	else
+		rm -f "$UPDATE_ACTIVE_FILE" "$UPDATE_PREVIOUS_FILE"
+		APP_COMMAND="/usr/local/bin/omnora"
+	fi
+	rm -f "$UPDATE_HEALTH_PENDING_FILE"
+	write_update_failure "$rollback_reason"
+}
+
+update_health_matches() {
+	health_response="$1"
+	expected_version="$2"
+	printf '%s' "$health_response" | grep -Fq '"status":"ready"' || return 1
+	printf '%s' "$health_response" | grep -Fq "\"version\":\"$expected_version\""
+}
+
 APP_COMMAND="$1"
 shift
+selected_release=''
+health_required=false
 if [ "$APP_COMMAND" = "/usr/local/bin/omnora" ]; then
 	apply_update_rollback
 	apply_pending_update
 	if active_release="$(read_update_pointer "$UPDATE_ACTIVE_FILE")"; then
+		selected_release="$active_release"
 		APP_COMMAND="$active_release/omnora"
+		if [ -f "$UPDATE_HEALTH_PENDING_FILE" ] && [ ! -L "$UPDATE_HEALTH_PENDING_FILE" ] &&
+			[ "$(sed -n '1p' "$UPDATE_HEALTH_PENDING_FILE")" = "$active_release" ]; then
+			health_required=true
+		elif path_exists "$UPDATE_HEALTH_PENDING_FILE"; then
+			rm -f "$UPDATE_HEALTH_PENDING_FILE"
+			write_update_failure "discarded stale update health marker"
+		fi
 	fi
 fi
 
+stop_requested=false
 forward_child_signal() {
+	stop_requested=true
 	if [ -n "${child_pid:-}" ]; then
 		kill -TERM "$child_pid" 2>/dev/null || true
 	fi
@@ -360,33 +429,87 @@ trap 'cleanup_instance_tmp; cleanup_runtime_tmp; forward_child_signal' HUP INT T
 set +e
 "$APP_COMMAND" "$@" &
 child_pid=$!
-wait "$child_pid"
-child_status=$?
 set -e
-trap - HUP INT TERM
-child_pid=''
 
-# A non-signal failure from a selected release is treated as a failed upgrade.
-# Restore the previous pointer before starting the fallback binary. SIGTERM and
-# SIGKILL exit codes are normal container shutdown paths and must not roll back.
-if [ "$APP_COMMAND" != "/usr/local/bin/omnora" ] && [ "$child_status" -ne 0 ] && [ "$child_status" -ne 143 ] && [ "$child_status" -ne 137 ]; then
-	if previous_release="$(read_update_pointer "$UPDATE_PREVIOUS_FILE")"; then
-		rm -f "$UPDATE_ACTIVE_FILE"
-		mv "$UPDATE_PREVIOUS_FILE" "$UPDATE_ACTIVE_FILE" || true
-		APP_COMMAND="$previous_release/omnora"
+if [ "$health_required" = true ]; then
+	expected_version="$(sed -n '1p' "$selected_release/version")"
+	expected_version_extra="$(sed -n '2p' "$selected_release/version")"
+	version_marker_valid=true
+	case "$expected_version" in
+		''|*[!A-Za-z0-9._-]*) version_marker_valid=false ;;
+	esac
+	[ -z "$expected_version_extra" ] || version_marker_valid=false
+	if [ "$version_marker_valid" = true ]; then
+		health_attempts=$(((UPDATE_HEALTH_TIMEOUT_SECONDS + UPDATE_HEALTH_INTERVAL_SECONDS - 1) / UPDATE_HEALTH_INTERVAL_SECONDS))
 	else
-		rm -f "$UPDATE_ACTIVE_FILE" "$UPDATE_PREVIOUS_FILE"
-		APP_COMMAND="/usr/local/bin/omnora"
+		health_attempts=0
 	fi
-	write_update_failure "selected release exited with status $child_status"
+	health_ready=false
+	while [ "$health_attempts" -gt 0 ]; do
+		if [ "$stop_requested" = true ] || ! kill -0 "$child_pid" 2>/dev/null; then
+			break
+		fi
+		health_response="$(wget -q -T "$UPDATE_HEALTH_INTERVAL_SECONDS" -O - "$UPDATE_HEALTH_URL" 2>/dev/null || true)"
+		if update_health_matches "$health_response" "$expected_version"; then
+			health_ready=true
+			break
+		fi
+		health_attempts=$((health_attempts - 1))
+		[ "$health_attempts" -gt 0 ] && sleep "$UPDATE_HEALTH_INTERVAL_SECONDS"
+	done
+
+	if [ "$health_ready" = true ] && [ "$UPDATE_STABILITY_SECONDS" -gt 0 ]; then
+		stability_attempts=$(((UPDATE_STABILITY_SECONDS + UPDATE_HEALTH_INTERVAL_SECONDS - 1) / UPDATE_HEALTH_INTERVAL_SECONDS))
+		while [ "$stability_attempts" -gt 0 ]; do
+			sleep "$UPDATE_HEALTH_INTERVAL_SECONDS"
+			if [ "$stop_requested" = true ] || ! kill -0 "$child_pid" 2>/dev/null; then
+				health_ready=false
+				break
+			fi
+			health_response="$(wget -q -T "$UPDATE_HEALTH_INTERVAL_SECONDS" -O - "$UPDATE_HEALTH_URL" 2>/dev/null || true)"
+			if ! update_health_matches "$health_response" "$expected_version"; then
+				health_ready=false
+				break
+			fi
+			stability_attempts=$((stability_attempts - 1))
+		done
+	fi
+
+	if [ "$stop_requested" = true ]; then
+		health_ready=false
+	fi
+	if [ "$health_ready" = true ]; then
+		rm -f "$UPDATE_HEALTH_PENDING_FILE" "$UPDATE_FAILURE_FILE"
+	else
+		if [ "$stop_requested" = false ] && kill -0 "$child_pid" 2>/dev/null; then
+			terminate_candidate_for_rollback
+		fi
+		set +e
+		wait "$child_pid"
+		child_status=$?
+		set -e
+		child_pid=''
+		if [ "$stop_requested" = false ]; then
+			rollback_candidate_release "candidate release failed readiness validation"
+			set +e
+			"$APP_COMMAND" "$@" &
+			child_pid=$!
+			wait "$child_pid"
+			child_status=$?
+			set -e
+			child_pid=''
+		fi
+	fi
+fi
+
+if [ -n "${child_pid:-}" ]; then
 	set +e
-	"$APP_COMMAND" "$@" &
-	child_pid=$!
 	wait "$child_pid"
 	child_status=$?
 	set -e
 	child_pid=''
 fi
+trap - HUP INT TERM
 
 if [ "$child_status" -ne 0 ] && [ "$instance_markers_created" = true ] && [ ! -f "$DB_PATH" ]; then
 	rm -f "$CONFIG_INSTANCE_FILE" "$DATA_INSTANCE_FILE" "$MANAGED_INSTANCE_FILE"

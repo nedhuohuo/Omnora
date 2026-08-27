@@ -24,6 +24,7 @@ function stateLabel(state: string | undefined, text: typeof localeMessages[Membe
   const labels: Record<string, string> = {
     disabled: text.updateStateDisabled,
     built_in: text.updateStateBuiltIn,
+    preparing: text.updateStatePreparing,
     pending_restart: text.updateStatePending,
     active: text.updateStateActive,
     rollback_pending: text.updateStateRollbackPending,
@@ -50,6 +51,8 @@ function ReleaseSummary({ title, release, locale, text }: { title: string; relea
       <dl>
         <div><dt>{text.updateVersion}</dt><dd>{release.version}</dd></div>
         <div><dt>{text.updateTarget}</dt><dd>{release.targetOS}/{release.targetArch}</dd></div>
+        {release.schemaVersion !== undefined && <div><dt>{text.updateSchema}</dt><dd>{release.schemaVersion}</dd></div>}
+        {release.backupId && <div><dt>{text.updateBackup}</dt><dd>{release.backupId}</dd></div>}
         {release.archiveSizeBytes !== undefined && <div><dt>{text.updatePackageSize}</dt><dd>{formatBytes(release.archiveSizeBytes)}</dd></div>}
         <div><dt>{text.updateUploaded}</dt><dd>{uploadedAt}</dd></div>
       </dl>
@@ -136,6 +139,7 @@ export default function AdminUpdatesPanel({ locale }: { locale: MemberLocale }) 
     }
   }
 
+  const operationQueued = status?.state === 'preparing' || status?.state === 'pending_restart' || status?.state === 'rollback_pending';
   const busy = loading || uploading || rollingBack;
   return (
     <div className="member-admin-workspace">
@@ -147,18 +151,19 @@ export default function AdminUpdatesPanel({ locale }: { locale: MemberLocale }) 
       {notice && <div className="member-admin-notice">{notice}</div>}
       <form className="member-admin-form member-update-form" onSubmit={(event) => void onUpload(event)}>
         <label className="member-admin-form-wide">{text.updatePackageLabel}
-          <input type="file" accept=".tar.gz,application/gzip" onChange={(event) => setFile(event.currentTarget.files?.[0] ?? null)} disabled={busy} required />
+          <input type="file" accept=".tar.gz,application/gzip" onChange={(event) => setFile(event.currentTarget.files?.[0] ?? null)} disabled={busy || operationQueued} required />
         </label>
         <p className="member-admin-hint member-admin-form-wide">{text.updatePackageHint}</p>
         <div className="member-admin-form-actions member-admin-form-wide">
-          <button className="member-primary" type="submit" disabled={busy || !file}>{uploading ? text.updateUploading : text.updateUpload}</button>
-          <button className="member-modal-danger" type="button" onClick={() => void onRollback()} disabled={busy || !status?.current}>{text.updateRollback}</button>
+          <button className="member-primary" type="submit" disabled={busy || operationQueued || !file}>{uploading ? text.updateUploading : text.updateUpload}</button>
+          <button className="member-modal-danger" type="button" onClick={() => void onRollback()} disabled={busy || operationQueued || !status?.current}>{text.updateRollback}</button>
         </div>
       </form>
       <div className="member-update-status">
         <div className="member-update-state"><span className={`member-status-dot ${status?.state === 'failed' ? 'danger' : status?.state === 'active' ? 'ok' : 'muted'}`} />{text.updateStateLabel}<strong>{stateLabel(status?.state, text)}</strong></div>
         {status?.failure && <p className="member-error member-update-failure">{text.updateFailure}: {status.failure}</p>}
         <ReleaseSummary title={text.updateCurrentRelease} release={status?.current} locale={locale} text={text} />
+        <ReleaseSummary title={text.updatePreparingRelease} release={status?.preparing} locale={locale} text={text} />
         <ReleaseSummary title={text.updatePendingRelease} release={status?.pending} locale={locale} text={text} />
       </div>
     </div>

@@ -1290,68 +1290,77 @@ paths:
           $ref: "#/components/responses/Unauthorized"
 
   /admin/updates:
-     get:
-       tags: [Admin]
-       summary: Return durable self-update status.
-       x-omnora-route-group: rest
-       responses:
-         "200":
-           description: Current active and pending release state.
-           content:
-             application/json:
-               schema:
-                 type: object
-                 required: [state]
-                 properties:
-                   state: {type: string}
-                   current: {type: object, additionalProperties: true}
-                   pending: {type: object, additionalProperties: true}
-                   failure: {type: string}
-         "401":
-           $ref: "#/components/responses/Unauthorized"
+    get:
+      tags: [Admin]
+      summary: Return durable self-update status.
+      x-omnora-route-group: rest
+      responses:
+        "200":
+          description: Current preparing, pending, and active release state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state]
+                properties:
+                  state: {type: string}
+                  current: {type: object, additionalProperties: true}
+                  preparing: {type: object, additionalProperties: true}
+                  pending: {type: object, additionalProperties: true}
+                  failure: {type: string}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Self-update is disabled or unavailable.
 
-     post:
-       tags: [Admin]
-       summary: Validate and queue a tar.gz application release.
-       x-omnora-route-group: rest
-       requestBody:
-         required: true
-         content:
-           multipart/form-data:
-             schema:
-               type: object
-               required: [package]
-               properties:
-                 package:
-                   type: string
-                   format: binary
-       responses:
-         "202":
-           description: Package accepted and queued for restart.
-           content:
-             application/json:
-               schema:
-                 type: object
-                 additionalProperties: true
-         "400":
-           description: Invalid package.
-         "401":
-           $ref: "#/components/responses/Unauthorized"
-         "413":
-           description: Package exceeds the configured limit.
+    post:
+      tags: [Admin]
+      summary: Verify, back up, and queue a signed tar.gz application release.
+      x-omnora-route-group: rest
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [package]
+              properties:
+                package:
+                  type: string
+                  format: binary
+      responses:
+        "202":
+          description: Signed package accepted, database backed up, and release queued for restart.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Invalid package, signature, version, platform, or schema.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Another update operation is preparing or pending.
+        "413":
+          description: Package exceeds the configured limit.
+        "500":
+          description: The pre-update database backup failed.
 
-   /admin/updates/rollback:
-     post:
-       tags: [Admin]
-       summary: Queue rollback to the previous application release.
-       x-omnora-route-group: rest
-       responses:
-         "202":
-           description: Rollback accepted and queued for restart.
-         "401":
-           $ref: "#/components/responses/Unauthorized"
+  /admin/updates/rollback:
+    post:
+      tags: [Admin]
+      summary: Queue rollback to the previous application release.
+      x-omnora-route-group: rest
+      responses:
+        "202":
+          description: Rollback accepted and queued for restart.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: No installed release is available for rollback.
 
-   /admin/recovery:
+  /admin/recovery:
     get:
       tags: [Admin]
       summary: Return durable recovery coordinator state.

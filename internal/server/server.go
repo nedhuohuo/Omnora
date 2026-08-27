@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"embed"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
 	"omnora/internal/audit"
+	"omnora/internal/buildinfo"
 	"omnora/internal/catalog"
 	"omnora/internal/config"
 	"omnora/internal/confirmation"
@@ -86,12 +88,6 @@ func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 		mux:        http.NewServeMux(),
 		shutdownCh: make(chan struct{}),
 	}
-	if strings.TrimSpace(cfg.Update.StateDir) != "" {
-		s.updates = update.NewManager(cfg.Update.StateDir, cfg.Update.MaxPackageBytes)
-		if err := s.updates.EnsureDirs(); err != nil {
-			s.startupErr = err
-		}
-	}
 	if db != nil {
 		s.guard = access.NewGuard(db.SQL(), cfg.Storage.ManagedDir)
 		s.tokens = aitoken.NewService(db.SQL())
@@ -111,6 +107,32 @@ func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 			s.startupErr = err
 		}
 		s.memberFiles = memberfiles.NewService(db.SQL(), s.guard, catalog.NewService(db.SQL()), memberfiles.WithAITokenService(s.tokens), memberfiles.WithShareInvalidator(s.memberShares), memberfiles.WithFileOpsCoordinator(fileOpsCoordinator))
+	}
+	if db != nil && strings.TrimSpace(cfg.Update.StateDir) != "" && strings.TrimSpace(cfg.Update.SigningPublicKeyFile) != "" {
+		currentVersion := buildinfo.CurrentVersion()
+		if !update.IsReleaseVersion(currentVersion) {
+			s.startupErr = fmt.Errorf("self-update requires a comparable release build version, got %q", currentVersion)
+		} else if publicKey, err := update.LoadSigningPublicKey(cfg.Update.SigningPublicKeyFile); err != nil {
+			s.startupErr = err
+		} else {
+			var schemaVersion int64
+			if err := db.SQL().QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&schemaVersion); err != nil {
+				s.startupErr = fmt.Errorf("read update schema version: %w", err)
+			} else {
+				s.updates = update.NewManager(
+					cfg.Update.StateDir,
+					cfg.Update.MaxPackageBytes,
+					update.WithCurrentVersion(currentVersion),
+					update.WithCurrentSchemaVersion(schemaVersion),
+					update.WithSigningPublicKey(publicKey),
+				)
+				if err := s.updates.EnsureDirs(); err != nil {
+					s.startupErr = err
+				} else if err := s.updates.RecoverInterruptedPreparation(); err != nil {
+					s.startupErr = err
+				}
+			}
+		}
 	}
 	s.authLimiter = ratelimit.New(ratelimit.Options{})
 	for _, opt := range opts {
@@ -373,7 +395,7 @@ func (s *Server) setRouteEnabled(group domain.RouteGroup, enabled bool) {
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": buildinfo.CurrentVersion()})
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
@@ -422,7 +444,7 @@ SELECT state, ready FROM recovery_control WHERE id = 1
 			return
 		}
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready", "version": buildinfo.CurrentVersion()})
 }
 
 func requestID(next http.Handler) http.Handler {

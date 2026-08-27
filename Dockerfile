@@ -9,6 +9,7 @@ RUN npm run build
 FROM golang:1.26-alpine AS go-build
 
 ARG GOPROXY=https://proxy.golang.org,direct
+ARG OMNORA_VERSION=dev
 ENV GOPROXY=${GOPROXY}
 
 WORKDIR /src
@@ -16,7 +17,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
 COPY --from=web-build /src/web/dist/ /src/internal/server/static/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/omnora ./cmd/omnora
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X omnora/internal/buildinfo.Version=${OMNORA_VERSION}" -o /out/omnora ./cmd/omnora
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/omnora-recovery ./cmd/omnora-recovery
 
 FROM alpine:3.22
@@ -43,6 +44,11 @@ ENV TZ=Asia/Shanghai \
     OMNORA_PREDECLARED_MOUNT_ROOT=/mnt/omnora \
     OMNORA_UPDATE_DIR=/var/lib/omnora/updates \
     OMNORA_UPDATE_MAX_PACKAGE_BYTES=536870912 \
+    OMNORA_UPDATE_SIGNING_PUBLIC_KEY_FILE="" \
+    OMNORA_UPDATE_HEALTH_URL=http://127.0.0.1:8080/readyz \
+    OMNORA_UPDATE_HEALTH_TIMEOUT_SECONDS=60 \
+    OMNORA_UPDATE_HEALTH_INTERVAL_SECONDS=2 \
+    OMNORA_UPDATE_STABILITY_SECONDS=30 \
     OMNORA_MCP_ALLOWED_HOSTS="" \
     OMNORA_MCP_ALLOWED_ORIGINS="" \
     OMNORA_MCP_MAX_BODY_BYTES=1048576 \
