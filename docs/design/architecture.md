@@ -43,13 +43,13 @@ SQLite 使用 WAL 模式，并遵守以下约束：
 - 页缓存目标 32 至 64 MB。
 - WAL 检查点有大小和时间上限，避免长期占用交互请求。
 - 数据库迁移必须可检测版本；迁移失败时停止启动并保留原数据。
-- 挂载白名单迁移新增 `allow_public_shares DEFAULT 0` 和 `mount_account_grants`。仅未删除的既有挂载在迁移时把公开分享置为开启，并按当时 `space_members.permission` 回填同级授权；迁移后新增挂载保持关闭且无授权。
+- 挂载白名单迁移新增 `allow_public_shares DEFAULT 0` 和 `mount_account_grants`。仅未删除的既有挂载在迁移时把公开分享置为开启，并按当时 `space_members.permission` 回填同级授权；迁移后手动新增挂载保持关闭且无授权，自动发现 Docker 映射只创建首个管理员授权。
 
 热备份使用 SQLite Online Backup API 或等价的一致性方案，不能把“执行 WAL checkpoint”当作完整备份。
 
 ## 5. 挂载注册与身份
 
-应用只接受部署者预先映射到 `OMNORA_MANAGED_STORAGE_DIR` 托管根或 `OMNORA_PREDECLARED_MOUNT_ROOT` 外部根下的容器绝对路径，不接受任意宿主机路径，也不在容器内执行 mount。两个配置根必须存在明确边界，不能相同或互为父子；挂载类型由服务端按命中的配置根推断。挂载注册和配置变更通过全局串行锁与 SQLite 事务执行，并在激活前对所有未删除挂载重新检查，防止两个管理员并发注册冲突目录。
+应用只接受部署者预先映射到 `OMNORA_MANAGED_STORAGE_DIR` 托管根或 `OMNORA_PREDECLARED_MOUNT_ROOT` 外部根下的容器绝对路径，不接受任意宿主机路径，也不在容器内执行 mount。首次初始化及后续启动解析当前 mount namespace，自动注册这些允许根下的独立 Docker 挂载点；外部根与独立子挂载同时存在时优先子挂载，避免扩大授权边界。自动挂载归入首个管理员个人空间并只授权该管理员。两个配置根必须存在明确边界，不能相同或互为父子；挂载类型由服务端按命中的配置根推断。挂载注册和配置变更通过全局串行锁与 SQLite 事务执行，并在激活前对所有未删除挂载重新检查；数据库对未删除挂载的规范根路径建立唯一索引。
 
 首版按以下顺序验证候选挂载：
 

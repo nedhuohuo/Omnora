@@ -176,6 +176,9 @@ func (s *Server) reverifyMount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mountRegistrationMu.Lock()
+	defer mountRegistrationMu.Unlock()
+
 	mountID := strings.TrimSpace(r.PathValue("mountId"))
 	mount, err := s.loadAdminMount(r.Context(), mountID)
 	if errors.Is(err, sql.ErrNoRows) {

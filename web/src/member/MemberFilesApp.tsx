@@ -906,8 +906,8 @@ export default function MemberFilesApp({ entry = 'member', route, legacyAdminPat
           <div className="member-top-actions"><div className="member-language" aria-label={text.language}><button type="button" onClick={() => setLocale('zh-CN')} aria-pressed={locale === 'zh-CN'}>中文</button><button type="button" onClick={() => setLocale('en-US')} aria-pressed={locale === 'en-US'}>EN</button></div><button className="member-account" type="button" onClick={onLogout}>{text.signOut}</button></div>
         </header>
         <section className="member-no-access">
-          <h1>{adminDenied ? text.adminAccessDenied : text.noSpaces}</h1>
-          <p>{adminDenied ? text.adminAccessDetail : text.noMount}</p>
+          <h1>{adminDenied ? text.adminAccessDenied : spaces.length === 0 ? text.noSpaces : text.noMount}</h1>
+          <p>{adminDenied ? text.adminAccessDetail : spaces.length === 0 ? text.noSpacesDetail : text.noMountDetail}</p>
           {fallbackDestination && <button className="member-primary" type="button" onClick={() => navigateTo(fallbackDestination)}>{fallbackDestination.workspace === 'admin' ? text.adminOverview : fallbackDestination.tab === 'account' ? text.account : text.goToFiles}</button>}
         </section>
       </main>

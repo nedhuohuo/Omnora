@@ -108,8 +108,20 @@ func TestParseMountInfoCapturesFieldsAndEscapes(t *testing.T) {
 	}
 
 	got := entries[0]
-	if !got.Available || got.ID != 42 || got.ParentID != 30 || got.Device != "8:1" || got.Root != "/source root" || got.Point != "/mnt/data one" || got.FSType != "ext4" || got.Source != "/dev/sda1" {
+	if !got.Available || got.ReadOnly || got.ID != 42 || got.ParentID != 30 || got.Device != "8:1" || got.Root != "/source root" || got.Point != "/mnt/data one" || got.FSType != "ext4" || got.Source != "/dev/sda1" {
 		t.Fatalf("parsed mountinfo = %+v", got)
+	}
+}
+
+func TestParseMountInfoCapturesReadOnlyOption(t *testing.T) {
+	const sample = "43 30 8:1 /archive /mnt/archive ro,nosuid,nodev - ext4 /dev/sda1 rw\n"
+
+	entries, err := parseMountInfo(strings.NewReader(sample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !entries[0].ReadOnly {
+		t.Fatalf("parsed mountinfo = %+v, want read-only", entries)
 	}
 }
 

@@ -41,6 +41,7 @@ type StatxInfo struct {
 
 type MountInfo struct {
 	Available bool
+	ReadOnly  bool
 
 	ID       int
 	ParentID int
@@ -87,6 +88,23 @@ func verifyCandidateRoot(root string, existing []Identity, mountInfoPath string)
 
 func Capture(root string) (Identity, error) {
 	return capture(root, defaultMountInfoPath)
+}
+
+// ListMountPoints returns the mount points visible in the current process mount namespace.
+func ListMountPoints() ([]MountInfo, error) {
+	return listMountPoints(defaultMountInfoPath)
+}
+
+func listMountPoints(mountInfoPath string) ([]MountInfo, error) {
+	file, err := os.Open(mountInfoPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []MountInfo{}, nil
+		}
+		return nil, fmt.Errorf("%w: read mountinfo: %v", ErrIdentityUnverifiable, err)
+	}
+	defer file.Close()
+	return parseMountInfo(file)
 }
 
 func CheckConflicts(candidate Identity, existing []Identity) error {
@@ -283,6 +301,7 @@ func parseMountInfoLine(line string) (MountInfo, error) {
 
 	return MountInfo{
 		Available: true,
+		ReadOnly:  mountOptionsReadOnly(fields[5]),
 		ID:        id,
 		ParentID:  parentID,
 		Device:    fields[2],
@@ -291,6 +310,15 @@ func parseMountInfoLine(line string) (MountInfo, error) {
 		FSType:    fields[separator+1],
 		Source:    source,
 	}, nil
+}
+
+func mountOptionsReadOnly(options string) bool {
+	for _, option := range strings.Split(options, ",") {
+		if option == "ro" {
+			return true
+		}
+	}
+	return false
 }
 
 func unescapeMountInfoPath(value string) (string, error) {

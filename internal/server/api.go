@@ -286,9 +286,14 @@ func (s *Server) initialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.recordAudit(r, "system_initialize", "account", created.Account.ID, "{}")
+	registeredMounts, registrationErr := s.autoRegisterDockerMounts(r.Context(), created.Account.ID, created.PersonalSpace.ID)
+	if registrationErr != nil {
+		slog.WarnContext(r.Context(), "automatic Docker mount registration incomplete after initialization", "registered", registeredMounts, "error", registrationErr)
+	}
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
-		"user":  accountResponse(created.Account),
-		"space": spaceResponse(created.PersonalSpace, domain.SpacePermissionManager),
+		"user":                 accountResponse(created.Account),
+		"space":                spaceResponse(created.PersonalSpace, domain.SpacePermissionManager),
+		"autoRegisteredMounts": registeredMounts,
 	})
 }
 
@@ -1535,6 +1540,9 @@ func (s *Server) createMount(w http.ResponseWriter, r *http.Request) {
 		req.IndexEnabled = true
 	}
 
+	mountRegistrationMu.Lock()
+	defer mountRegistrationMu.Unlock()
+
 	mount, err := s.validateMountRequest(r, req.SpaceID, req.DisplayName, req.RootPath, req.Kind, req.Mode)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -1566,6 +1574,10 @@ INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, index_enab
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
 `, mountID, req.SpaceID, mount.DisplayName, mount.RootPath, mount.Kind, mount.Mode, indexEnabled, 0, string(identityJSON))
 	if err != nil {
+		if isActiveMountRootConflict(err) {
+			httpx.WriteError(w, r, http.StatusConflict, "mount_conflict", "mount root is already registered")
+			return
+		}
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			httpx.WriteError(w, r, http.StatusConflict, "mount_conflict", "mount display name already exists in this space")
 			return
@@ -2329,7 +2341,11 @@ func isReadOnlyFilesystem(err error) bool {
 }
 
 func (s *Server) loadMountIdentities(r *http.Request) ([]mountid.Identity, error) {
-	rows, err := s.sqlDB().QueryContext(r.Context(), `
+	return s.loadMountIdentitiesContext(r.Context())
+}
+
+func (s *Server) loadMountIdentitiesContext(ctx context.Context) ([]mountid.Identity, error) {
+	rows, err := s.sqlDB().QueryContext(ctx, `
 SELECT root_path, mount_identity_json
 FROM mounts
 WHERE status <> 'deleted'

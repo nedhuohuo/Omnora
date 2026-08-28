@@ -2,7 +2,7 @@
 # building from source on the NAS.
 services:
   omnora:
-    image: ghcr.io/nedhuohuo/omnora:codex-aliyun-test-deploy
+    image: ghcr.io/nedhuohuo/omnora:latest
     container_name: omnora
     restart: unless-stopped
     init: true

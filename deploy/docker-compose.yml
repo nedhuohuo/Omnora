@@ -48,7 +48,9 @@ services:
       - ./config:/etc/omnora
       - ./data:/var/lib/omnora
       - ./managed:/srv/omnora/managed
-      # Bind NAS directories under /mnt/omnora before registering them in Omnora.
+      # Bind NAS directories under /mnt/omnora. Omnora discovers independent
+      # Docker mount points on initialization and startup, registers them in the
+      # first admin's personal space, and grants only that admin access.
       # After reinstall, bind each original source back to the same container path.
       # Keep external mounts read-only unless write access is intentionally required.
     tmpfs:

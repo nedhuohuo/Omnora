@@ -18,20 +18,29 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	db        *store.DB
-	mux       *http.ServeMux
-	routesMu  sync.RWMutex
-	listeners *ListenerManager
+	cfg            config.Config
+	db             *store.DB
+	mux            *http.ServeMux
+	routesMu       sync.RWMutex
+	mountDiscovery mountDiscoveryFunc
+	listeners      *ListenerManager
 }
 
 const EntryHTTP = "http"
+
+var mountRegistrationMu sync.Mutex
 
 type Option func(*Server)
 
 func WithListeners(listeners *ListenerManager) Option {
 	return func(s *Server) {
 		s.listeners = listeners
+	}
+}
+
+func withMountDiscovery(discovery mountDiscoveryFunc) Option {
+	return func(s *Server) {
+		s.mountDiscovery = discovery
 	}
 }
 
@@ -50,15 +59,22 @@ func New(cfg config.Config, db *store.DB, opts ...Option) http.Handler {
 // registers routes.
 func NewServer(cfg config.Config, db *store.DB, opts ...Option) *Server {
 	s := &Server{
-		cfg: cfg,
-		db:  db,
-		mux: http.NewServeMux(),
+		cfg:            cfg,
+		db:             db,
+		mux:            http.NewServeMux(),
+		mountDiscovery: discoverConfiguredMounts,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
 	if db != nil {
-		_ = s.hydrateRouteGroups(context.Background())
+		ctx := context.Background()
+		_ = s.hydrateRouteGroups(ctx)
+		if registered, err := s.autoRegisterDockerMounts(ctx, "", ""); err != nil {
+			slog.Warn("automatic Docker mount registration incomplete", "registered", registered, "error", err)
+		} else if registered > 0 {
+			slog.Info("automatic Docker mount registration completed", "registered", registered)
+		}
 	}
 	s.routes()
 	return s
