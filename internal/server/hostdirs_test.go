@@ -129,3 +129,66 @@ func TestProbeMountWritableRejectsReadOnlyRoot(t *testing.T) {
 		t.Fatal("expected read-only probe to fail")
 	}
 }
+
+func TestInferMountKindRequiresConfiguredAllowedRoot(t *testing.T) {
+	root := t.TempDir()
+	managed := filepath.Join(root, "managed")
+	external := filepath.Join(root, "mounts")
+	outside := filepath.Join(root, "outside")
+	for _, path := range []string{managed, external, outside} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &Server{cfg: config.Config{Storage: config.StorageConfig{
+		ManagedDir: managed, PredeclaredMountRoot: external,
+	}}}
+	for _, tc := range []struct {
+		path string
+		kind string
+	}{
+		{path: filepath.Join(managed, "personal"), kind: "managed"},
+		{path: filepath.Join(external, "photos"), kind: "external"},
+	} {
+		if got, err := s.inferMountKind(tc.path); err != nil || got != tc.kind {
+			t.Fatalf("inferMountKind(%q) = %q, %v", tc.path, got, err)
+		}
+	}
+	if _, err := s.inferMountKind(outside); err == nil {
+		t.Fatal("expected outside root to be rejected")
+	}
+}
+
+func TestInferMountKindRejectsOverlappingConfiguredRoots(t *testing.T) {
+	root := t.TempDir()
+	managed := filepath.Join(root, "storage")
+	external := filepath.Join(managed, "external")
+	s := &Server{cfg: config.Config{Storage: config.StorageConfig{
+		ManagedDir: managed, PredeclaredMountRoot: external,
+	}}}
+	if _, err := s.inferMountKind(filepath.Join(external, "photos")); err == nil {
+		t.Fatal("expected overlapping configured roots to be rejected")
+	}
+}
+
+func TestReverifyMountRejectsRootOutsideConfiguredWhitelist(t *testing.T) {
+	db, _ := newAPITestServer(t)
+	admin, _ := createAPITestAccounts(t, db)
+	createTestSpaceAndMount(t, db, "space-reverify", "mount-reverify", admin.ID, "read_only")
+	allowed := filepath.Join(t.TempDir(), "allowed")
+	if err := os.MkdirAll(allowed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(config.Config{
+		Routes:            map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+		RouteEnvOverrides: map[domain.RouteGroup]bool{domain.RouteGroupREST: true},
+		Storage: config.StorageConfig{PredeclaredMountRoot: allowed},
+	}, db)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/mounts/mount-reverify/reverify", nil)
+	req.AddCookie(issueAPITestSession(t, db, admin.ID))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}

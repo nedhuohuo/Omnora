@@ -63,6 +63,32 @@ func TestExchangeCreatesSessionAndConsumesOneVisit(t *testing.T) {
 	}
 }
 
+func TestShareSessionsFailAfterMountSharingOrGrantIsRevoked(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	insertShare(t, db, testShare{
+		ID: "share-access", PublicID: "public-access", FragmentSecret: "fragment-secret", ExpiresAt: now.Add(time.Hour),
+	})
+	service := NewService(db, WithClock(func() time.Time { return now }))
+	issued, err := service.Exchange(ctx, ExchangeRequest{PublicID: "public-access", FragmentSecret: "fragment-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE mounts SET allow_public_shares = 0 WHERE id = 'mount-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.VerifySession(ctx, issued.SessionToken); err == nil {
+		t.Fatal("expected session to fail after public sharing was disabled")
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE mounts SET allow_public_shares = 1 WHERE id = 'mount-1'; DELETE FROM mount_account_grants WHERE mount_id = 'mount-1' AND account_id = 'account-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Exchange(ctx, ExchangeRequest{PublicID: "public-access", FragmentSecret: "fragment-secret"}); err == nil {
+		t.Fatal("expected exchange to fail after creator grant removal")
+	}
+}
+
 func TestExchangePasswordRequiredDoesNotConsumeVisit(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
@@ -292,12 +318,28 @@ ON CONFLICT(id) DO NOTHING
 		t.Fatalf("insert space: %v", err)
 	}
 	_, err = db.ExecContext(ctx, `
-INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status)
-VALUES ('mount-1', 'space-1', 'Mount', '/tmp/omnora', 'managed', 'read_only', 'active')
+INSERT INTO space_members(space_id, account_id, permission)
+VALUES ('space-1', 'account-1', 'manager')
+ON CONFLICT(space_id, account_id) DO NOTHING
+`)
+	if err != nil {
+		t.Fatalf("insert space member: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status, allow_public_shares)
+VALUES ('mount-1', 'space-1', 'Mount', '/tmp/omnora', 'managed', 'read_only', 'active', 1)
 ON CONFLICT(id) DO NOTHING
 `)
 	if err != nil {
 		t.Fatalf("insert mount: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+INSERT INTO mount_account_grants(mount_id, account_id, permission)
+VALUES ('mount-1', 'account-1', 'manager')
+ON CONFLICT(mount_id, account_id) DO NOTHING
+`)
+	if err != nil {
+		t.Fatalf("insert mount grant: %v", err)
 	}
 	_, err = db.ExecContext(ctx, `
 INSERT INTO shares(

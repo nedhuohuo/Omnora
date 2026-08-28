@@ -69,3 +69,5 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid 
 .route-unavailable strong { color: var(--accent); font-size: 18px; }
 .route-unavailable h1 { margin: 12px 0 8px; color: var(--text-strong); font-size: 24px; }
 .route-unavailable p { margin: 0; color: var(--text-soft); }
+.route-unavailable a { margin-top: 18px; color: var(--accent-text); font-size: 14px; text-decoration: none; }
+.route-unavailable a:hover { text-decoration: underline; }

@@ -151,7 +151,54 @@ SELECT permission FROM space_members WHERE space_id = 'shared-acl' AND account_i
 	}
 }
 
-func TestAuditEventsReturnReadableActorAndTargetLabels(t *testing.T) {
+func TestDisablingAccountIrreversiblyRevokesCapabilities(t *testing.T) {
+	db, handler := newAPITestServer(t)
+	admin, member := createAPITestAccounts(t, db)
+	createTestSpaceAndMount(t, db, "space-disable", "mount-disable", admin.ID, "read_write")
+	addSpaceMember(t, db, "space-disable", member.ID, "manager")
+	ctx := context.Background()
+	fixtures := []string{
+		`INSERT INTO mount_account_grants(mount_id, account_id, permission) VALUES ('mount-disable', ?, 'manager')`,
+		`INSERT INTO shares(id, public_id, secret_hash, creator_account_id, space_id, mount_id, relative_path, expires_at) VALUES ('share-disable', 'public-disable', 'hash', ?, 'space-disable', 'mount-disable', 'report.txt', '2099-01-01T00:00:00Z')`,
+		`INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, expires_at) VALUES ('token-disable', 'token-public-disable', 'hash', ?, 'Token', 'files.list', '2099-01-01T00:00:00Z')`,
+		`INSERT INTO upload_sessions(id, account_id, space_id, mount_id, target_relative_path, declared_size, part_size, temp_dir, expires_at) VALUES ('upload-disable', ?, 'space-disable', 'mount-disable', 'upload.txt', 1, 1, 'tmp', '2099-01-01T00:00:00Z')`,
+	}
+	for _, query := range fixtures {
+		if _, err := db.SQL().ExecContext(ctx, query, member.ID); err != nil {
+			t.Fatalf("insert revocable capability: %v", err)
+		}
+	}
+	_ = issueAPITestSession(t, db, member.ID)
+	cookie := issueAPITestSession(t, db, admin.ID)
+	for _, action := range []string{"disable", "enable"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/"+member.ID+"/"+action, nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, body = %s", action, rec.Code, rec.Body.String())
+		}
+	}
+	var shareRevoked, tokenRevoked, uploadStatus string
+	var activeSessions int
+	if err := db.SQL().QueryRowContext(ctx, `SELECT COALESCE(revoked_at, '') FROM shares WHERE id = 'share-disable'`).Scan(&shareRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL().QueryRowContext(ctx, `SELECT COALESCE(revoked_at, '') FROM ai_tokens WHERE id = 'token-disable'`).Scan(&tokenRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL().QueryRowContext(ctx, `SELECT status FROM upload_sessions WHERE id = 'upload-disable'`).Scan(&uploadStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL().QueryRowContext(ctx, `SELECT COUNT(1) FROM identity_sessions WHERE account_id = ? AND revoked_at IS NULL`, member.ID).Scan(&activeSessions); err != nil {
+		t.Fatal(err)
+	}
+	if shareRevoked == "" || tokenRevoked == "" || uploadStatus != "canceled" || activeSessions != 0 {
+		t.Fatalf("capabilities revived: share=%q token=%q upload=%q activeSessions=%d", shareRevoked, tokenRevoked, uploadStatus, activeSessions)
+	}
+}
+
+func TestAuditEventsReturnReadableActorsAndSafeTargetLabels(t *testing.T) {
 	db, handler := newAPITestServer(t)
 	admin, member := createAPITestAccounts(t, db)
 	adminCookie := issueAPITestSession(t, db, admin.ID)
@@ -208,7 +255,7 @@ VALUES
 	if systemEvent.ActorLabel != "system" || systemEvent.TargetLabel != "mcp" {
 		t.Fatalf("system audit labels = %#v, want system / mcp", systemEvent)
 	}
-	if backupEvent.TargetID != "bkp-readable" || backupEvent.TargetLabel != "backup 2026-08-04T15:00:00Z" {
-		t.Fatalf("backup audit target fields = %#v, want readable backup label", backupEvent)
+	if backupEvent.TargetID != "bkp-readable" || backupEvent.TargetLabel != "bkp-readable" {
+		t.Fatalf("backup audit target fields = %#v, want opaque backup id", backupEvent)
 	}
 }

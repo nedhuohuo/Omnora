@@ -14,7 +14,6 @@ const (
 	ScopeFilesText           Scope = "files:text"
 	ScopeFilesDownloadTicket Scope = "files:download_ticket"
 	ScopeSearchRead          Scope = "search:read"
-	ScopeUploadsCreate       Scope = "uploads:create"
 )
 
 var (

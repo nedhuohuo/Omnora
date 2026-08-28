@@ -197,7 +197,13 @@ func (s *Server) setAdminUserEnabled(w http.ResponseWriter, r *http.Request, ena
 		status = "active"
 	}
 	now := nowRFC3339()
-	result, err := s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(r.Context(), `
 UPDATE accounts SET status = ?, updated_at = ? WHERE id = ? AND status <> 'deleted'
 `, status, now, userID)
 	if err != nil {
@@ -214,7 +220,45 @@ UPDATE accounts SET status = ?, updated_at = ? WHERE id = ? AND status <> 'delet
 		return
 	}
 	if !enabled {
-		_ = identity.New(s.sqlDB(), identity.Options{}).RevokeAllSessions(r.Context(), userID, "")
+		if _, err := tx.ExecContext(r.Context(), `
+UPDATE shares SET revoked_at = COALESCE(revoked_at, ?), updated_at = ?
+WHERE creator_account_id = ? AND revoked_at IS NULL
+`, now, now, userID); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		if _, err := tx.ExecContext(r.Context(), `
+UPDATE ai_tokens SET revoked_at = COALESCE(revoked_at, ?), updated_at = ?
+WHERE account_id = ? AND revoked_at IS NULL
+`, now, now, userID); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		if _, err := tx.ExecContext(r.Context(), `
+UPDATE upload_sessions SET status = 'canceled', canceled_at = COALESCE(canceled_at, ?)
+WHERE account_id = ? AND status = 'active'
+`, now, userID); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		if _, err := tx.ExecContext(r.Context(), `
+UPDATE identity_sessions SET revoked_at = COALESCE(revoked_at, ?)
+WHERE account_id = ? AND revoked_at IS NULL
+`, now, userID); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		if _, err := tx.ExecContext(r.Context(), `
+UPDATE browser_sessions SET revoked_at = COALESCE(revoked_at, ?)
+WHERE account_id = ? AND revoked_at IS NULL
+`, now, userID); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
 	}
 	_ = s.recordAudit(r, "admin_user_"+status, "account", userID, "{}")
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"id": userID, "status": status})
@@ -310,12 +354,40 @@ func (s *Server) putAdminSpaceMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := nowRFC3339()
-	_, err := s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(r.Context(), `
 INSERT INTO space_members(space_id, account_id, permission, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(space_id, account_id) DO UPDATE SET permission = excluded.permission, updated_at = excluded.updated_at
 `, spaceID, member.AccountID, string(permission), now, now)
 	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if permission != domain.SpacePermissionManager {
+		if _, err := tx.ExecContext(r.Context(), `
+UPDATE shares SET revoked_at = COALESCE(revoked_at, ?), updated_at = ?
+WHERE space_id = ? AND creator_account_id = ? AND revoked_at IS NULL
+`, now, now, spaceID, member.AccountID); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+	}
+	if permission == domain.SpacePermissionViewer {
+		if _, err := tx.ExecContext(r.Context(), `
+UPDATE upload_sessions SET status = 'canceled', canceled_at = COALESCE(canceled_at, ?)
+WHERE space_id = ? AND account_id = ? AND status = 'active'
+`, now, spaceID, member.AccountID); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		writeDBError(w, r, err)
 		return
 	}
@@ -366,9 +438,42 @@ func (s *Server) deleteAdminSpaceMember(w http.ResponseWriter, r *http.Request) 
 	}
 	spaceID := r.PathValue("spaceId")
 	accountID := r.PathValue("accountId")
-	result, err := s.sqlDB().ExecContext(r.Context(), `
-DELETE FROM space_members WHERE space_id = ? AND account_id = ?
-`, spaceID, accountID)
+	now := nowRFC3339()
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(r.Context(), `
+DELETE FROM mount_account_grants
+WHERE account_id = ? AND mount_id IN (SELECT id FROM mounts WHERE space_id = ?)
+`, accountID, spaceID); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `
+UPDATE shares SET revoked_at = COALESCE(revoked_at, ?), updated_at = ?
+WHERE space_id = ? AND creator_account_id = ? AND revoked_at IS NULL
+`, now, now, spaceID, accountID); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `
+UPDATE upload_sessions SET status = 'canceled', canceled_at = COALESCE(canceled_at, ?)
+WHERE space_id = ? AND account_id = ? AND status = 'active'
+`, now, spaceID, accountID); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `
+DELETE FROM ai_token_boundaries
+WHERE space_id = ? AND token_id IN (SELECT id FROM ai_tokens WHERE account_id = ?)
+`, spaceID, accountID); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	result, err := tx.ExecContext(r.Context(), `DELETE FROM space_members WHERE space_id = ? AND account_id = ?`, spaceID, accountID)
 	if err != nil {
 		writeDBError(w, r, err)
 		return
@@ -380,6 +485,10 @@ DELETE FROM space_members WHERE space_id = ? AND account_id = ?
 	}
 	if affected == 0 {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "membership was not found")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
 		return
 	}
 	_ = s.recordAudit(r, "admin_space_member_remove", "space", spaceID, fmt.Sprintf(`{"accountId":%q}`, accountID))
@@ -439,7 +548,7 @@ func (s *Server) listAdminShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
-	SELECT sh.id, sh.public_id, COALESCE(sh.fragment_secret, ''), sh.space_id, sh.mount_id, sh.relative_path,
+	SELECT sh.id, sh.public_id, '', sh.space_id, sh.mount_id, '',
 	       sh.allow_preview, sh.allow_download, sh.max_visits, sh.used_visits,
 	       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, ''),
 	       COALESCE(sp.name, ''), COALESCE(m.display_name, ''), COALESCE(a.email, ''), COALESCE(a.display_name, '')

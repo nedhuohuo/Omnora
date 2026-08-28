@@ -1,11 +1,14 @@
 openapi: 3.1.0
 info:
   title: Omnora REST API
-  version: 0.1.0-starter
-  summary: Starter OpenAPI contract for the first Omnora version.
+  version: 0.1.0
+  summary: OpenAPI contract for the first Omnora version.
   description: >
-    Contract aligned to the runnable Omnora control-plane REST surface.
-    Stale starter paths are marked x-omnora-stale and should not be used by new clients.
+    Contract aligned to the runnable Omnora REST surface. Mount content access is a
+    pure account whitelist: effective permission is the lower of current space
+    membership and the current mount grant. System administrator status controls
+    the control plane and never substitutes for a mount grant. Stale starter paths
+    are marked x-omnora-stale and should not be used by new clients.
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 servers:
   - url: /api/v1
@@ -16,9 +19,13 @@ x-omnora-route-groups:
   - rest
   - mcp
   - openapi
+x-omnora-web-routes:
+  canonical-member: /app/{tab}
+  canonical-admin: /app/admin/{tab}/{resourceId}
+  legacy-admin-compatibility: /admin/{tab}/{resourceId}
+  note: Navigation visibility is derived from the current session capabilities; backend authorization remains authoritative.
 security:
-  - bearerAuth: []
-  - cookieSession: []
+  - cookieAuth: []
 tags:
   - name: System
   - name: Identity
@@ -271,7 +278,8 @@ paths:
   /spaces/{spaceId}/mounts:
     get:
       tags: [Spaces]
-      summary: List mounts in a space.
+      summary: List explicitly granted mounts in a space.
+      description: Space membership alone does not make a mount visible; no grant means the mount is omitted.
       x-omnora-route-group: rest
       parameters:
         - $ref: "#/components/parameters/SpaceId"
@@ -344,7 +352,8 @@ paths:
   /spaces/{spaceId}/search:
     get:
       tags: [Search]
-      summary: Search indexed metadata within an authorized space.
+      summary: Search indexed metadata within currently granted mounts.
+      description: Unauthorized mounts and their exclusion metadata are omitted; an account with no granted mounts receives an empty result.
       x-omnora-route-group: rest
       parameters:
         - $ref: "#/components/parameters/SpaceId"
@@ -462,9 +471,11 @@ paths:
   /uploads:
     post:
       tags: [Transfers]
-      summary: Create a resumable upload session.
-      description: AI Tokens require an explicit upload scope and current write permission.
+      summary: Create a browser-session resumable upload.
+      description: AI Token bearer credentials are not supported by the first-version upload endpoints.
       x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
       requestBody:
         required: true
         content:
@@ -485,8 +496,10 @@ paths:
   /uploads/{uploadId}/parts/{partNumber}:
     put:
       tags: [Transfers]
-      summary: Upload one part of a resumable upload session.
+      summary: Upload one part of a browser-session resumable upload.
       x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
       parameters:
         - $ref: "#/components/parameters/UploadId"
         - name: partNumber
@@ -508,8 +521,10 @@ paths:
   /uploads/{uploadId}/complete:
     post:
       tags: [Transfers]
-      summary: Complete an upload after all required parts have been received.
+      summary: Complete a browser-session upload after all required parts have been received.
       x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
       parameters:
         - $ref: "#/components/parameters/UploadId"
       responses:
@@ -524,8 +539,10 @@ paths:
   /uploads/{uploadId}:
     get:
       tags: [Transfers]
-      summary: Resume a resumable upload session and list accepted parts.
+      summary: Resume a browser-session upload and list accepted parts.
       x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
       parameters:
         - $ref: "#/components/parameters/UploadId"
       responses:
@@ -537,8 +554,10 @@ paths:
                 $ref: "#/components/schemas/UploadSession"
     delete:
       tags: [Transfers]
-      summary: Cancel an upload session and release reserved quota.
+      summary: Cancel a browser-session upload and release reserved quota.
       x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
       parameters:
         - $ref: "#/components/parameters/UploadId"
       responses:
@@ -568,7 +587,7 @@ paths:
     post:
       tags: [Shares]
       summary: Create a share for a file or folder.
-      description: Requires current manager role in the target space. The returned secret is shown once.
+      description: Requires effective manager permission on the target mount and allowPublicShares=true. The returned secret is shown once.
       x-omnora-route-group: rest
       requestBody:
         required: true
@@ -642,6 +661,17 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateShareSessionRequest"
       responses:
+        "200":
+          description: A password is required before the share session can be created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: password_required
         "201":
           description: Share session created.
           content:
@@ -733,23 +763,32 @@ paths:
   /admin/mounts:
     get:
       tags: [Admin]
-      summary: List all mounts across spaces for administrators.
+      summary: List all nondeleted mounts for the system control plane.
+      description: This control-plane listing does not grant the administrator content access.
       x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
       responses:
         "200":
           description: Mount list.
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/AdminMountList"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
     post:
       tags: [Admin]
-      summary: Register a predeclared container path as a space mount.
-      description: Only system administrators can register mounts; unverifiable identity returns mount_identity_unverifiable.
+      summary: Register a configured container directory as a closed mount.
+      description: >
+        Only system administrators can register mounts. rootPath must be beneath exactly
+        one configured managed or external storage root; kind is inferred server-side.
+        New mounts default to allowPublicShares=false and have no account grants.
       x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
       requestBody:
         required: true
         content:
@@ -758,11 +797,17 @@ paths:
               $ref: "#/components/schemas/CreateMountRequest"
       responses:
         "201":
-          description: Mount registered.
+          description: Mount registered without account grants.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Mount"
+                $ref: "#/components/schemas/AdminMountListItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
   /admin/index-jobs:
@@ -848,6 +893,8 @@ paths:
                   nextCursor:
                     type: string
   /mcp:
+    servers:
+      - url: /
     post:
       tags: [MCP]
       summary: Streamable HTTP MCP endpoint.
@@ -1118,48 +1165,173 @@ paths:
           $ref: "#/components/responses/Unauthorized"
 
   /admin/mounts/{mountId}:
-    delete:
+    get:
       tags: [Admin]
-      summary: Implemented endpoint DELETE /admin/mounts/mountId.
+      summary: Read mount settings, grants, and eligible space members.
+      description: >
+        Returns the canonical name/health fields and compatibility aliases
+        displayName/status. effectivePermission is computed by the server.
       x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
       parameters:
-        - name: mountId
-          in: path
-          required: true
-          schema:
-            type: string
+        - $ref: "#/components/parameters/MountId"
       responses:
-        "204":
-          description: Deleted.
+        "200":
+          description: Mount access detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminMountDetail"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
     patch:
       tags: [Admin]
-      summary: Implemented endpoint PATCH /admin/mounts/mountId.
+      summary: Update mutable mount settings.
+      description: Disabling public sharing revokes active shares for this mount; switching to read-only cancels active uploads.
       x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
       parameters:
-        - name: mountId
-          in: path
-          required: true
-          schema:
-            type: string
+        - $ref: "#/components/parameters/MountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAdminMountRequest"
+      responses:
+        "200":
+          description: Updated mount detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminMountDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [Admin]
+      summary: Soft-delete a mount and invalidate its derived capabilities.
+      x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MountId"
       requestBody:
         required: false
         content:
           application/json:
             schema:
               type: object
-              additionalProperties: true
+              properties:
+                deleteData:
+                  type: boolean
+                  default: false
       responses:
         "200":
-          description: Success.
+          description: Mount deletion result.
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DeleteAdminMountResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /admin/mounts/{mountId}/grants:
+    get:
+      tags: [Admin]
+      summary: List explicit account grants and eligible space members for a mount.
+      description: A space member without an item in this collection has no content access to this mount.
+      x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MountId"
+      responses:
+        "200":
+          description: Explicit grants and eligible ungranted accounts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminMountGrantList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/mounts/{mountId}/grants/{accountId}:
+    put:
+      tags: [Admin]
+      summary: Create or replace one account's explicit mount grant.
+      description: >
+        The account must be an active member of the mount's space. Effective permission
+        is the lower of spacePermission and permission and is returned by the server.
+      x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MountId"
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutAdminMountGrantRequest"
+      responses:
+        "200":
+          description: Current grant and server-computed effective permission.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminMountGrant"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Admin]
+      summary: Remove one account's explicit mount grant.
+      description: Removing a grant revokes affected shares, cancels active uploads, and removes token boundaries for this mount.
+      x-omnora-route-group: rest
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MountId"
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "204":
+          description: Grant removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /admin/mounts/{mountId}/reverify:
     post:
@@ -1913,7 +2085,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: AI Token or session-bound API token
-    cookieSession:
+    cookieAuth:
       type: apiKey
       in: cookie
       name: omnora_session
@@ -1950,6 +2122,12 @@ components:
       required: true
       schema:
         $ref: "#/components/schemas/OpaqueId"
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/OpaqueId"
     ObjectId:
       name: objectId
       in: path
@@ -1975,6 +2153,12 @@ components:
       schema:
         $ref: "#/components/schemas/OpaqueId"
   responses:
+    BadRequest:
+      description: The request body or parameters are invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Error"
     Unauthorized:
       description: Authentication failed or credentials are not currently valid.
       content:
@@ -2073,15 +2257,35 @@ components:
           type: boolean
     Session:
       type: object
-      required: [userId, expiresAt]
+      required: [userId, expiresAt, isAdmin, capabilities]
       properties:
         userId:
           $ref: "#/components/schemas/OpaqueId"
         expiresAt:
           type: string
           format: date-time
+        isAdmin:
+          type: boolean
+          description: Control-plane administrator identity; this does not grant mount content access.
+        capabilities:
+          $ref: "#/components/schemas/SessionCapabilities"
         requiresTotpEnrollment:
           type: boolean
+    SessionCapabilities:
+      type: object
+      additionalProperties: false
+      required: [memberWeb, adminWeb, hasContentAccess, manageSystem]
+      properties:
+        memberWeb:
+          type: boolean
+        adminWeb:
+          type: boolean
+        hasContentAccess:
+          type: boolean
+          description: True only when current active space membership and an explicit grant overlap on at least one active mount.
+        manageSystem:
+          type: boolean
+          description: Control-plane capability; never substitutes for a mount grant.
     CreateSessionRequest:
       type: object
       required: [login, password]
@@ -2161,40 +2365,220 @@ components:
           enum: [viewer, editor, manager]
     Mount:
       type: object
-      required: [id, spaceId, name, mode, indexMode, status]
+      description: Member-visible mount summary. Only explicitly granted mounts are returned.
+      required: [id, name, space, mode, index, health, tone, effectivePermission, readOnly, canWrite, canShare]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        name:
+          type: string
+        space:
+          type: string
+        kind:
+          type: string
+          enum: [managed, external]
+        mode:
+          type: string
+          enum: [read-only, read-write]
+        index:
+          type: string
+          enum: [included, excluded]
+        health:
+          type: string
+        tone:
+          type: string
+        effectivePermission:
+          $ref: "#/components/schemas/MountPermission"
+        readOnly:
+          type: boolean
+          description: True when the current caller cannot write, including permission or physical-mode restrictions.
+        canWrite:
+          type: boolean
+          description: Server-derived current write capability for this caller.
+        canShare:
+          type: boolean
+          description: Server-derived current share-create capability, including allowPublicShares.
+    CreateMountRequest:
+      type: object
+      additionalProperties: false
+      required: [spaceId, displayName, rootPath, mode, indexEnabled]
+      properties:
+        spaceId:
+          $ref: "#/components/schemas/OpaqueId"
+        displayName:
+          type: string
+        rootPath:
+          type: string
+          description: Absolute container path beneath exactly one configured managed or external storage root.
+        kind:
+          type: string
+          enum: [managed, external]
+          description: Optional compatibility hint. The server infers and validates kind from rootPath.
+        mode:
+          type: string
+          enum: [read_only, read_write]
+        indexEnabled:
+          type: boolean
+    AdminMountList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminMountListItem"
+    AdminMountListItem:
+      type: object
+      required: [id, name, space, mode, index, health, tone]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        name:
+          type: string
+        space:
+          type: string
+        kind:
+          type: string
+          enum: [managed, external]
+        mode:
+          type: string
+          enum: [read-only, read-write]
+        index:
+          type: string
+          enum: [included, excluded]
+        health:
+          type: string
+        tone:
+          type: string
+    AdminMountDetail:
+      type: object
+      required: [id, spaceId, spaceName, name, displayName, rootPath, kind, mode, indexEnabled, allowPublicShares, health, status, tone, grantCount, grants, eligibleAccounts]
       properties:
         id:
           $ref: "#/components/schemas/OpaqueId"
         spaceId:
           $ref: "#/components/schemas/OpaqueId"
+        spaceName:
+          type: string
         name:
           type: string
+          description: Canonical display name used by the storage UI.
+        displayName:
+          type: string
+          description: Compatibility alias of name.
+        rootPath:
+          type: string
+          description: Configured absolute container path. This control-plane field does not grant content access.
+        kind:
+          type: string
+          enum: [managed, external]
         mode:
           type: string
           enum: [read_only, read_write]
-        indexMode:
+        indexEnabled:
+          type: boolean
+        allowPublicShares:
+          type: boolean
+        health:
           type: string
-          enum: [disabled, enabled, paused]
+          description: Canonical mount state used by the storage UI.
         status:
           type: string
-          enum: [active, offline, readonly_drift, identity_drift, identity_unverifiable, conflict, disabled]
-    CreateMountRequest:
+          description: Compatibility alias of health.
+        tone:
+          type: string
+        grantCount:
+          type: integer
+          minimum: 0
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminMountGrant"
+        eligibleAccounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminMountEligibleAccount"
+    AdminMountGrant:
       type: object
-      required: [spaceId, name, containerPath, mode, indexMode]
+      required: [accountId, email, displayName, spacePermission, permission, effectivePermission]
       properties:
-        spaceId:
+        accountId:
           $ref: "#/components/schemas/OpaqueId"
-        name:
+        email:
           type: string
-        containerPath:
+        displayName:
           type: string
-          description: Absolute path under the predeclared mount root inside the container.
+        spacePermission:
+          $ref: "#/components/schemas/MountPermission"
+        permission:
+          $ref: "#/components/schemas/MountPermission"
+        effectivePermission:
+          allOf:
+            - $ref: "#/components/schemas/MountPermission"
+          description: Server-computed minimum of spacePermission and permission.
+    AdminMountEligibleAccount:
+      type: object
+      required: [accountId, email, displayName, spacePermission, permission]
+      properties:
+        accountId:
+          $ref: "#/components/schemas/OpaqueId"
+        email:
+          type: string
+        displayName:
+          type: string
+        spacePermission:
+          $ref: "#/components/schemas/MountPermission"
+        permission:
+          type: "null"
+    AdminMountGrantList:
+      type: object
+      required: [items, eligibleAccounts]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminMountGrant"
+        eligibleAccounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminMountEligibleAccount"
+    MountPermission:
+      type: string
+      enum: [viewer, editor, manager]
+    PutAdminMountGrantRequest:
+      type: object
+      additionalProperties: false
+      required: [permission]
+      properties:
+        permission:
+          $ref: "#/components/schemas/MountPermission"
+    UpdateAdminMountRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        displayName:
+          type: string
         mode:
           type: string
           enum: [read_only, read_write]
-        indexMode:
-          type: string
-          enum: [disabled, enabled]
+        indexEnabled:
+          type: boolean
+        allowPublicShares:
+          type: boolean
+    DeleteAdminMountResponse:
+      type: object
+      required: [id, deleted, deleteData, dataDeleted]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        deleted:
+          type: boolean
+          const: true
+        deleteData:
+          type: boolean
+        dataDeleted:
+          type: boolean
     FileObject:
       type: object
       required: [id, spaceId, mountId, name, kind, size, modifiedAt]
@@ -2225,38 +2609,100 @@ components:
             enum: [browse, preview, download, upload, copy, move, rename, delete, share]
     DirectoryListing:
       type: object
-      required: [mount, path, items]
+      required: [relativePath, readOnly, effectivePermission, canWrite, canShare, entries]
       properties:
-        mount:
-          $ref: "#/components/schemas/Mount"
-        path:
+        relativePath:
           type: string
-        items:
+        readOnly:
+          type: boolean
+        effectivePermission:
+          $ref: "#/components/schemas/MountPermission"
+        canWrite:
+          type: boolean
+        canShare:
+          type: boolean
+        entries:
           type: array
           items:
-            $ref: "#/components/schemas/FileObject"
-        nextCursor:
+            $ref: "#/components/schemas/DirectoryEntry"
+    DirectoryEntry:
+      type: object
+      required: [name, relativePath, kind, size, modifiedAt, readOnly, previewKind]
+      properties:
+        name:
+          type: string
+        relativePath:
+          type: string
+        kind:
+          type: string
+          enum: [file, directory]
+        size:
+          type: integer
+          minimum: 0
+        modifiedAt:
+          type: string
+          format: date-time
+        readOnly:
+          type: boolean
+        previewKind:
           type: string
     SearchResultPage:
       type: object
-      required: [items, excludedMounts]
+      required: [items, excludedMounts, nextCursor]
       properties:
         items:
           type: array
           items:
-            $ref: "#/components/schemas/FileObject"
+            $ref: "#/components/schemas/SearchResultItem"
         excludedMounts:
           type: array
+          description: Contains only excluded mounts currently authorized to the caller.
           items:
-            type: object
-            required: [mountId, reason]
-            properties:
-              mountId:
-                $ref: "#/components/schemas/OpaqueId"
-              reason:
-                type: string
-                enum: [index_disabled, index_paused, offline, initial_scan_incomplete, identity_unverifiable]
+            $ref: "#/components/schemas/ExcludedSearchMount"
         nextCursor:
+          type: string
+    SearchResultItem:
+      type: object
+      required: [id, spaceId, mountId, relativePath, name, kind, previewKind, sizeBytes, modifiedAt, identityFingerprint, effectivePermission, canWrite, canShare]
+      properties:
+        id:
+          $ref: "#/components/schemas/OpaqueId"
+        spaceId:
+          $ref: "#/components/schemas/OpaqueId"
+        mountId:
+          $ref: "#/components/schemas/OpaqueId"
+        relativePath:
+          type: string
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [file, directory]
+        previewKind:
+          type: string
+        sizeBytes:
+          type: integer
+          minimum: 0
+        modifiedAt:
+          type: string
+          format: date-time
+        identityFingerprint:
+          type: string
+        effectivePermission:
+          $ref: "#/components/schemas/MountPermission"
+        canWrite:
+          type: boolean
+        canShare:
+          type: boolean
+    ExcludedSearchMount:
+      type: object
+      required: [mountId, name, reason]
+      properties:
+        mountId:
+          $ref: "#/components/schemas/OpaqueId"
+        name:
+          type: string
+        reason:
           type: string
     TextPreview:
       type: object
@@ -2331,31 +2777,63 @@ components:
           minimum: 1
     Share:
       type: object
-      required: [id, targetObjectId, status, allowPreview, allowDownload]
+      description: Share metadata. List responses never include the one-time secret or URL fragment.
+      required: [id, publicId, spaceId, mountId, relativePath, allowPreview, allowDownload, usedVisits, usedDownloads, expiresAt, status]
       properties:
         id:
           $ref: "#/components/schemas/OpaqueId"
-        fragment:
+        publicId:
           type: string
-          description: Full URL fragment that can be opened under /share# when the link secret is available.
-        targetObjectId:
+        spaceId:
           $ref: "#/components/schemas/OpaqueId"
+        spaceName:
+          type: string
+        mountId:
+          $ref: "#/components/schemas/OpaqueId"
+        mountName:
+          type: string
+        relativePath:
+          type: string
+        creatorEmail:
+          type: string
+        creatorDisplayName:
+          type: string
         status:
           type: string
-          enum: [active, expired, revoked, invalidated]
+          enum: [active, expired, revoked]
         allowPreview:
           type: boolean
         allowDownload:
           type: boolean
+        maxVisits:
+          type: integer
+          minimum: 1
+        usedVisits:
+          type: integer
+          minimum: 0
+        maxDownloads:
+          type: integer
+          minimum: 1
+        usedDownloads:
+          type: integer
+          minimum: 0
         expiresAt:
+          type: string
+          format: date-time
+        revokedAt:
           type: string
           format: date-time
     CreateShareRequest:
       type: object
-      required: [targetObjectId, allowPreview, allowDownload]
+      additionalProperties: false
+      required: [spaceId, mountId, relativePath]
       properties:
-        targetObjectId:
+        spaceId:
           $ref: "#/components/schemas/OpaqueId"
+        mountId:
+          $ref: "#/components/schemas/OpaqueId"
+        relativePath:
+          type: string
         password:
           type: string
           format: password
@@ -2364,9 +2842,11 @@ components:
           format: date-time
         allowPreview:
           type: boolean
+          default: true
         allowDownload:
           type: boolean
-        maxAccesses:
+          default: true
+        maxVisits:
           type: integer
           minimum: 1
         maxDownloads:
@@ -2374,15 +2854,21 @@ components:
           minimum: 1
     CreateShareResponse:
       type: object
-      required: [share, publicId, fragmentSecret]
+      required: [id, publicId, secret, fragment, expiresAt]
       properties:
-        share:
-          $ref: "#/components/schemas/Share"
+        id:
+          $ref: "#/components/schemas/OpaqueId"
         publicId:
           type: string
-        fragmentSecret:
+        secret:
           type: string
-          description: One-time returned secret intended for the URL fragment.
+          description: One-time returned secret. The server stores only its hash and never returns it again.
+        fragment:
+          type: string
+          description: One-time `publicId.secret` fragment value for constructing the public share URL.
+        expiresAt:
+          type: string
+          format: date-time
     UpdateShareRequest:
       type: object
       properties:
@@ -2403,20 +2889,25 @@ components:
           type: boolean
     CreateShareSessionRequest:
       type: object
-      required: [publicId, fragmentSecret]
+      additionalProperties: false
+      required: [public_id, secret]
       properties:
-        publicId:
+        public_id:
           type: string
-        fragmentSecret:
+        secret:
           type: string
+          description: One-time share secret extracted from the URL fragment and sent only in this request body.
         password:
           type: string
           format: password
     ShareSession:
       type: object
-      required: [shareId, expiresAt]
+      required: [status, shareSessionId, expiresAt]
       properties:
-        shareId:
+        status:
+          type: string
+          const: created
+        shareSessionId:
           $ref: "#/components/schemas/OpaqueId"
         expiresAt:
           type: string
@@ -2431,9 +2922,10 @@ components:
           type: string
         scopes:
           type: array
+          description: First-version AI Token scopes are read-only; upload endpoints require a browser session.
           items:
             type: string
-            enum: ["spaces:read", "files:list", "files:metadata", "files:text", "files:download_ticket", "search:read", "uploads:create"]
+            enum: ["spaces:read", "files:list", "files:metadata", "files:text", "files:download_ticket", "search:read"]
         expiresAt:
           type: string
           format: date-time
@@ -2450,7 +2942,7 @@ components:
           type: array
           items:
             type: string
-            enum: ["spaces:read", "files:list", "files:metadata", "files:text", "files:download_ticket", "search:read", "uploads:create"]
+            enum: ["spaces:read", "files:list", "files:metadata", "files:text", "files:download_ticket", "search:read"]
         boundaries:
           type: array
           items:

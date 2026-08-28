@@ -57,6 +57,11 @@ VALUES ('ce1', 'space-admin', 'mnt-keep', 'keep.txt', 'keep.txt', 'file', 'text'
 `); err != nil {
 		t.Fatalf("insert catalog: %v", err)
 	}
+	if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO mount_account_grants(mount_id, account_id, permission) VALUES ('mnt-keep', ?, 'manager')
+`, admin.ID); err != nil {
+		t.Fatalf("insert mount grant: %v", err)
+	}
 
 	adminCookie := issueAPITestSession(t, db, admin.ID)
 	memberCookie := issueAPITestSession(t, db, member.ID)
@@ -112,6 +117,13 @@ VALUES ('ce1', 'space-admin', 'mnt-keep', 'keep.txt', 'keep.txt', 'file', 'text'
 		}
 		if catalogCount != 0 {
 			t.Fatalf("catalog entries = %d", catalogCount)
+		}
+		var grantCount int
+		if err := db.SQL().QueryRowContext(ctx, `SELECT COUNT(1) FROM mount_account_grants WHERE mount_id = 'mnt-keep'`).Scan(&grantCount); err != nil {
+			t.Fatalf("count mount grants: %v", err)
+		}
+		if grantCount != 0 {
+			t.Fatalf("mount grants = %d, want 0", grantCount)
 		}
 		if _, err := os.Stat(keepFile); err != nil {
 			t.Fatalf("expected file to remain: %v", err)

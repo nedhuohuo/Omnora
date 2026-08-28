@@ -158,9 +158,17 @@ func loadShareForExchange(ctx context.Context, tx *sql.Tx, publicID string) (sha
 	var record shareRecord
 	var expiresAt string
 	err := tx.QueryRowContext(ctx, `
-SELECT id, secret_hash, password_hash, expires_at, generation, revoked_at
-FROM shares
-WHERE public_id = ?
+SELECT sh.id, sh.secret_hash, sh.password_hash, sh.expires_at, sh.generation, sh.revoked_at
+FROM shares sh
+JOIN accounts a ON a.id = sh.creator_account_id
+JOIN spaces sp ON sp.id = sh.space_id
+JOIN space_members sm ON sm.space_id = sh.space_id AND sm.account_id = sh.creator_account_id
+JOIN mounts m ON m.id = sh.mount_id AND m.space_id = sh.space_id
+JOIN mount_account_grants mg ON mg.mount_id = sh.mount_id AND mg.account_id = sh.creator_account_id
+WHERE sh.public_id = ?
+  AND a.status = 'active' AND sp.status = 'active' AND sm.permission = 'manager'
+  AND m.status = 'active' AND m.allow_public_shares = 1
+  AND mg.permission = 'manager'
 `, publicID).Scan(
 		&record.id,
 		&record.secretHash,

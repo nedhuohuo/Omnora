@@ -36,14 +36,24 @@ import AdminWorkspace, { type AdminTab } from './AdminWorkspace';
 import MemberSharesPanel, { ShareCreateModal, ShareCreatedResult } from './MemberSharesPanel';
 import MemberTokensPanel from './MemberTokensPanel';
 import MemberAccountPanel, { applyThemePreference } from './MemberAccountPanel';
-import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, type MemberSearchResult, type MemberSpace, type TransferItem } from './types';
+import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberEffectiveAccess, type MemberMount, type MemberSearchResult, type MemberSpace, type TransferItem } from './types';
+import { effectiveAccessFrom } from './permissions';
 import { resumedUploadProgress, uploadStorageKey } from './uploadQueue';
 import { createClientId } from './clientId';
 import { useLocale } from './useLocale';
 import { readableLabel } from './displayLabels';
+import {
+  canAccessWorkspace,
+  capabilitiesFromSession,
+  defaultWorkspaceDestination,
+  workspacePath,
+  type MemberTab,
+  type WorkspaceAdminTab,
+  type WorkspaceCapabilities,
+  type WorkspaceDestination,
+} from '../workspaceRoutes';
 import './member-files.css';
 
-type MemberTab = 'files' | 'trash' | 'shares' | 'tokens' | 'account';
 type AdminNavGroup = 'overview' | 'identity-space' | 'storage-search' | 'access-security' | 'backups';
 type AdminNavItem = { id: AdminTab; label: string };
 type AdminNavGroupItem = { id: AdminNavGroup; label: string; tabs: AdminNavItem[] };
@@ -54,14 +64,14 @@ type ViewMode = 'list' | 'grid';
 const defaultAdminGroupTabs: Record<AdminNavGroup, AdminTab> = {
   overview: 'overview',
   'identity-space': 'users',
-  'storage-search': 'mounts',
+  'storage-search': 'storage',
   'access-security': 'route-groups',
   backups: 'backups',
 };
 
 function adminGroupForTab(tab: AdminTab): AdminNavGroup {
   if (tab === 'users' || tab === 'spaces') return 'identity-space';
-  if (tab === 'mounts' || tab === 'index-jobs') return 'storage-search';
+  if (tab === 'storage' || tab === 'mounts' || tab === 'index-jobs') return 'storage-search';
   if (tab === 'route-groups' || tab === 'share-governance' || tab === 'token-governance' || tab === 'audit') return 'access-security';
   if (tab === 'backups') return 'backups';
   return 'overview';
@@ -118,14 +128,25 @@ type FileOperation = 'move' | 'copy';
 
 type MemberFilesAppProps = {
   entry?: 'member' | 'admin';
+  route?: WorkspaceDestination;
+  legacyAdminPath?: boolean;
+  onNavigate?: (destination: WorkspaceDestination, replace?: boolean) => void;
 };
 
-export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps) {
+const closedCapabilities: WorkspaceCapabilities = {
+  memberWeb: false,
+  adminWeb: false,
+  hasContentAccess: false,
+  manageSystem: false,
+};
+
+export default function MemberFilesApp({ entry = 'member', route, legacyAdminPath = false, onNavigate }: MemberFilesAppProps) {
   const { locale, setLocale } = useLocale();
   const text = localeMessages[locale];
   const [sessionState, setSessionState] = useState<SessionState>('checking');
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [activeTab, setActiveTab] = useState<MemberTab | AdminTab>(entry === 'admin' ? 'overview' : 'files');
+  const [capabilities, setCapabilities] = useState<WorkspaceCapabilities>(closedCapabilities);
+  const [localTab, setLocalTab] = useState<MemberTab | WorkspaceAdminTab>(entry === 'admin' ? 'overview' : 'files');
+  const activeTab = route?.tab ?? localTab;
   const [adminGroupTabs, setAdminGroupTabs] = useState<Record<AdminNavGroup, AdminTab>>(defaultAdminGroupTabs);
   const [loginForm, setLoginForm] = useState({ login: '', password: '', totpCode: '' });
   const [setupMode, setSetupMode] = useState(false);
@@ -143,6 +164,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const [entries, setEntries] = useState<MemberDirectoryEntry[]>([]);
   const [trashItems, setTrashItems] = useState<TrashItemPayload[]>([]);
   const [readOnly, setReadOnly] = useState(true);
+  const [directoryAccess, setDirectoryAccess] = useState<MemberEffectiveAccess & { mountId: string }>({ mountId: '' });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -172,20 +194,59 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
 
   const activeSpace = useMemo(() => spaces.find((space) => space.id === activeSpaceId) ?? null, [activeSpaceId, spaces]);
   const activeMount = useMemo(() => mounts.find((mount) => mount.id === activeMountId) ?? null, [activeMountId, mounts]);
-  const mountUnavailable = activeMount?.health === 'unavailable' || activeMount?.health === 'disabled';
-  const writeBlocked = readOnly || mountUnavailable;
+  const activeMountAccess = useMemo(() => effectiveAccessFrom(activeMount), [activeMount]);
+  const activeDirectoryAccess = useMemo(
+    () => effectiveAccessFrom(directoryAccess.mountId === activeMountId ? directoryAccess : null),
+    [activeMountId, directoryAccess],
+  );
+  const mountUnavailable = activeMount !== null && activeMount.health !== 'active';
+  const canWriteCurrentDirectory = activeMountAccess.canWrite && activeDirectoryAccess.canWrite;
+  const canShareCurrentDirectory = activeMountAccess.canShare && activeDirectoryAccess.canShare;
+  const effectiveReadOnly = readOnly || activeMountAccess.readOnly || activeDirectoryAccess.readOnly;
+  const writeBlocked = !canWriteCurrentDirectory || effectiveReadOnly || mountUnavailable;
+  const trashWriteBlocked = !activeMountAccess.canWrite || activeMountAccess.readOnly || mountUnavailable;
+
+  function entryMountIsAvailable(entry: MemberDirectoryEntry) {
+    const mountId = entry.mountId ?? activeMountId;
+    const mount = mounts.find((item) => item.id === mountId);
+    return mount?.health === 'active';
+  }
+
+  function canWriteEntry(entry: MemberDirectoryEntry) {
+    const access = searchResults === null ? activeDirectoryAccess : effectiveAccessFrom(entry);
+    const mount = mounts.find((item) => item.id === (entry.mountId ?? activeMountId));
+    const mountAccess = searchResults === null ? activeMountAccess : effectiveAccessFrom(mount);
+    return mountAccess.canWrite && access.canWrite && !access.readOnly && entry.readOnly === false && entryMountIsAvailable(entry);
+  }
+
+  function canShareEntry(entry: MemberDirectoryEntry) {
+    const access = searchResults === null ? activeDirectoryAccess : effectiveAccessFrom(entry);
+    const mount = mounts.find((item) => item.id === (entry.mountId ?? activeMountId));
+    const mountAccess = searchResults === null ? activeMountAccess : effectiveAccessFrom(mount);
+    return mountAccess.canShare && access.canShare && entryMountIsAvailable(entry);
+  }
 
   const refreshDirectory = useCallback(async (spaceId: string, mountId: string, path: string) => {
     if (!spaceId || !mountId) return;
     setLoading(true);
     setError('');
+    setDirectoryAccess((current) => current.mountId === mountId ? current : { mountId });
     try {
       const listing = formatDirectoryChildren(await listDirectoryChildren(spaceId, mountId, path));
       setRelativePath(listing.relativePath);
       setEntries(listing.entries);
       setReadOnly(listing.readOnly);
+      setDirectoryAccess({
+        mountId,
+        effectivePermission: listing.effectivePermission,
+        readOnly: listing.readOnly,
+        canWrite: listing.canWrite,
+        canShare: listing.canShare,
+      });
     } catch (caught) {
       setEntries([]);
+      setReadOnly(true);
+      setDirectoryAccess({ mountId });
       setError(describeError(caught));
       if (caught instanceof ApiError && caught.status === 401) setSessionState('signed-out');
     } finally {
@@ -227,7 +288,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     void (async () => {
       try {
         const session = await getSession();
-        setIsAdmin(session.isAdmin === true);
+        setCapabilities(capabilitiesFromSession(session));
         setSessionState('ready');
         await loadSpaces();
         try {
@@ -241,6 +302,30 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       }
     })();
   }, [loadSpaces]);
+
+  useEffect(() => {
+    if (sessionState !== 'ready') return;
+    let active = true;
+    const refreshSession = () => {
+      void getSession()
+        .then((session) => {
+          if (active) setCapabilities(capabilitiesFromSession(session));
+        })
+        .catch((caught) => {
+          if (active && caught instanceof ApiError && caught.status === 401) setSessionState('signed-out');
+        });
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') refreshSession();
+    };
+    window.addEventListener('focus', refreshSession);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      active = false;
+      window.removeEventListener('focus', refreshSession);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [sessionState]);
 
   useEffect(() => {
     if (!activeSpaceId || sessionState !== 'ready') return;
@@ -285,8 +370,12 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     const controller = new AbortController();
     void listMounts(destinationSpaceId, controller.signal)
       .then((response) => {
-        setDestinationMounts(response.items);
-        setDestinationMountId((current) => response.items.some((mount) => mount.id === current) ? current : (response.items[0]?.id ?? ''));
+        const writableMounts = response.items.filter((mount) => {
+          const access = effectiveAccessFrom(mount);
+          return access.canWrite && !access.readOnly && mount.health === 'active';
+        });
+        setDestinationMounts(writableMounts);
+        setDestinationMountId((current) => writableMounts.some((mount) => mount.id === current) ? current : (writableMounts[0]?.id ?? ''));
       })
       .catch(() => {
         if (!controller.signal.aborted) setDestinationMounts([]);
@@ -300,7 +389,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     setError('');
     try {
       const session = await login({ login: loginForm.login, password: loginForm.password, totpCode: loginForm.totpCode || undefined });
-      setIsAdmin(session.isAdmin === true);
+      setCapabilities(capabilitiesFromSession(session));
       setSessionState('ready');
       await loadSpaces();
     } catch (caught) {
@@ -330,7 +419,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   async function onLogout() {
     await logout().catch(() => undefined);
     setSessionState('signed-out');
-    setIsAdmin(false);
+    setCapabilities(closedCapabilities);
     setSpaces([]);
     setMounts([]);
     setEntries([]);
@@ -458,7 +547,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
 
   async function onCreateFolder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!activeSpaceId || !activeMountId || !folderName.trim()) return;
+    if (!activeSpaceId || !activeMountId || !folderName.trim() || writeBlocked) return;
     setLoading(true);
     setError('');
     try {
@@ -474,6 +563,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   }
 
   function openRename(entry: MemberDirectoryEntry) {
+    if (!canWriteEntry(entry)) return;
     setError('');
     setRenameTarget(entry);
     setRenameValue(entry.name);
@@ -498,11 +588,13 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   }
 
   function openDelete(entry: MemberDirectoryEntry) {
+    if (!canWriteEntry(entry)) return;
     setError('');
     setDeleteTarget(entry);
   }
 
   function openOperation(entry: MemberDirectoryEntry, operation: FileOperation) {
+    if (!canWriteEntry(entry)) return;
     setError('');
     setOperationTarget({ entry, operation });
     setDestinationSpaceId(activeSpaceId);
@@ -565,7 +657,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   }
 
   async function onRestoreTrash(item: TrashItemPayload) {
-    if (!activeSpaceId || !activeMountId) return;
+    if (!activeSpaceId || !activeMountId || trashWriteBlocked) return;
     setLoading(true);
     setError('');
     try {
@@ -579,7 +671,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   }
 
   async function onPurgeTrash(item: TrashItemPayload) {
-    if (!activeSpaceId || !activeMountId) return;
+    if (!activeSpaceId || !activeMountId || trashWriteBlocked) return;
     setLoading(true);
     setError('');
     try {
@@ -593,7 +685,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   }
 
   async function onEmptyTrash() {
-    if (!activeSpaceId || !activeMountId || !window.confirm(text.trashEmptyConfirm)) return;
+    if (!activeSpaceId || !activeMountId || trashWriteBlocked || !window.confirm(text.trashEmptyConfirm)) return;
     setLoading(true);
     setError('');
     try {
@@ -607,11 +699,12 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   }
 
   function openShareForEntry(entry: MemberDirectoryEntry) {
+    if (!canShareEntry(entry)) return;
     setShareTarget({ mountId: entry.mountId ?? activeMountId, relativePath: entry.relativePath, name: entry.name });
   }
 
   function openShareForCurrentPath() {
-    if (!activeMountId) return;
+    if (!activeMountId || !canShareCurrentDirectory || mountUnavailable) return;
     setShareTarget({ mountId: activeMountId, relativePath, name: activeSpace?.name ? `${activeSpace.name} / ${relativePath === '.' ? text.myFiles : relativePath}` : relativePath });
   }
 
@@ -624,7 +717,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       setError(text.noMount);
       return;
     }
-    if (readOnly) {
+    if (writeBlocked) {
       setError(text.uploadBlocked);
       return;
     }
@@ -714,15 +807,49 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     if (transfer.uploadId) await cancelUpload(transfer.uploadId).catch(() => undefined);
   }
 
+  const navigateTo = useCallback((destination: WorkspaceDestination, replace = false) => {
+    if (onNavigate) {
+      onNavigate(destination, replace);
+      return;
+    }
+    if (destination.workspace === entry) {
+      setLocalTab(destination.tab);
+      return;
+    }
+    window.location.assign(workspacePath(destination));
+  }, [entry, onNavigate]);
+
+  const activateMemberTab = useCallback((tab: MemberTab) => {
+    navigateTo({ workspace: 'member', tab });
+  }, [navigateTo]);
+
   const activateAdminTab = useCallback((tab: AdminTab) => {
-    setActiveTab(tab);
+    navigateTo({ workspace: 'admin', tab: tab as WorkspaceAdminTab });
     setAdminGroupTabs((current) => ({ ...current, [adminGroupForTab(tab)]: tab }));
-  }, []);
+  }, [navigateTo]);
 
   const activateAdminGroup = useCallback((group: AdminNavGroup) => {
     const nextTab = adminGroupTabs[group] ?? defaultAdminGroupTabs[group];
     activateAdminTab(nextTab);
   }, [activateAdminTab, adminGroupTabs]);
+
+  const changeAdminResource = useCallback((resourceId: string) => {
+    navigateTo({
+      workspace: 'admin',
+      tab: 'storage',
+      resourceId: resourceId || undefined,
+    });
+  }, [navigateTo]);
+
+  useEffect(() => {
+    if (!legacyAdminPath || sessionState !== 'ready' || entry !== 'admin') return;
+    const destination: WorkspaceDestination = {
+      workspace: 'admin',
+      tab: activeTab as WorkspaceAdminTab,
+      resourceId: route?.workspace === 'admin' ? route.resourceId : undefined,
+    };
+    if (canAccessWorkspace(destination, capabilities)) navigateTo(destination, true);
+  }, [activeTab, capabilities, entry, legacyAdminPath, navigateTo, route, sessionState]);
 
   if (sessionState === 'checking') {
     return <main className="member-auth-state">{text.loading}</main>;
@@ -761,38 +888,56 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     );
   }
 
-  if (entry === 'admin' && !isAdmin) {
+  const currentDestination: WorkspaceDestination = entry === 'admin'
+    ? {
+        workspace: 'admin',
+        tab: activeTab as WorkspaceAdminTab,
+        resourceId: route?.workspace === 'admin' ? route.resourceId : undefined,
+      }
+    : { workspace: 'member', tab: activeTab as MemberTab };
+  const fallbackDestination = defaultWorkspaceDestination(capabilities);
+
+  if (!canAccessWorkspace(currentDestination, capabilities)) {
+    const adminDenied = currentDestination.workspace === 'admin';
     return (
       <main className="member-app">
         <header className="member-topbar">
           <div className="member-brand"><span>O</span>Omnora</div>
           <div className="member-top-actions"><div className="member-language" aria-label={text.language}><button type="button" onClick={() => setLocale('zh-CN')} aria-pressed={locale === 'zh-CN'}>中文</button><button type="button" onClick={() => setLocale('en-US')} aria-pressed={locale === 'en-US'}>EN</button></div><button className="member-account" type="button" onClick={onLogout}>{text.signOut}</button></div>
         </header>
-        <section className="member-no-access"><h1>{text.adminAccessDenied}</h1><p>{text.adminAccessDetail}</p><button className="member-primary" type="button" onClick={() => window.location.assign('/app')}>{text.goToFiles}</button></section>
+        <section className="member-no-access">
+          <h1>{adminDenied ? text.adminAccessDenied : text.noSpaces}</h1>
+          <p>{adminDenied ? text.adminAccessDetail : text.noMount}</p>
+          {fallbackDestination && <button className="member-primary" type="button" onClick={() => navigateTo(fallbackDestination)}>{fallbackDestination.workspace === 'admin' ? text.adminOverview : fallbackDestination.tab === 'account' ? text.account : text.goToFiles}</button>}
+        </section>
       </main>
     );
   }
 
-  const visibleEntries: MemberDirectoryEntry[] = searchResults === null ? entries : searchResults.map((item) => ({
-    mountId: item.mountId,
-    name: item.name,
-    relativePath: item.relativePath,
-    kind: item.kind,
-    size: item.sizeBytes ?? 0,
-    modifiedAt: item.modifiedAt ?? '',
-    readOnly: mounts.find((mount) => mount.id === item.mountId)?.mode === 'read-only',
-    previewKind: item.previewKind ?? 'unknown',
-    mountName: readableLabel(mounts.find((mount) => mount.id === item.mountId)?.name),
-  }));
+  const visibleEntries: MemberDirectoryEntry[] = searchResults === null ? entries : searchResults.map((item) => {
+    const access = effectiveAccessFrom(item);
+    return {
+      mountId: item.mountId,
+      name: item.name,
+      relativePath: item.relativePath,
+      kind: item.kind,
+      size: item.sizeBytes ?? 0,
+      modifiedAt: item.modifiedAt ?? '',
+      effectivePermission: item.effectivePermission,
+      canWrite: item.canWrite,
+      canShare: item.canShare,
+      readOnly: access.readOnly,
+      previewKind: item.previewKind ?? 'unknown',
+      mountName: readableLabel(mounts.find((mount) => mount.id === item.mountId)?.name),
+    };
+  });
   const crumbItems = breadcrumbs(relativePath);
   const previewSrc = preview ? previewURL(activeSpaceId, preview.mountId, preview.relativePath) : '';
   const previewDownload = preview ? downloadURL(activeSpaceId, preview.mountId, preview.relativePath) : '';
-  const canManageShares = entry === 'member' && activeSpace?.role === 'manager';
-  const canEditFiles = entry === 'member' && (activeSpace?.role === 'editor' || activeSpace?.role === 'manager');
   const adminNavigation: AdminNavGroupItem[] = [
     { id: 'overview', label: text.adminOverview, tabs: [{ id: 'overview', label: text.adminOverview }] },
     { id: 'identity-space', label: text.adminIdentitySpace, tabs: [{ id: 'users', label: text.adminUsers }, { id: 'spaces', label: text.adminSpaces }] },
-    { id: 'storage-search', label: text.adminStorageSearch, tabs: [{ id: 'mounts', label: text.adminMounts }, { id: 'index-jobs', label: text.adminIndexJobs }] },
+    { id: 'storage-search', label: text.adminStorageSearch, tabs: [{ id: 'storage', label: text.adminMounts }, { id: 'index-jobs', label: text.adminIndexJobs }] },
     { id: 'access-security', label: text.adminAccessSecurity, tabs: [{ id: 'route-groups', label: text.adminRouteGroups }, { id: 'share-governance', label: text.adminShareGovernance }, { id: 'token-governance', label: text.adminTokenGovernance }, { id: 'audit', label: text.adminAudit }] },
     { id: 'backups', label: text.adminBackups, tabs: [{ id: 'backups', label: text.adminBackups }] },
   ];
@@ -809,20 +954,24 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
 
       <div className="member-layout">
         <aside className="member-sidebar">
-          {entry === 'admin' && <nav aria-label="Administrator workspace">
+          {capabilities.memberWeb && <nav aria-label="Member workspace">
+            <p className="member-workspace-label">{text.files}</p>
+            {capabilities.hasContentAccess && <>
+              <button className={`member-nav ${entry === 'member' && activeTab === 'files' ? 'active' : ''}`} type="button" onClick={() => activateMemberTab('files')}>{text.files}</button>
+              <button className={`member-nav ${entry === 'member' && activeTab === 'trash' ? 'active' : ''}`} type="button" onClick={() => activateMemberTab('trash')}>{text.recycleBin}</button>
+              <button className={`member-nav ${entry === 'member' && activeTab === 'shares' ? 'active' : ''}`} type="button" onClick={() => activateMemberTab('shares')}>{text.navShares}</button>
+              <button className={`member-nav ${entry === 'member' && activeTab === 'tokens' ? 'active' : ''}`} type="button" onClick={() => activateMemberTab('tokens')}>{text.navTokens}</button>
+            </>}
+            <button className={`member-nav ${entry === 'member' && activeTab === 'account' ? 'active' : ''}`} type="button" onClick={() => activateMemberTab('account')}>{text.account}</button>
+          </nav>}
+          {capabilities.adminWeb && capabilities.manageSystem && <nav aria-label="Administrator workspace" className="member-admin-navigation">
+            <p className="member-workspace-label">{text.adminOverview}</p>
             {adminNavigation.map((group) => (
-              <button className={`member-nav ${activeAdminGroup?.id === group.id ? 'active' : ''}`} type="button" onClick={() => activateAdminGroup(group.id)} key={group.id}>{group.label}</button>
+              <button className={`member-nav ${entry === 'admin' && activeAdminGroup?.id === group.id ? 'active' : ''}`} type="button" onClick={() => activateAdminGroup(group.id)} key={group.id}>{group.label}</button>
             ))}
           </nav>}
-          {entry === 'member' && <nav aria-label="Member workspace">
-            <button className={`member-nav ${activeTab === 'files' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('files')}>{text.files}</button>
-            <button className={`member-nav ${activeTab === 'trash' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('trash')}>{text.recycleBin}</button>
-            <button className={`member-nav ${activeTab === 'shares' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('shares')}>{text.navShares}</button>
-            <button className={`member-nav ${activeTab === 'tokens' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('tokens')}>{text.navTokens}</button>
-            <button className={`member-nav ${activeTab === 'account' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('account')}>{text.account}</button>
-          </nav>}
           {(activeTab === 'files' || activeTab === 'trash') && <><div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => setActiveSpaceId(space.id)}>{space.name}<small>{space.role}</small></button>)}</div>
-          <div className="member-sidebar-section"><p>{text.mounts}</p>{mounts.map((mount) => <button className={`member-mount ${mount.id === activeMountId ? 'selected' : ''}`} key={mount.id} type="button" onClick={() => setActiveMountId(mount.id)}><span>{mount.name}</span><small>{mount.health === 'unavailable' ? text.statusUnavailable : mount.mode === 'read-only' ? text.readOnly : text.readWrite}</small></button>)}</div></>}
+          <div className="member-sidebar-section"><p>{text.mounts}</p>{mounts.map((mount) => <button className={`member-mount ${mount.id === activeMountId ? 'selected' : ''}`} key={mount.id} type="button" onClick={() => setActiveMountId(mount.id)}><span>{mount.name}</span><small>{mount.health !== 'active' ? text.statusUnavailable : effectiveAccessFrom(mount).readOnly ? text.readOnly : text.readWrite}</small></button>)}</div></>}
         </aside>
 
         <section className="member-content">
@@ -844,10 +993,10 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
           )}
           {activeTab === 'files' ? <>
           <div className="member-crumbs"><button type="button" onClick={() => openDirectory('.')}>{activeSpace?.name ?? text.myFiles}</button>{crumbItems.map((part, index) => <span key={`${part}-${index}`}><b>/</b><button type="button" onClick={() => openDirectory(crumbItems.slice(0, index + 1).join('/'))}>{part}</button></span>)}</div>
-          <div className="member-heading"><div><h1>{searchResults === null ? text.myFiles : `${text.search}: ${searchQuery}`}</h1><p>{activeMount ? `${activeMount.name} · ${mountUnavailable ? text.statusUnavailable : readOnly ? text.readOnly : text.readWrite}` : text.noMount}</p></div><div className="member-view-toggle"><button type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}>{text.list}</button><button type="button" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}>{text.grid}</button></div></div>
-          <div className="member-toolbar"><button className="member-primary" type="button" disabled={writeBlocked || !activeMountId} onClick={() => fileInputRef.current?.click()}>{text.upload}</button><button type="button" disabled={writeBlocked || !activeMountId} onClick={() => setNewFolderOpen(true)}>{text.newFolder}</button>{canManageShares && searchResults === null && <button type="button" disabled={!activeMountId} onClick={openShareForCurrentPath}>{text.shareAction}</button>}{searchResults !== null && <button type="button" onClick={() => { setSearchResults(null); setSearchNextCursor(''); setSearchQuery(''); }}>{text.clearSearch}</button>}<span className="member-toolbar-spacer" /><button type="button" onClick={() => void refreshDirectory(activeSpaceId, activeMountId, relativePath)} disabled={loading || !activeMountId || mountUnavailable}>{text.refresh}</button><input ref={fileInputRef} type="file" multiple hidden onChange={onFileInput} /></div>
+          <div className="member-heading"><div><h1>{searchResults === null ? text.myFiles : `${text.search}: ${searchQuery}`}</h1><p>{activeMount ? `${activeMount.name} · ${mountUnavailable ? text.statusUnavailable : effectiveReadOnly ? text.readOnly : text.readWrite}` : text.noMount}</p></div><div className="member-view-toggle"><button type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}>{text.list}</button><button type="button" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}>{text.grid}</button></div></div>
+          <div className="member-toolbar"><button className="member-primary" type="button" disabled={writeBlocked || !activeMountId} onClick={() => fileInputRef.current?.click()}>{text.upload}</button><button type="button" disabled={writeBlocked || !activeMountId} onClick={() => setNewFolderOpen(true)}>{text.newFolder}</button>{canShareCurrentDirectory && searchResults === null && <button type="button" disabled={!activeMountId || mountUnavailable} onClick={openShareForCurrentPath}>{text.shareAction}</button>}{searchResults !== null && <button type="button" onClick={() => { setSearchResults(null); setSearchNextCursor(''); setSearchQuery(''); }}>{text.clearSearch}</button>}<span className="member-toolbar-spacer" /><button type="button" onClick={() => void refreshDirectory(activeSpaceId, activeMountId, relativePath)} disabled={loading || !activeMountId || mountUnavailable}>{text.refresh}</button><input ref={fileInputRef} type="file" multiple hidden onChange={onFileInput} /></div>
           {mountUnavailable && activeMount && <p className="member-readonly">{text.mountUnavailableHint}</p>}
-          {!mountUnavailable && readOnly && activeMount && <p className="member-readonly">{text.uploadBlocked}</p>}
+          {!mountUnavailable && effectiveReadOnly && activeMount && <p className="member-readonly">{text.uploadBlocked}</p>}
           {searchResults !== null && <p className="member-search-scope">{text.searchScope}</p>}
           {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
           {loading ? <div className="member-loading">{text.loading}</div> : visibleEntries.length === 0 ? <div className="member-empty">{spaces.length === 0 ? text.noSpaces : activeMount ? text.emptyFolder : text.noMount}</div> : viewMode === 'list' ? (
@@ -858,7 +1007,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
                   <td><div className="member-file-name"><span className={`member-file-icon ${entry.kind}`}>{entry.kind === 'dir' ? 'DIR' : entry.name.split('.').pop()?.slice(0, 3).toUpperCase() || 'FILE'}</span>{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{entry.name}</button> : canPreview(entry.previewKind) ? <button type="button" className="member-file-preview" onClick={() => openPreview(entry)}>{entry.name}</button> : <span>{entry.name}</span>}{searchResults !== null && entry.mountName && <small>{entry.mountName}</small>}</div></td>
                   <td>{entry.kind === 'dir' ? '--' : formatBytes(entry.size, locale)}</td>
                   <td>{formatDate(entry.modifiedAt, locale)}</td>
-                  <td><div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{text.open}</button> : <>{canPreview(entry.previewKind) && <button type="button" onClick={() => openPreview(entry)}>{text.preview}</button>}<a href={downloadURL(activeSpaceId, entry.mountId ?? activeMountId, entry.relativePath)}>{text.download}</a></>}{canManageShares && searchResults === null && <button type="button" onClick={() => openShareForEntry(entry)}>{text.shareAction}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'move')}>{text.move}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'copy')}>{text.copyObject}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openRename(entry)}>{text.rename}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openDelete(entry)}>{text.deleteFile}</button>}</div></td>
+                  <td><div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{text.open}</button> : <>{canPreview(entry.previewKind) && <button type="button" onClick={() => openPreview(entry)}>{text.preview}</button>}<a href={downloadURL(activeSpaceId, entry.mountId ?? activeMountId, entry.relativePath)}>{text.download}</a></>}{canShareEntry(entry) && <button type="button" onClick={() => openShareForEntry(entry)}>{text.shareAction}</button>}{canWriteEntry(entry) && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'move')}>{text.move}</button>}{canWriteEntry(entry) && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'copy')}>{text.copyObject}</button>}{canWriteEntry(entry) && searchResults === null && <button type="button" onClick={() => openRename(entry)}>{text.rename}</button>}{canWriteEntry(entry) && searchResults === null && <button type="button" onClick={() => openDelete(entry)}>{text.deleteFile}</button>}</div></td>
                 </tr>
               ))}</tbody>
             </table>
@@ -869,14 +1018,14 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
                 {entry.kind === 'dir' || canPreview(entry.previewKind) ? <button type="button" className={entry.kind === 'file' ? 'member-file-preview' : undefined} onClick={() => entry.kind === 'dir' ? openDirectory(entry.relativePath, entry.mountId) : openPreview(entry)}><strong>{entry.name}</strong></button> : <strong>{entry.name}</strong>}
                 <small>{entry.kind === 'dir' ? '--' : formatBytes(entry.size, locale)}</small>
                 {searchResults !== null && entry.mountName && <small>{entry.mountName}</small>}
-                <div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{text.open}</button> : <>{canPreview(entry.previewKind) && <button type="button" onClick={() => openPreview(entry)}>{text.preview}</button>}<a className="member-grid-download" href={downloadURL(activeSpaceId, entry.mountId ?? activeMountId, entry.relativePath)}>{text.download}</a></>}{canManageShares && searchResults === null && <button type="button" onClick={() => openShareForEntry(entry)}>{text.shareAction}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'move')}>{text.move}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'copy')}>{text.copyObject}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openRename(entry)}>{text.rename}</button>}{canEditFiles && !writeBlocked && !entry.readOnly && searchResults === null && <button type="button" onClick={() => openDelete(entry)}>{text.deleteFile}</button>}</div>
+                <div className="member-file-actions">{entry.kind === 'dir' ? <button type="button" onClick={() => openDirectory(entry.relativePath, entry.mountId)}>{text.open}</button> : <>{canPreview(entry.previewKind) && <button type="button" onClick={() => openPreview(entry)}>{text.preview}</button>}<a className="member-grid-download" href={downloadURL(activeSpaceId, entry.mountId ?? activeMountId, entry.relativePath)}>{text.download}</a></>}{canShareEntry(entry) && <button type="button" onClick={() => openShareForEntry(entry)}>{text.shareAction}</button>}{canWriteEntry(entry) && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'move')}>{text.move}</button>}{canWriteEntry(entry) && searchResults === null && <button type="button" onClick={() => openOperation(entry, 'copy')}>{text.copyObject}</button>}{canWriteEntry(entry) && searchResults === null && <button type="button" onClick={() => openRename(entry)}>{text.rename}</button>}{canWriteEntry(entry) && searchResults === null && <button type="button" onClick={() => openDelete(entry)}>{text.deleteFile}</button>}</div>
               </article>
             ))}</div>
           )}
           {searchResults !== null && searchNextCursor && <button className="member-load-more" type="button" onClick={() => void loadMoreSearchResults()} disabled={loading}>{text.loadMore}</button>}
           </> : activeTab === 'trash' ? <>
             <div className="member-heading"><div><h1>{text.trashTitle}</h1><p>{activeMount ? `${activeMount.name} · ${text.trashDetail}` : text.noMount}</p></div><button className="member-secondary-action" type="button" onClick={() => void refreshTrash()} disabled={loading || !activeMountId}>{text.refresh}</button></div>
-            <div className="member-toolbar"><button type="button" className="member-modal-danger" disabled={loading || trashItems.length === 0 || readOnly || mountUnavailable} onClick={() => void onEmptyTrash()}>{text.trashEmptyAction}</button></div>
+            <div className="member-toolbar"><button type="button" className="member-modal-danger" disabled={loading || trashItems.length === 0 || trashWriteBlocked} onClick={() => void onEmptyTrash()}>{text.trashEmptyAction}</button></div>
             {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
             {loading ? <div className="member-loading">{text.loading}</div> : trashItems.length === 0 ? <div className="member-empty">{text.trashEmpty}</div> : (
               <table className="member-file-table">
@@ -887,7 +1036,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
                     <td>{item.originalPath}</td>
                     <td>{item.kind === 'dir' ? '--' : formatBytes(item.size, locale)}</td>
                     <td>{formatDate(item.deletedAt, locale)}</td>
-                    <td><div className="member-file-actions"><button type="button" onClick={() => void onRestoreTrash(item)} disabled={loading || readOnly || mountUnavailable}>{text.trashRestore}</button><button type="button" onClick={() => void onPurgeTrash(item)} disabled={loading || readOnly || mountUnavailable}>{text.trashPurge}</button></div></td>
+                    <td><div className="member-file-actions"><button type="button" onClick={() => void onRestoreTrash(item)} disabled={loading || trashWriteBlocked}>{text.trashRestore}</button><button type="button" onClick={() => void onPurgeTrash(item)} disabled={loading || trashWriteBlocked}>{text.trashPurge}</button></div></td>
                   </tr>
                 ))}</tbody>
               </table>
@@ -895,7 +1044,12 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
           </> : activeTab === 'shares' ? <MemberSharesPanel locale={locale} />
             : activeTab === 'tokens' ? <MemberTokensPanel locale={locale} />
             : activeTab === 'account' ? <MemberAccountPanel locale={locale} />
-            : <AdminWorkspace tab={activeTab as AdminTab} locale={locale} />}
+            : <AdminWorkspace
+                tab={activeTab as AdminTab}
+                locale={locale}
+                resourceId={route?.workspace === 'admin' ? route.resourceId : undefined}
+                onResourceChange={changeAdminResource}
+              />}
         </section>
       </div>
 

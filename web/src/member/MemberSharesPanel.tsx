@@ -15,6 +15,7 @@ import { type MemberLocale, localeMessages } from './i18n';
 import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, type MemberSpace } from './types';
 import { copyText } from './clipboard';
 import { joinReadableLabels } from './displayLabels';
+import { normalizeShareableMountId, shareableMounts } from './permissions';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
@@ -244,33 +245,6 @@ export function ShareCreatedResult({ text, result, onClose }: { text: LocaleText
   );
 }
 
-function ShareLinkViewer({ text, share, onClose }: { text: LocaleText; share: SharePayload; onClose: () => void }) {
-  const url = share.fragment ? buildShareURL(share.fragment) : '';
-  const [copied, setCopied] = useState<'url' | 'failed' | null>(null);
-
-  return (
-    <div className="member-modal-backdrop">
-      <div className="member-modal member-share-result">
-        <h2>{text.shareLinkTitle}</h2>
-        <p className="member-modal-hint"><strong>{displaySharePath(share.relativePath, text)}</strong></p>
-        {url ? (
-          <>
-            <p className="member-modal-hint">{text.shareLinkHint}</p>
-            <code className="member-share-url">{url}</code>
-            <div className="member-share-result-actions">
-              <button type="button" onClick={() => void copyText(url).then((ok) => setCopied(ok ? 'url' : 'failed'))}>{text.shareCopyUrl}</button>
-            </div>
-            {copied === 'url' ? <p className="member-admin-notice">{text.shareUrlCopied}</p> : copied === 'failed' ? <p className="member-error">{text.shareCopyFailed}</p> : null}
-          </>
-        ) : (
-          <p className="member-error">{text.shareLinkUnavailable}</p>
-        )}
-        <div><button className="member-primary" type="button" onClick={onClose}>{text.shareClose}</button></div>
-      </div>
-    </div>
-  );
-}
-
 type ShareCreateModalProps = {
   text: LocaleText;
   spaceId: string;
@@ -317,7 +291,7 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
   const text = localeMessages[locale];
   const [shares, setShares] = useState<SharePayload[]>([]);
   const [spaces, setSpaces] = useState<MemberSpace[]>([]);
-  const [mounts, setMounts] = useState<MemberMount[]>([]);
+  const [mountsBySpace, setMountsBySpace] = useState<Record<string, MemberMount[]>>({});
   const [formSpaceId, setFormSpaceId] = useState('');
   const [formMountId, setFormMountId] = useState('');
   const [formPath, setFormPath] = useState('.');
@@ -328,18 +302,30 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
   const [error, setError] = useState('');
   const [createdResult, setCreatedResult] = useState<CreateShareResponse | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<SharePayload | null>(null);
-  const [linkTarget, setLinkTarget] = useState<SharePayload | null>(null);
 
-  const managerSpaces = spaces.filter((space) => space.role === 'manager');
+  const shareableSpaces = spaces.filter((space) => shareableMounts(mountsBySpace[space.id] ?? []).length > 0);
+  const mounts = shareableMounts(mountsBySpace[formSpaceId] ?? []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
       const [shareResponse, spaceResponse] = await Promise.all([listShares(), listSpaces()]);
+      const mountEntries = await Promise.all(spaceResponse.items.map(async (space) => {
+        try {
+          const response = await listMounts(space.id);
+          return [space.id, response.items] as const;
+        } catch {
+          return [space.id, []] as const;
+        }
+      }));
+      const nextMountsBySpace = Object.fromEntries(mountEntries);
+      const nextShareableSpaces = spaceResponse.items.filter((space) => shareableMounts(nextMountsBySpace[space.id] ?? []).length > 0);
       setShares(shareResponse.items ?? []);
       setSpaces(spaceResponse.items);
-      setFormSpaceId((current) => (spaceResponse.items.some((space) => space.id === current) ? current : (spaceResponse.items.find((space) => space.role === 'manager')?.id ?? '')));
+      setMountsBySpace(nextMountsBySpace);
+      setFormSpaceId((current) => nextShareableSpaces.some((space) => space.id === current) ? current : (nextShareableSpaces[0]?.id ?? ''));
+      if (nextShareableSpaces.length === 0) setFormOpen(false);
     } catch (caught) {
       setError(describeError(caught));
     } finally {
@@ -352,15 +338,8 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
   }, [load]);
 
   useEffect(() => {
-    if (!formSpaceId) {
-      setMounts([]);
-      return;
-    }
-    void listMounts(formSpaceId).then((response) => {
-      setMounts(response.items);
-      setFormMountId((current) => (response.items.some((mount) => mount.id === current) ? current : (response.items[0]?.id ?? '')));
-    }).catch(() => setMounts([]));
-  }, [formSpaceId]);
+    setFormMountId((current) => normalizeShareableMountId(mountsBySpace[formSpaceId] ?? [], current));
+  }, [formSpaceId, mountsBySpace]);
 
   useEffect(() => {
     setFormPath('.');
@@ -368,7 +347,7 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!formSpaceId || !formMountId) return;
+    if (!formSpaceId || !formMountId || !mounts.some((mount) => mount.id === formMountId)) return;
     setCreating(true);
     setError('');
     try {
@@ -405,11 +384,11 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
         <div><h1>{text.sharesTitle}</h1><p>{text.sharesTitleDetail}</p></div>
         <div className="member-admin-table-actions">
           <button className="member-secondary-action" type="button" onClick={() => void load()} disabled={loading}>{text.refresh}</button>
-          {managerSpaces.length > 0 && <button className="member-primary" type="button" onClick={() => setFormOpen(true)}>{text.shareCreate}</button>}
+          {shareableSpaces.length > 0 && <button className="member-primary" type="button" onClick={() => setFormOpen(true)}>{text.shareCreate}</button>}
         </div>
       </div>
 
-      {managerSpaces.length === 0 && <p className="member-readonly">{text.shareManagerOnlyHint}</p>}
+      {!loading && shareableSpaces.length === 0 && <p className="member-readonly">{text.shareManagerOnlyHint}</p>}
       {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
 
       {loading ? <div className="member-loading">{text.loading}</div> : shares.length === 0 ? <div className="member-empty">{text.shareListEmpty}</div> : (
@@ -425,7 +404,6 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
                 <td>{share.usedVisits ?? 0}{share.maxVisits ? ` / ${share.maxVisits}` : ''}</td>
                 <td>{share.usedDownloads ?? 0}{share.maxDownloads ? ` / ${share.maxDownloads}` : ''}</td>
                 <td><div className="member-admin-table-actions">
-                  <button className="member-table-action" type="button" onClick={() => setLinkTarget(share)} disabled={loading}>{text.shareViewLink}</button>
                   <button className="member-table-action member-table-danger" type="button" onClick={() => setRevokeTarget(share)} disabled={loading}>{text.shareRevoke}</button>
                 </div></td>
               </tr>
@@ -438,7 +416,7 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
         <div className="member-modal-backdrop">
           <form className="member-modal member-admin-form" onSubmit={onSubmit}>
             <h2 className="member-admin-form-wide">{text.shareCreateTitle}</h2>
-            <label>{text.shareTargetSpace}<select value={formSpaceId} onChange={(event) => setFormSpaceId(event.target.value)} required>{managerSpaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select></label>
+            <label>{text.shareTargetSpace}<select value={formSpaceId} onChange={(event) => setFormSpaceId(event.target.value)} required>{shareableSpaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select></label>
             <label>{text.shareTargetMount}<select value={formMountId} onChange={(event) => setFormMountId(event.target.value)} required>{mounts.map((mount) => <option key={mount.id} value={mount.id}>{mount.name}</option>)}</select></label>
             <ShareTargetPicker key={`${formSpaceId}:${formMountId}`} text={text} spaceId={formSpaceId} mountId={formMountId} selectedPath={formPath} onSelect={setFormPath} />
             <ShareOptionFields text={text} value={options} onChange={setOptions} />
@@ -449,7 +427,6 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
       )}
 
       {createdResult && <ShareCreatedResult text={text} result={createdResult} onClose={() => setCreatedResult(null)} />}
-      {linkTarget && <ShareLinkViewer text={text} share={linkTarget} onClose={() => setLinkTarget(null)} />}
 
       {revokeTarget && (
         <div className="member-modal-backdrop">

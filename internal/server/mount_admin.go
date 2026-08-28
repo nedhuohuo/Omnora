@@ -20,15 +20,16 @@ import (
 )
 
 type adminMountRecord struct {
-	ID           string
-	SpaceID      string
-	SpaceName    string
-	DisplayName  string
-	RootPath     string
-	Kind         string
-	Mode         domain.MountMode
-	IndexEnabled int
-	Status       string
+	ID                string
+	SpaceID           string
+	SpaceName         string
+	DisplayName       string
+	RootPath          string
+	Kind              string
+	Mode              domain.MountMode
+	IndexEnabled      int
+	AllowPublicShares int
+	Status            string
 }
 
 func (s *Server) renameMount(w http.ResponseWriter, r *http.Request) {
@@ -43,18 +44,20 @@ func (s *Server) renameMount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		DisplayName    string `json:"displayName"`
-		DisplayNameAlt string `json:"display_name"`
+		DisplayName       *string           `json:"displayName"`
+		DisplayNameAlt    *string           `json:"display_name"`
+		Mode              *domain.MountMode `json:"mode"`
+		IndexEnabled      *bool             `json:"indexEnabled"`
+		AllowPublicShares *bool             `json:"allowPublicShares"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.DisplayName == "" {
+	if req.DisplayName == nil {
 		req.DisplayName = req.DisplayNameAlt
 	}
-	displayName, err := normalizeMountDisplayName(req.DisplayName)
-	if err != nil {
-		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
+	if req.DisplayName == nil && req.Mode == nil && req.IndexEnabled == nil && req.AllowPublicShares == nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "at least one mount setting is required")
 		return
 	}
 
@@ -69,12 +72,49 @@ func (s *Server) renameMount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	displayName := mount.DisplayName
+	if req.DisplayName != nil {
+		displayName, err = normalizeMountDisplayName(*req.DisplayName)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
+			return
+		}
+	}
+	mode := mount.Mode
+	if req.Mode != nil {
+		mode = *req.Mode
+		if mode != domain.MountModeReadOnly && mode != domain.MountModeReadWrite {
+			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "mount mode must be read_only or read_write")
+			return
+		}
+		if mode == domain.MountModeReadWrite {
+			if err := probeMountWritable(mount.RootPath); err != nil {
+				httpx.WriteError(w, r, http.StatusConflict, "mount_not_writable", err.Error())
+				return
+			}
+		}
+	}
+	indexEnabled := mount.IndexEnabled
+	if req.IndexEnabled != nil {
+		indexEnabled = boolInt(*req.IndexEnabled)
+	}
+	allowPublicShares := mount.AllowPublicShares
+	if req.AllowPublicShares != nil {
+		allowPublicShares = boolInt(*req.AllowPublicShares)
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := s.sqlDB().ExecContext(r.Context(), `
+	tx, err := s.sqlDB().BeginTx(r.Context(), nil)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(r.Context(), `
 UPDATE mounts
-SET display_name = ?, updated_at = ?
+SET display_name = ?, mode = ?, index_enabled = ?, allow_public_shares = ?, updated_at = ?
 WHERE id = ? AND status <> 'deleted'
-`, displayName, now, mount.ID)
+`, displayName, mode, indexEnabled, allowPublicShares, now, mount.ID)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			httpx.WriteError(w, r, http.StatusConflict, "mount_conflict", "mount display name already exists in this space")
@@ -88,12 +128,41 @@ WHERE id = ? AND status <> 'deleted'
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "mount was not found")
 		return
 	}
+	if req.AllowPublicShares != nil && !*req.AllowPublicShares {
+		if _, err := tx.ExecContext(r.Context(), `
+UPDATE shares SET revoked_at = COALESCE(revoked_at, ?), updated_at = ?
+WHERE mount_id = ? AND revoked_at IS NULL
+`, now, now, mount.ID); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+	}
+	if req.Mode != nil && *req.Mode == domain.MountModeReadOnly {
+		if _, err := tx.ExecContext(r.Context(), `
+UPDATE upload_sessions SET status = 'canceled', canceled_at = COALESCE(canceled_at, ?)
+WHERE mount_id = ? AND status = 'active'
+`, now, mount.ID); err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		writeDBError(w, r, err)
+		return
+	}
 
-	_ = s.recordAudit(r, "mount_rename", "mount", mount.ID, fmt.Sprintf(`{"from":%q,"to":%q}`, mount.DisplayName, displayName))
-	httpx.WriteJSON(w, http.StatusOK, mountDTO{
-		ID: mount.ID, Name: displayName, Space: mount.SpaceName, Mode: displayMountMode(mount.Mode),
-		Index: displayIndex(mount.IndexEnabled), Health: mount.Status, Tone: toneForStatus(mount.Status),
-	})
+	_ = s.recordAudit(r, "mount_update", "mount", mount.ID, fmt.Sprintf(`{"from":%q,"to":%q,"mode":%q,"indexEnabled":%t,"allowPublicShares":%t}`, mount.DisplayName, displayName, mode, indexEnabled == 1, allowPublicShares == 1))
+	updated, err := s.loadAdminMount(r.Context(), mount.ID)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	detail, err := s.adminMountDetail(r, updated)
+	if err != nil {
+		writeDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, detail)
 }
 
 func (s *Server) reverifyMount(w http.ResponseWriter, r *http.Request) {
@@ -138,6 +207,11 @@ func (s *Server) reverifyMount(w http.ResponseWriter, r *http.Request) {
 			code = "mount_conflict"
 		}
 		httpx.WriteError(w, r, status, code, err.Error())
+		return
+	}
+	inferredKind, err := s.inferMountKind(identity.Path)
+	if err != nil || inferredKind != mount.Kind {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_mount_root", "mount root is outside its configured allowed storage root")
 		return
 	}
 	if mount.Mode == domain.MountModeReadWrite {
@@ -274,6 +348,9 @@ WHERE mount_id = ? AND revoked_at IS NULL
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ai_token_boundaries WHERE mount_id = ?`, mount.ID); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mount_account_grants WHERE mount_id = ?`, mount.ID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE upload_sessions
 SET status = 'canceled', canceled_at = COALESCE(canceled_at, ?)
@@ -303,7 +380,7 @@ func (s *Server) loadAdminMount(ctx context.Context, mountID string) (adminMount
 	}
 	var mount adminMountRecord
 	err := s.sqlDB().QueryRowContext(ctx, `
-SELECT m.id, m.space_id, sp.name, m.display_name, m.root_path, m.kind, m.mode, m.index_enabled, m.status
+SELECT m.id, m.space_id, sp.name, m.display_name, m.root_path, m.kind, m.mode, m.index_enabled, m.allow_public_shares, m.status
 FROM mounts m
 JOIN spaces sp ON sp.id = m.space_id
 WHERE m.id = ? AND m.status <> 'deleted'
@@ -316,6 +393,7 @@ WHERE m.id = ? AND m.status <> 'deleted'
 		&mount.Kind,
 		&mount.Mode,
 		&mount.IndexEnabled,
+		&mount.AllowPublicShares,
 		&mount.Status,
 	)
 	return mount, err

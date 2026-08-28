@@ -53,10 +53,16 @@ VALUES (?, ?, 'manager')
 		t.Fatalf("insert space member: %v", err)
 	}
 	if _, err := db.SQL().ExecContext(ctx, `
-INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, index_enabled, status, mount_identity_json)
-VALUES (?, ?, 'Docs', ?, 'external', ?, 0, 'active', ?)
+INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, index_enabled, allow_public_shares, status, mount_identity_json)
+VALUES (?, ?, 'Docs', ?, 'external', ?, 0, 1, 'active', ?)
 `, mountID, spaceID, root, mode, string(identityJSON)); err != nil {
 		t.Fatalf("insert mount: %v", err)
+	}
+	if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO mount_account_grants(mount_id, account_id, permission)
+VALUES (?, ?, 'manager')
+`, mountID, ownerAccountID); err != nil {
+		t.Fatalf("insert mount grant: %v", err)
 	}
 	return root
 }

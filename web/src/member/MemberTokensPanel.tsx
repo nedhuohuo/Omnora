@@ -16,7 +16,7 @@ import { copyText } from './clipboard';
 import { joinReadableLabels, readableLabel } from './displayLabels';
 
 // Canonical backend scopes (see internal/aitoken/types.go). The UI presents a
-// simplified "read" / "upload" choice; read expands to the full read-only set.
+// simplified read choice that expands to the full read-only set.
 const READ_SCOPES = ['spaces:read', 'files:list', 'files:metadata', 'files:text', 'search:read'];
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
@@ -64,7 +64,6 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
   const [mountsBySpace, setMountsBySpace] = useState<Record<string, MemberMount[]>>({});
   const [name, setName] = useState('');
   const [scopeRead, setScopeRead] = useState(true);
-  const [scopeUpload, setScopeUpload] = useState(false);
   const [expiresAt, setExpiresAt] = useState('');
   const [boundaries, setBoundaries] = useState<BoundaryDraft[]>([]);
   const [formOpen, setFormOpen] = useState(false);
@@ -133,7 +132,6 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
   function resetForm() {
     setName('');
     setScopeRead(true);
-    setScopeUpload(false);
     setExpiresAt('');
     setBoundaries([]);
   }
@@ -149,10 +147,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
         setError(text.tokenBoundaryRequired);
         return;
       }
-      const scopes = [
-        ...(scopeRead ? READ_SCOPES : []),
-        ...(scopeUpload ? ['uploads:create'] : []),
-      ];
+      const scopes = scopeRead ? READ_SCOPES : [];
       const result = await createAiToken({
         name: name.trim(),
         scopes: scopes.length > 0 ? scopes : READ_SCOPES,
@@ -222,7 +217,6 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
             <h2 className="member-admin-form-wide">{text.tokenCreate}</h2>
             <label className="member-admin-form-wide">{text.tokenName}<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
             <label className="member-admin-checkbox"><input type="checkbox" checked={scopeRead} onChange={(event) => setScopeRead(event.target.checked)} />{text.tokenScopeRead}</label>
-            <label className="member-admin-checkbox"><input type="checkbox" checked={scopeUpload} onChange={(event) => setScopeUpload(event.target.checked)} />{text.tokenScopeUpload}</label>
             <label className="member-admin-form-wide">{text.tokenExpiresAt}<input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} required /></label>
 
             <div className="member-admin-form-wide member-token-boundaries">

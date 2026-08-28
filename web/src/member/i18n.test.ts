@@ -60,7 +60,10 @@ describe('directory response formatting', () => {
   it('returns the API directory entries as typed member entries without fallback data', () => {
     const response: DirectoryChildrenPayload = {
       relativePath: 'documents',
+      effectivePermission: 'editor',
       readOnly: false,
+      canWrite: true,
+      canShare: false,
       entries: [
         {
           name: 'plan.md',
@@ -76,7 +79,10 @@ describe('directory response formatting', () => {
 
     expect(formatDirectoryChildren(response)).toEqual({
       relativePath: 'documents',
+      effectivePermission: 'editor',
       readOnly: false,
+      canWrite: true,
+      canShare: false,
       entries: response.entries,
     });
   });

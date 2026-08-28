@@ -1,11 +1,34 @@
 package server
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 )
+
+func (s *Server) inferMountKind(rootPath string) (string, error) {
+	rootPath = filepath.Clean(strings.TrimSpace(rootPath))
+	if rootPath == "" || rootPath == "." || !filepath.IsAbs(rootPath) {
+		return "", fmt.Errorf("rootPath must be an absolute path under an allowed storage root")
+	}
+
+	managedRoot := filepath.Clean(strings.TrimSpace(s.cfg.Storage.ManagedDir))
+	externalRoot := filepath.Clean(strings.TrimSpace(s.cfg.Storage.PredeclaredMountRoot))
+	managedConfigured := managedRoot != "" && managedRoot != "." && filepath.IsAbs(managedRoot)
+	externalConfigured := externalRoot != "" && externalRoot != "." && filepath.IsAbs(externalRoot)
+	if managedConfigured && externalConfigured && (isUnderAnyRoot(managedRoot, []string{externalRoot}) || isUnderAnyRoot(externalRoot, []string{managedRoot})) {
+		return "", fmt.Errorf("configured managed and external storage roots must not overlap")
+	}
+	if managedConfigured && isUnderAnyRoot(rootPath, []string{managedRoot}) {
+		return "managed", nil
+	}
+	if externalConfigured && isUnderAnyRoot(rootPath, []string{externalRoot}) {
+		return "external", nil
+	}
+	return "", fmt.Errorf("rootPath must be under an allowed storage root")
+}
 
 type hostDirectoryEntry struct {
 	Name string `json:"name"`

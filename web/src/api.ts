@@ -1,5 +1,6 @@
 import type { AppBootstrap } from './types';
 import type { MemberDirectoryEntry, MemberMount, MemberSearchResult, MemberSpace } from './member/types';
+import type { EffectivePermission } from './member/permissions';
 
 export type HealthPayload = {
   status?: string;
@@ -20,10 +21,18 @@ export type ShareExchangePayload = {
   expiresAt?: string;
 };
 
+export type SessionCapabilities = {
+  memberWeb: boolean;
+  adminWeb: boolean;
+  hasContentAccess: boolean;
+  manageSystem: boolean;
+};
+
 export type SessionPayload = {
   userId?: string;
   expiresAt?: string;
   isAdmin?: boolean;
+  capabilities?: SessionCapabilities;
 };
 
 export type InitializePayload = {
@@ -43,15 +52,19 @@ export type AdminMountPayload = {
   spaceId: string;
   displayName: string;
   rootPath: string;
-  kind: 'external' | 'managed';
+  kind?: 'external' | 'managed';
   mode: 'read_only' | 'read_write';
   indexEnabled: boolean;
+  allowPublicShares?: boolean;
 };
 
 export type DirectoryChildrenPayload = {
   relativePath?: string;
   path?: string;
   readOnly?: boolean;
+  effectivePermission?: EffectivePermission;
+  canWrite?: boolean;
+  canShare?: boolean;
   entries?: MemberDirectoryEntry[];
   items?: MemberDirectoryEntry[];
   nextCursor?: string;
@@ -159,10 +172,50 @@ export type AdminMountListItem = {
   id: string;
   name: string;
   space: string;
+  kind?: 'external' | 'managed';
   mode: string;
   index: string;
   health: string;
   tone: string;
+};
+
+export type AdminMountAccount = {
+  accountId: string;
+  email?: string;
+  displayName?: string;
+  spacePermission: SpaceMemberRole;
+};
+
+export type AdminMountGrant = AdminMountAccount & {
+  permission: SpaceMemberRole;
+  effectivePermission: SpaceMemberRole;
+};
+
+export type AdminMountEligibleAccount = AdminMountAccount & {
+  permission?: null;
+};
+
+export type AdminMountDetail = {
+  id: string;
+  spaceId: string;
+  spaceName: string;
+  name: string;
+  displayName?: string;
+  rootPath: string;
+  kind: 'external' | 'managed';
+  mode: 'read_only' | 'read_write';
+  indexEnabled: boolean;
+  allowPublicShares: boolean;
+  health: string;
+  grants?: AdminMountGrant[];
+  eligibleAccounts?: AdminMountEligibleAccount[];
+};
+
+export type UpdateAdminMountPayload = {
+  displayName?: string;
+  mode?: AdminMountDetail['mode'];
+  indexEnabled?: boolean;
+  allowPublicShares?: boolean;
 };
 
 export type AdminRouteGroupItem = {
@@ -208,7 +261,6 @@ export type ShareStatus = 'active' | 'expired' | 'revoked';
 export type SharePayload = {
   id: string;
   publicId: string;
-  fragment?: string;
   spaceId: string;
   spaceName?: string;
   mountId: string;
@@ -434,6 +486,62 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   return body as T;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isSpaceMemberRole(value: unknown): value is SpaceMemberRole {
+  return value === 'viewer' || value === 'editor' || value === 'manager';
+}
+
+function parseAdminMountGrant(value: unknown): AdminMountGrant {
+  if (!isRecord(value)
+    || typeof value.accountId !== 'string'
+    || !isSpaceMemberRole(value.spacePermission)
+    || !isSpaceMemberRole(value.permission)
+    || !isSpaceMemberRole(value.effectivePermission)) {
+    throw new Error('Admin mount grant response is malformed');
+  }
+  return value as AdminMountGrant;
+}
+
+function parseAdminMountEligibleAccount(value: unknown): AdminMountEligibleAccount {
+  if (!isRecord(value)
+    || typeof value.accountId !== 'string'
+    || !isSpaceMemberRole(value.spacePermission)
+    || (value.permission !== undefined && value.permission !== null)) {
+    throw new Error('Admin mount eligible-account response is malformed');
+  }
+  return value as AdminMountEligibleAccount;
+}
+
+function parseAdminMountDetail(value: unknown): AdminMountDetail {
+  if (!isRecord(value)
+    || typeof value.id !== 'string'
+    || typeof value.spaceId !== 'string'
+    || typeof value.spaceName !== 'string'
+    || typeof value.name !== 'string'
+    || typeof value.rootPath !== 'string'
+    || (value.kind !== 'managed' && value.kind !== 'external')
+    || (value.mode !== 'read_only' && value.mode !== 'read_write')
+    || typeof value.indexEnabled !== 'boolean'
+    || typeof value.allowPublicShares !== 'boolean'
+    || typeof value.health !== 'string'
+    || (value.displayName !== undefined && typeof value.displayName !== 'string')) {
+    throw new Error('Admin mount detail response is malformed');
+  }
+  const grants = value.grants === undefined
+    ? undefined
+    : Array.isArray(value.grants) ? value.grants.map(parseAdminMountGrant) : null;
+  const eligibleAccounts = value.eligibleAccounts === undefined
+    ? undefined
+    : Array.isArray(value.eligibleAccounts) ? value.eligibleAccounts.map(parseAdminMountEligibleAccount) : null;
+  if (grants === null || eligibleAccounts === null) {
+    throw new Error('Admin mount detail response is malformed');
+  }
+  return { ...value, grants, eligibleAccounts } as AdminMountDetail;
+}
+
 export function getHealth(signal?: AbortSignal) {
   return requestJson<HealthPayload>('/healthz', { signal });
 }
@@ -485,19 +593,56 @@ export function confirmTOTP(code: string, signal?: AbortSignal) {
 }
 
 export function registerAdminMount(payload: AdminMountPayload, signal?: AbortSignal) {
-  return requestJson<unknown>('/api/v1/admin/mounts', {
+  return requestJson<AdminMountListItem>('/api/v1/admin/mounts', {
     method: 'POST',
     body: JSON.stringify(payload),
     signal,
   });
 }
 
-export function renameAdminMount(mountId: string, displayName: string, signal?: AbortSignal) {
-  return requestJson<AdminMountListItem>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}`, {
+export async function getAdminMount(mountId: string, signal?: AbortSignal) {
+  const body = await requestJson<unknown>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}`, { signal });
+  return parseAdminMountDetail(body);
+}
+
+export async function updateAdminMount(mountId: string, payload: UpdateAdminMountPayload, signal?: AbortSignal) {
+  const body = await requestJson<unknown>(`/api/v1/admin/mounts/${encodeURIComponent(mountId)}`, {
     method: 'PATCH',
-    body: JSON.stringify({ displayName }),
+    body: JSON.stringify(payload),
     signal,
   });
+  return parseAdminMountDetail(body);
+}
+
+export async function listAdminMountGrants(mountId: string, signal?: AbortSignal) {
+  const body = await requestJson<unknown>(
+    `/api/v1/admin/mounts/${encodeURIComponent(mountId)}/grants`,
+    { signal },
+  );
+  if (!isRecord(body)) throw new Error('Admin mount grants response is malformed');
+  const items = body.items === undefined
+    ? undefined
+    : Array.isArray(body.items) ? body.items.map(parseAdminMountGrant) : null;
+  const eligibleAccounts = body.eligibleAccounts === undefined
+    ? undefined
+    : Array.isArray(body.eligibleAccounts) ? body.eligibleAccounts.map(parseAdminMountEligibleAccount) : null;
+  if (items === null || eligibleAccounts === null) throw new Error('Admin mount grants response is malformed');
+  return { items, eligibleAccounts };
+}
+
+export async function putAdminMountGrant(mountId: string, accountId: string, permission: SpaceMemberRole, signal?: AbortSignal) {
+  const body = await requestJson<unknown>(
+    `/api/v1/admin/mounts/${encodeURIComponent(mountId)}/grants/${encodeURIComponent(accountId)}`,
+    { method: 'PUT', body: JSON.stringify({ permission }), signal },
+  );
+  return parseAdminMountGrant(body);
+}
+
+export function deleteAdminMountGrant(mountId: string, accountId: string, signal?: AbortSignal) {
+  return requestJson<void>(
+    `/api/v1/admin/mounts/${encodeURIComponent(mountId)}/grants/${encodeURIComponent(accountId)}`,
+    { method: 'DELETE', signal },
+  );
 }
 
 export function deleteAdminMount(mountId: string, deleteData = false, signal?: AbortSignal) {

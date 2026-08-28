@@ -52,7 +52,6 @@ func AllowlistedScopes() []Scope {
 		ScopeFilesText,
 		ScopeFilesDownloadTicket,
 		ScopeSearchRead,
-		ScopeUploadsCreate,
 	}
 }
 
@@ -138,20 +137,42 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (IssuedToken, e
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, created_at, expires_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, token.ID, token.PublicID, token.SecretHash, token.AccountID, token.Name, scopeJSON, formatTime(token.CreatedAt), formatTime(token.ExpiresAt), formatTime(now))
+SELECT ?, ?, ?, a.id, ?, ?, ?, ?, ?
+FROM accounts a
+WHERE a.id = ? AND a.status = 'active'
+`, token.ID, token.PublicID, token.SecretHash, token.Name, scopeJSON, formatTime(token.CreatedAt), formatTime(token.ExpiresAt), formatTime(now), token.AccountID)
 	if err != nil {
 		return IssuedToken{}, err
 	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return IssuedToken{}, err
+	}
+	if affected != 1 {
+		return IssuedToken{}, ErrInvalidInput
+	}
 	for _, boundary := range boundaries {
-		_, err = tx.ExecContext(ctx, `
+		result, err = tx.ExecContext(ctx, `
 INSERT INTO ai_token_boundaries(token_id, space_id, mount_id, relative_path)
-VALUES (?, ?, ?, ?)
-`, token.ID, boundary.SpaceID, boundary.MountID, boundary.RelativePath)
+SELECT ?, m.space_id, m.id, ?
+FROM mounts m
+JOIN spaces sp ON sp.id = m.space_id AND sp.status = 'active'
+JOIN accounts a ON a.id = ? AND a.status = 'active'
+JOIN space_members sm ON sm.space_id = m.space_id AND sm.account_id = a.id
+JOIN mount_account_grants mg ON mg.mount_id = m.id AND mg.account_id = a.id
+WHERE m.id = ? AND m.space_id = ? AND m.status = 'active'
+`, token.ID, boundary.RelativePath, token.AccountID, boundary.MountID, boundary.SpaceID)
 		if err != nil {
 			return IssuedToken{}, err
+		}
+		affected, err = result.RowsAffected()
+		if err != nil {
+			return IssuedToken{}, err
+		}
+		if affected != 1 {
+			return IssuedToken{}, ErrInvalidInput
 		}
 	}
 	if err := tx.Commit(); err != nil {

@@ -186,11 +186,12 @@ ON CONFLICT(mount_id, relative_path) DO UPDATE SET
 }
 
 type SearchOptions struct {
-	SpaceID    string
-	Query      string
-	Limit      int
-	Cursor     string
-	Boundaries []SearchBoundary
+	SpaceID      string
+	Query        string
+	Limit        int
+	Cursor       string
+	Unrestricted bool
+	Boundaries   []SearchBoundary
 }
 
 type SearchBoundary struct {
@@ -215,6 +216,9 @@ type SearchItem struct {
 	SizeBytes           int64     `json:"sizeBytes"`
 	ModifiedAt          time.Time `json:"modifiedAt"`
 	IdentityFingerprint string    `json:"identityFingerprint"`
+	EffectivePermission string    `json:"effectivePermission,omitempty"`
+	CanWrite             bool      `json:"canWrite"`
+	CanShare             bool      `json:"canShare"`
 }
 
 type ExcludedMount struct {
@@ -234,6 +238,9 @@ func (s Service) Search(ctx context.Context, opts SearchOptions) (SearchResult, 
 	if err != nil {
 		return SearchResult{}, err
 	}
+	if !opts.Unrestricted && len(boundaries) == 0 {
+		return SearchResult{Items: []SearchItem{}, ExcludedMounts: []ExcludedMount{}}, nil
+	}
 
 	limit := normalizeSearchLimit(opts.Limit)
 	cursor, err := decodeCursor(opts.Cursor)
@@ -244,6 +251,19 @@ func (s Service) Search(ctx context.Context, opts SearchOptions) (SearchResult, 
 	excluded, err := s.excludedMounts(ctx, opts.SpaceID)
 	if err != nil {
 		return SearchResult{}, err
+	}
+	if !opts.Unrestricted {
+		allowedMounts := make(map[string]bool, len(boundaries))
+		for _, boundary := range boundaries {
+			allowedMounts[boundary.MountID] = true
+		}
+		filtered := excluded[:0]
+		for _, mount := range excluded {
+			if allowedMounts[mount.MountID] {
+				filtered = append(filtered, mount)
+			}
+		}
+		excluded = filtered
 	}
 
 	query := strings.ToLower(strings.TrimSpace(opts.Query))
@@ -265,7 +285,7 @@ WHERE ce.space_id = ?
 		AND (? = '%' OR lower(ce.name) LIKE ? ESCAPE '\')
 `
 	args := []any{opts.SpaceID, like, like}
-	if len(boundaries) > 0 {
+	if !opts.Unrestricted {
 		clauses := make([]string, 0, len(boundaries))
 		for _, boundary := range boundaries {
 			if boundary.RelativePath == "" {

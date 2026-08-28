@@ -51,3 +51,7 @@ const (
 	MountModeReadOnly  MountMode = "read_only"
 	MountModeReadWrite MountMode = "read_write"
 )
+
+func (p SpacePermission) Valid() bool {
+	return p == SpacePermissionViewer || p == SpacePermissionEditor || p == SpacePermissionManager
+}

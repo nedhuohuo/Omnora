@@ -1,4 +1,5 @@
 import type { DirectoryChildrenPayload } from '../api';
+import type { EffectivePermission } from './permissions';
 
 export type MemberSpace = {
   id: string;
@@ -7,7 +8,14 @@ export type MemberSpace = {
   role: 'viewer' | 'editor' | 'manager';
 };
 
-export type MemberMount = {
+export type MemberEffectiveAccess = {
+  effectivePermission?: EffectivePermission;
+  readOnly?: boolean;
+  canWrite?: boolean;
+  canShare?: boolean;
+};
+
+export type MemberMount = MemberEffectiveAccess & {
   id: string;
   name: string;
   space: string;
@@ -18,7 +26,7 @@ export type MemberMount = {
   tone: string;
 };
 
-export type MemberDirectoryEntry = {
+export type MemberDirectoryEntry = MemberEffectiveAccess & {
   mountId?: string;
   mountName?: string;
   name: string;
@@ -30,13 +38,13 @@ export type MemberDirectoryEntry = {
   previewKind: string;
 };
 
-export type MemberDirectoryListing = {
+export type MemberDirectoryListing = MemberEffectiveAccess & {
   relativePath: string;
   readOnly: boolean;
   entries: MemberDirectoryEntry[];
 };
 
-export type MemberSearchResult = {
+export type MemberSearchResult = MemberEffectiveAccess & {
   id: string;
   mountId: string;
   relativePath: string;
@@ -59,7 +67,13 @@ export type TransferItem = {
 export function formatDirectoryChildren(payload: DirectoryChildrenPayload): MemberDirectoryListing {
   return {
     relativePath: payload.relativePath ?? payload.path ?? '.',
-    readOnly: Boolean(payload.readOnly),
-    entries: payload.entries ?? payload.items ?? [],
+    effectivePermission: payload.effectivePermission,
+    readOnly: payload.readOnly !== false,
+    canWrite: payload.canWrite,
+    canShare: payload.canShare,
+    entries: (payload.entries ?? payload.items ?? []).map((entry) => ({
+      ...entry,
+      readOnly: entry.readOnly !== false,
+    })),
   };
 }

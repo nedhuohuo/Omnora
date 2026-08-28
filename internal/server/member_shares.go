@@ -5,13 +5,14 @@ import (
 	"net/http"
 	"time"
 
+	"omnora/internal/access"
+	"omnora/internal/domain"
 	"omnora/internal/httpx"
 )
 
 type shareRecordDTO struct {
 	ID                 string `json:"id"`
 	PublicID           string `json:"publicId"`
-	Fragment           string `json:"fragment,omitempty"`
 	SpaceID            string `json:"spaceId"`
 	SpaceName          string `json:"spaceName,omitempty"`
 	MountID            string `json:"mountId"`
@@ -30,8 +31,8 @@ type shareRecordDTO struct {
 	Status             string `json:"status"`
 }
 
-// listShares returns shares created by the current account, plus shares in
-// any space where the current account is currently a manager.
+// listShares returns share metadata only where the current account still has
+// effective manager permission on the target mount.
 func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 	session, err := s.requireSession(r)
 	if err != nil {
@@ -39,7 +40,7 @@ func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
-	SELECT sh.id, sh.public_id, COALESCE(sh.fragment_secret, ''), sh.space_id, sh.mount_id, sh.relative_path,
+	SELECT sh.id, sh.public_id, sh.space_id, sh.mount_id, sh.relative_path,
 	       sh.allow_preview, sh.allow_download, sh.max_visits, sh.used_visits,
 	       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, ''),
 	       COALESCE(sp.name, ''), COALESCE(m.display_name, ''), COALESCE(a.email, ''), COALESCE(a.display_name, '')
@@ -47,13 +48,18 @@ FROM shares sh
 JOIN spaces sp ON sp.id = sh.space_id
 JOIN mounts m ON m.id = sh.mount_id
 JOIN accounts a ON a.id = sh.creator_account_id
-WHERE sh.creator_account_id = ?
-   OR sh.space_id IN (
-       SELECT space_id FROM space_members WHERE account_id = ? AND permission = 'manager'
-   )
+WHERE EXISTS (
+  SELECT 1
+  FROM accounts current_account
+  JOIN space_members sm ON sm.account_id = current_account.id AND sm.space_id = sh.space_id
+  JOIN mount_account_grants mg ON mg.account_id = current_account.id AND mg.mount_id = sh.mount_id
+  WHERE current_account.id = ? AND current_account.status = 'active'
+    AND sm.permission = 'manager' AND mg.permission = 'manager'
+    AND sp.status = 'active' AND m.status = 'active'
+)
 ORDER BY sh.created_at DESC
 LIMIT ?
-`, session.AccountID, session.AccountID, parseIntDefault(r.URL.Query().Get("limit"), 100))
+`, session.AccountID, parseIntDefault(r.URL.Query().Get("limit"), 100))
 	if err != nil {
 		writeDBError(w, r, err)
 		return
@@ -85,12 +91,12 @@ func (s *Server) revokeShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	shareID := r.PathValue("shareId")
-	var spaceID, creatorAccountID string
+	var spaceID, mountID, creatorAccountID string
 	err = s.sqlDB().QueryRowContext(r.Context(), `
-SELECT space_id, creator_account_id
+SELECT space_id, mount_id, creator_account_id
 FROM shares
 WHERE id = ? AND revoked_at IS NULL
-`, shareID).Scan(&spaceID, &creatorAccountID)
+`, shareID).Scan(&spaceID, &mountID, &creatorAccountID)
 	if err == sql.ErrNoRows {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "share was not found")
 		return
@@ -99,7 +105,11 @@ WHERE id = ? AND revoked_at IS NULL
 		writeDBError(w, r, err)
 		return
 	}
-	authorized := creatorAccountID == session.AccountID || s.isSpaceManager(r, session.AccountID, spaceID)
+	authorized := creatorAccountID == session.AccountID
+	if !authorized {
+		decision, authErr := s.authorizeMount(r, session.AccountID, spaceID, mountID, access.OperationRead)
+		authorized = authErr == nil && decision.EffectivePermission == domain.SpacePermissionManager
+	}
 	if !authorized {
 		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "only the creator or a space manager can revoke this share")
 		return
@@ -140,19 +150,15 @@ WHERE sm.account_id = ? AND sm.space_id = ? AND sm.permission = 'manager' AND sp
 
 func scanShareRecordDTO(rows *sql.Rows) (shareRecordDTO, error) {
 	var item shareRecordDTO
-	var fragmentSecret string
 	var allowPreview, allowDownload int
 	var maxVisits, maxDownloads sql.NullInt64
 	if err := rows.Scan(
-		&item.ID, &item.PublicID, &fragmentSecret, &item.SpaceID, &item.MountID, &item.RelativePath,
+		&item.ID, &item.PublicID, &item.SpaceID, &item.MountID, &item.RelativePath,
 		&allowPreview, &allowDownload, &maxVisits, &item.UsedVisits,
 		&maxDownloads, &item.UsedDownloads, &item.ExpiresAt, &item.RevokedAt,
 		&item.SpaceName, &item.MountName, &item.CreatorEmail, &item.CreatorDisplayName,
 	); err != nil {
 		return shareRecordDTO{}, err
-	}
-	if fragmentSecret != "" {
-		item.Fragment = item.PublicID + "." + fragmentSecret
 	}
 	item.AllowPreview = allowPreview == 1
 	item.AllowDownload = allowDownload == 1

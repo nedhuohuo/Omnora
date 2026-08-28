@@ -7,6 +7,7 @@ import (
 	"path"
 	"strings"
 
+	"omnora/internal/access"
 	"omnora/internal/domain"
 	"omnora/internal/files"
 	"omnora/internal/httpx"
@@ -21,8 +22,8 @@ func (s *Server) renameObject(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "renaming requires editor permission")
+	if _, err := s.authorizeMount(r, session.AccountID, spaceID, mountID, access.OperationWrite); err != nil {
+		writeMountAuthorizationError(w, r, err)
 		return
 	}
 	var req struct {
@@ -55,7 +56,7 @@ func (s *Server) renameObject(w http.ResponseWriter, r *http.Request) {
 		writeFileOpError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "object_rename", "file_object", renamed, `{}`)
+	_ = s.recordAudit(r, "object_rename", "mount", mountID, `{}`)
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": renamed})
 }
 
@@ -67,8 +68,8 @@ func (s *Server) moveObject(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "moving requires editor permission")
+	if _, err := s.authorizeMount(r, session.AccountID, spaceID, mountID, access.OperationWrite); err != nil {
+		writeMountAuthorizationError(w, r, err)
 		return
 	}
 	var req struct {
@@ -99,7 +100,7 @@ func (s *Server) moveObject(w http.ResponseWriter, r *http.Request) {
 		writeFileOpError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "object_move", "file_object", moved, `{}`)
+	_ = s.recordAudit(r, "object_move", "mount", mountID, `{}`)
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": moved})
 }
 
@@ -111,8 +112,8 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "deleting requires editor permission")
+	if _, err := s.authorizeMount(r, session.AccountID, spaceID, mountID, access.OperationWrite); err != nil {
+		writeMountAuthorizationError(w, r, err)
 		return
 	}
 	relativePath := r.URL.Query().Get("path")
@@ -141,7 +142,7 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = s.revokeSharesForPath(r, spaceID, mountID, relativePath)
-		_ = s.recordAudit(r, "object_trash", "file_object", relativePath, fmt.Sprintf(`{"trashId":%q}`, item.ID))
+		_ = s.recordAudit(r, "object_trash", "mount", mountID, fmt.Sprintf(`{"trashId":%q}`, item.ID))
 		httpx.WriteJSON(w, http.StatusOK, item)
 		return
 	}
@@ -154,7 +155,7 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.revokeSharesForPath(r, spaceID, mountID, relativePath)
-	_ = s.recordAudit(r, "object_delete", "file_object", relativePath, `{}`)
+	_ = s.recordAudit(r, "object_delete", "mount", mountID, `{}`)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -166,8 +167,8 @@ func (s *Server) listTrash(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionViewer) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "listing trash requires viewer permission")
+	if _, err := s.authorizeMount(r, session.AccountID, spaceID, mountID, access.OperationRead); err != nil {
+		writeMountAuthorizationError(w, r, err)
 		return
 	}
 	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
@@ -195,8 +196,8 @@ func (s *Server) restoreTrash(w http.ResponseWriter, r *http.Request) {
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	trashID := r.PathValue("trashId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "restoring trash requires editor permission")
+	if _, err := s.authorizeMount(r, session.AccountID, spaceID, mountID, access.OperationWrite); err != nil {
+		writeMountAuthorizationError(w, r, err)
 		return
 	}
 	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
@@ -216,7 +217,7 @@ func (s *Server) restoreTrash(w http.ResponseWriter, r *http.Request) {
 		writeFileOpError(w, r, err)
 		return
 	}
-	_ = s.recordAudit(r, "object_trash_restore", "file_object", restored, fmt.Sprintf(`{"trashId":%q}`, trashID))
+	_ = s.recordAudit(r, "object_trash_restore", "mount", mountID, fmt.Sprintf(`{"trashId":%q}`, trashID))
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"relativePath": restored})
 }
 
@@ -229,8 +230,8 @@ func (s *Server) purgeTrash(w http.ResponseWriter, r *http.Request) {
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
 	trashID := r.PathValue("trashId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "purging trash requires editor permission")
+	if _, err := s.authorizeMount(r, session.AccountID, spaceID, mountID, access.OperationWrite); err != nil {
+		writeMountAuthorizationError(w, r, err)
 		return
 	}
 	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
@@ -261,8 +262,8 @@ func (s *Server) emptyTrash(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceID := r.PathValue("spaceId")
 	mountID := r.PathValue("mountId")
-	if !s.hasSpacePermission(r, session.AccountID, spaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "emptying trash requires editor permission")
+	if _, err := s.authorizeMount(r, session.AccountID, spaceID, mountID, access.OperationWrite); err != nil {
+		writeMountAuthorizationError(w, r, err)
 		return
 	}
 	mount, err := loadMountForListing(r, s.sqlDB(), spaceID, mountID)
@@ -315,16 +316,16 @@ func (s *Server) handleCrossMount(w http.ResponseWriter, r *http.Request, move b
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "from, toSpaceId and toMountId are required")
 		return
 	}
-	sourcePerm := domain.SpacePermissionViewer
+	sourceOperation := access.OperationRead
 	if move {
-		sourcePerm = domain.SpacePermissionEditor
+		sourceOperation = access.OperationWrite
 	}
-	if !s.hasSpacePermission(r, session.AccountID, sourceSpaceID, sourcePerm) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "insufficient permission on source space")
+	if _, err := s.authorizeMount(r, session.AccountID, sourceSpaceID, sourceMountID, sourceOperation); err != nil {
+		writeMountAuthorizationError(w, r, err)
 		return
 	}
-	if !s.hasSpacePermission(r, session.AccountID, req.ToSpaceID, domain.SpacePermissionEditor) {
-		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "destination requires editor permission")
+	if _, err := s.authorizeMount(r, session.AccountID, req.ToSpaceID, req.ToMountID, access.OperationWrite); err != nil {
+		writeMountAuthorizationError(w, r, err)
 		return
 	}
 	source, err := loadMountForListing(r, s.sqlDB(), sourceSpaceID, sourceMountID)
@@ -356,7 +357,7 @@ func (s *Server) handleCrossMount(w http.ResponseWriter, r *http.Request, move b
 	}
 	if err != nil {
 		if errors.Is(err, files.ErrCrossMountIncomplete) {
-			_ = s.recordAudit(r, "object_cross_mount_incomplete", "file_object", result, fmt.Sprintf(`{"error":%q}`, err.Error()))
+			_ = s.recordAudit(r, "object_cross_mount_incomplete", "mount", dest.ID, fmt.Sprintf(`{"fromMount":%q,"toMount":%q}`, source.ID, dest.ID))
 			httpx.WriteError(w, r, http.StatusConflict, "cross_mount_incomplete", err.Error())
 			return
 		}
@@ -368,7 +369,7 @@ func (s *Server) handleCrossMount(w http.ResponseWriter, r *http.Request, move b
 		action = "object_cross_mount_move"
 		_ = s.revokeSharesForPath(r, sourceSpaceID, sourceMountID, req.From)
 	}
-	_ = s.recordAudit(r, action, "file_object", result, fmt.Sprintf(`{"fromMount":%q,"toMount":%q}`, source.ID, dest.ID))
+	_ = s.recordAudit(r, action, "mount", dest.ID, fmt.Sprintf(`{"fromMount":%q,"toMount":%q}`, source.ID, dest.ID))
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{
 		"relativePath": result,
 		"spaceId":      req.ToSpaceID,

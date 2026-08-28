@@ -39,6 +39,20 @@ CREATE TABLE mounts (
 	mode TEXT NOT NULL,
 	status TEXT NOT NULL
 );
+
+CREATE TABLE space_members (
+	space_id TEXT NOT NULL REFERENCES spaces(id),
+	account_id TEXT NOT NULL REFERENCES accounts(id),
+	permission TEXT NOT NULL,
+	PRIMARY KEY (space_id, account_id)
+);
+
+CREATE TABLE mount_account_grants (
+	mount_id TEXT NOT NULL REFERENCES mounts(id),
+	account_id TEXT NOT NULL REFERENCES accounts(id),
+	permission TEXT NOT NULL,
+	PRIMARY KEY (mount_id, account_id)
+);
 `
 
 func TestCreateHashesSecretAndVerifyBearerReturnsPrincipal(t *testing.T) {
@@ -106,12 +120,13 @@ func TestValidateScopesRejectsUnknownDuplicateAndEmpty(t *testing.T) {
 		{},
 		{ScopeFilesList, ScopeFilesList},
 		{Scope("admin:delete")},
+		{Scope("uploads:create")},
 	} {
 		if _, err := ValidateScopes(scopes); !errors.Is(err, ErrInvalidScope) {
 			t.Fatalf("ValidateScopes(%v) error = %v, want ErrInvalidScope", scopes, err)
 		}
 	}
-	if got, err := ValidateScopes([]Scope{ScopeSearchRead, ScopeUploadsCreate}); err != nil || len(got) != 2 {
+	if got, err := ValidateScopes([]Scope{ScopeSearchRead, ScopeFilesList}); err != nil || len(got) != 2 {
 		t.Fatalf("ValidateScopes(valid) = %v, %v", got, err)
 	}
 }
@@ -213,6 +228,50 @@ func TestCreateRejectsUnsafeBoundaries(t *testing.T) {
 	}
 }
 
+func TestCreateRollsBackWhenBoundaryAuthorizationChangesDuringWrite(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	insertActiveAccountSpaceMount(t, db)
+	if _, err := db.ExecContext(ctx, `
+CREATE TRIGGER revoke_grant_after_token_insert
+AFTER INSERT ON ai_tokens
+BEGIN
+	DELETE FROM mount_account_grants
+	WHERE mount_id = 'mount_1' AND account_id = NEW.account_id;
+END;
+`); err != nil {
+		t.Fatalf("create boundary race trigger: %v", err)
+	}
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	service := NewService(db, WithClock(func() time.Time { return now }))
+	_, err := service.Create(ctx, CreateRequest{
+		AccountID: "acct_1",
+		Name:      "racing token",
+		Scopes:    []Scope{ScopeFilesList},
+		Boundaries: []DirectoryBoundary{{
+			SpaceID: "space_1",
+			MountID: "mount_1",
+		}},
+		ExpiresAt: now.Add(time.Hour),
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("Create() error = %v, want ErrInvalidInput", err)
+	}
+	var tokenCount, boundaryCount, grantCount int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(1) FROM ai_tokens").Scan(&tokenCount); err != nil {
+		t.Fatalf("count tokens: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(1) FROM ai_token_boundaries").Scan(&boundaryCount); err != nil {
+		t.Fatalf("count boundaries: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(1) FROM mount_account_grants WHERE mount_id = 'mount_1' AND account_id = 'acct_1'").Scan(&grantCount); err != nil {
+		t.Fatalf("count grants: %v", err)
+	}
+	if tokenCount != 0 || boundaryCount != 0 || grantCount != 1 {
+		t.Fatalf("rollback state tokens=%d boundaries=%d grants=%d, want 0,0,1", tokenCount, boundaryCount, grantCount)
+	}
+}
+
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())+"?mode=memory&cache=shared")
@@ -254,6 +313,18 @@ INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status)
 VALUES ('mount_1', 'space_1', 'Home', '/tmp/omnora', 'managed', 'read_only', 'active')
 `); err != nil {
 		t.Fatalf("insert mount: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO space_members(space_id, account_id, permission)
+VALUES ('space_1', 'acct_1', 'manager')
+`); err != nil {
+		t.Fatalf("insert space membership: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO mount_account_grants(mount_id, account_id, permission)
+VALUES ('mount_1', 'acct_1', 'manager')
+`); err != nil {
+		t.Fatalf("insert mount grant: %v", err)
 	}
 }
 

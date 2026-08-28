@@ -46,7 +46,15 @@ SELECT ss.share_id, ss.id, ss.generation, ss.expires_at, ss.revoked_at,
        sh.max_downloads, sh.used_downloads, sh.expires_at, sh.revoked_at, sh.generation
 FROM share_sessions ss
 JOIN shares sh ON sh.id = ss.share_id
+JOIN accounts a ON a.id = sh.creator_account_id
+JOIN spaces sp ON sp.id = sh.space_id
+JOIN space_members sm ON sm.space_id = sh.space_id AND sm.account_id = sh.creator_account_id
+JOIN mounts m ON m.id = sh.mount_id AND m.space_id = sh.space_id
+JOIN mount_account_grants mg ON mg.mount_id = sh.mount_id AND mg.account_id = sh.creator_account_id
 WHERE ss.session_hash = ?
+  AND a.status = 'active' AND sp.status = 'active' AND sm.permission = 'manager'
+  AND m.status = 'active' AND m.allow_public_shares = 1
+  AND mg.permission = 'manager'
 `, hash).Scan(
 		&principal.ShareID,
 		&principal.SessionID,
@@ -114,6 +122,18 @@ WHERE id = ?
   AND expires_at > ?
   AND generation = ?
   AND (max_downloads IS NULL OR used_downloads < max_downloads)
+  AND EXISTS (
+    SELECT 1
+    FROM accounts a
+    JOIN spaces sp ON sp.id = shares.space_id
+    JOIN space_members sm ON sm.space_id = shares.space_id AND sm.account_id = shares.creator_account_id
+    JOIN mounts m ON m.id = shares.mount_id AND m.space_id = shares.space_id
+    JOIN mount_account_grants mg ON mg.mount_id = shares.mount_id AND mg.account_id = shares.creator_account_id
+    WHERE a.id = shares.creator_account_id AND a.status = 'active'
+      AND sp.status = 'active' AND sm.permission = 'manager'
+      AND m.status = 'active' AND m.allow_public_shares = 1
+      AND mg.permission = 'manager'
+  )
 `, formatSQLiteTime(now), shareID, formatSQLiteTime(now), generation)
 	if err != nil {
 		return exchangeDBError(err)

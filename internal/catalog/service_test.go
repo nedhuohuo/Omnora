@@ -125,7 +125,7 @@ func TestSearchUsesFilenameCursorAndExcludedMountReasons(t *testing.T) {
 		t.Fatalf("ScanMount() error = %v", err)
 	}
 
-	first, err := NewService(db).Search(context.Background(), SearchOptions{SpaceID: "space_1", Query: ".txt", Limit: 1})
+	first, err := NewService(db).Search(context.Background(), SearchOptions{SpaceID: "space_1", Query: ".txt", Limit: 1, Unrestricted: true})
 	if err != nil {
 		t.Fatalf("Search() error = %v", err)
 	}
@@ -136,7 +136,7 @@ func TestSearchUsesFilenameCursorAndExcludedMountReasons(t *testing.T) {
 		t.Fatalf("NextCursor is empty, want cursor")
 	}
 
-	second, err := NewService(db).Search(context.Background(), SearchOptions{SpaceID: "space_1", Query: ".txt", Limit: 10, Cursor: first.NextCursor})
+	second, err := NewService(db).Search(context.Background(), SearchOptions{SpaceID: "space_1", Query: ".txt", Limit: 10, Cursor: first.NextCursor, Unrestricted: true})
 	if err != nil {
 		t.Fatalf("second Search() error = %v", err)
 	}
@@ -209,6 +209,19 @@ func TestSearchHonorsMountAndRelativePathBoundaries(t *testing.T) {
 	}
 	if len(result.Items) != 1 || result.Items[0].RelativePath != "docs/inside.txt" {
 		t.Fatalf("items = %#v, want only docs/inside.txt", result.Items)
+	}
+}
+
+func TestSearchBoundaryScopeWithNoBoundariesIsDenyAll(t *testing.T) {
+	db := newCatalogDB(t)
+	result, err := NewService(db).Search(context.Background(), SearchOptions{
+		SpaceID: "space_1",
+	})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(result.Items) != 0 || len(result.ExcludedMounts) != 0 || result.NextCursor != "" {
+		t.Fatalf("result = %#v, want empty deny-all result", result)
 	}
 }
 

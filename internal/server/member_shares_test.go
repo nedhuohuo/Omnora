@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"omnora/internal/share"
 )
 
 func TestListAndRevokeShares(t *testing.T) {
@@ -40,10 +42,19 @@ func TestListAndRevokeShares(t *testing.T) {
 	var created struct {
 		ID       string `json:"id"`
 		PublicID string `json:"publicId"`
+		Secret   string `json:"secret"`
 		Fragment string `json:"fragment"`
 	}
-	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil || created.ID == "" || created.PublicID == "" || created.Fragment == "" {
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil || created.ID == "" || created.PublicID == "" || created.Secret == "" || created.Fragment == "" {
 		t.Fatalf("decode created share: created = %#v, err = %v, body = %s", created, err, createRec.Body.String())
+	}
+	var storedHash string
+	var storedFragment *string
+	if err := db.SQL().QueryRow(`SELECT secret_hash, fragment_secret FROM shares WHERE id = ?`, created.ID).Scan(&storedHash, &storedFragment); err != nil {
+		t.Fatalf("load stored share secret fields: %v", err)
+	}
+	if storedHash == "" || storedHash == created.Secret || storedFragment != nil || !share.VerifySecret(created.Secret, storedHash) {
+		t.Fatalf("stored secret fields hash=%q fragment=%v", storedHash, storedFragment)
 	}
 
 	listRec := authorizedAPITestRequest(t, handler, "/api/v1/shares", adminCookie)
@@ -65,8 +76,8 @@ func TestListAndRevokeShares(t *testing.T) {
 	if listed.Items[0].Status != "active" {
 		t.Fatalf("listed share status = %q, want active", listed.Items[0].Status)
 	}
-	if listed.Items[0].Fragment != created.Fragment {
-		t.Fatalf("listed share fragment = %q, want %q", listed.Items[0].Fragment, created.Fragment)
+	if bytes.Contains(listRec.Body.Bytes(), []byte(`"fragment"`)) {
+		t.Fatalf("listed share redisplayed one-time fragment: %s", listRec.Body.String())
 	}
 	if listed.Items[0].SpaceName != "Test Space" || listed.Items[0].MountName != "Docs" {
 		t.Fatalf("listed share location = %q / %q, want Test Space / Docs", listed.Items[0].SpaceName, listed.Items[0].MountName)
