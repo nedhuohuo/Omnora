@@ -411,7 +411,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	space := Space{
 		ID:             spaceID,
 		Kind:           "personal",
-		Name:           displayName + "'s space",
+		Name:           "My Space",
 		OwnerAccountID: account.ID,
 		Status:         "active",
 		CreatedAt:      now,

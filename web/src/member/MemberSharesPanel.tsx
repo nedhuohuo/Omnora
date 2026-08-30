@@ -14,7 +14,7 @@ import {
 import { type MemberLocale, localeMessages } from './i18n';
 import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, type MemberSpace } from './types';
 import { copyText } from './clipboard';
-import { joinReadableLabels } from './displayLabels';
+import { joinReadableLabels, spaceDisplayName } from './displayLabels';
 import { normalizeShareableMountId, shareableMounts } from './permissions';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
@@ -59,8 +59,9 @@ function displaySharePath(path: string, text: LocaleText) {
   return normalized === '.' ? text.shareBrowseRoot : normalized;
 }
 
-function shareLocationLabel(share: SharePayload) {
-  return joinReadableLabels([share.spaceName, share.mountName]);
+function shareLocationLabel(share: SharePayload, spaces: MemberSpace[], personalLabel: string) {
+  const matchedSpace = spaces.find((space) => space.id === share.spaceId);
+  return joinReadableLabels([matchedSpace ? spaceDisplayName(matchedSpace, personalLabel) : share.spaceName, share.mountName]);
 }
 
 function browseCrumbs(path: string) {
@@ -395,7 +396,7 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
         <table className="member-admin-table">
           <thead><tr><th>{text.shareColumnTarget}</th><th>{text.shareColumnStatus}</th><th>{text.shareColumnExpires}</th><th>{text.shareColumnVisits}</th><th>{text.shareColumnDownloads}</th><th>{text.actions}</th></tr></thead>
           <tbody>{shares.map((share) => {
-            const location = shareLocationLabel(share);
+            const location = shareLocationLabel(share, spaces, text.mySpace);
             return (
               <tr key={share.id}>
                 <td><strong>{displaySharePath(share.relativePath, text)}</strong>{location && <small>{location}</small>}</td>
@@ -416,7 +417,7 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
         <div className="member-modal-backdrop">
           <form className="member-modal member-admin-form" onSubmit={onSubmit}>
             <h2 className="member-admin-form-wide">{text.shareCreateTitle}</h2>
-            <label>{text.shareTargetSpace}<select value={formSpaceId} onChange={(event) => setFormSpaceId(event.target.value)} required>{shareableSpaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select></label>
+            <label>{text.shareTargetSpace}<select value={formSpaceId} onChange={(event) => setFormSpaceId(event.target.value)} required>{shareableSpaces.map((space) => <option key={space.id} value={space.id}>{spaceDisplayName(space, text.mySpace)}</option>)}</select></label>
             <label>{text.shareTargetMount}<select value={formMountId} onChange={(event) => setFormMountId(event.target.value)} required>{mounts.map((mount) => <option key={mount.id} value={mount.id}>{mount.name}</option>)}</select></label>
             <ShareTargetPicker key={`${formSpaceId}:${formMountId}`} text={text} spaceId={formSpaceId} mountId={formMountId} selectedPath={formPath} onSelect={setFormPath} />
             <ShareOptionFields text={text} value={options} onChange={setOptions} />

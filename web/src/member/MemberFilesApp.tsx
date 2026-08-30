@@ -35,13 +35,14 @@ import { localeMessages } from './i18n';
 import AdminWorkspace, { type AdminTab } from './AdminWorkspace';
 import MemberSharesPanel, { ShareCreateModal, ShareCreatedResult } from './MemberSharesPanel';
 import MemberTokensPanel from './MemberTokensPanel';
-import MemberAccountPanel, { applyThemePreference } from './MemberAccountPanel';
+import MemberAccountPanel from './MemberAccountPanel';
 import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberEffectiveAccess, type MemberMount, type MemberSearchResult, type MemberSpace, type TransferItem } from './types';
 import { effectiveAccessFrom } from './permissions';
 import { resumedUploadProgress, uploadStorageKey } from './uploadQueue';
 import { createClientId } from './clientId';
 import { useLocale } from './useLocale';
-import { readableLabel } from './displayLabels';
+import { readableLabel, spaceDisplayName } from './displayLabels';
+import { applyThemePreference } from './theme';
 import {
   canAccessWorkspace,
   capabilitiesFromSession,
@@ -269,6 +270,15 @@ export default function MemberFilesApp({ entry = 'member', route, legacyAdminPat
     }
   }, []);
 
+  const loadThemePreference = useCallback(async () => {
+    try {
+      const preferences = await getPreferences();
+      applyThemePreference(preferences.theme);
+    } catch {
+      // Preference storage may be unavailable before authentication.
+    }
+  }, []);
+
   const refreshTrash = useCallback(async () => {
     if (!activeSpaceId || !activeMountId) return;
     setLoading(true);
@@ -289,19 +299,14 @@ export default function MemberFilesApp({ entry = 'member', route, legacyAdminPat
       try {
         const session = await getSession();
         setCapabilities(capabilitiesFromSession(session));
+        await loadThemePreference();
         setSessionState('ready');
         await loadSpaces();
-        try {
-          const preferences = await getPreferences();
-          applyThemePreference(preferences.theme);
-        } catch {
-          // Preference storage may be unavailable; keep the default theme.
-        }
       } catch {
         setSessionState('signed-out');
       }
     })();
-  }, [loadSpaces]);
+  }, [loadSpaces, loadThemePreference]);
 
   useEffect(() => {
     if (sessionState !== 'ready') return;
@@ -390,6 +395,7 @@ export default function MemberFilesApp({ entry = 'member', route, legacyAdminPat
     try {
       const session = await login({ login: loginForm.login, password: loginForm.password, totpCode: loginForm.totpCode || undefined });
       setCapabilities(capabilitiesFromSession(session));
+      await loadThemePreference();
       setSessionState('ready');
       await loadSpaces();
     } catch (caught) {
@@ -970,7 +976,7 @@ export default function MemberFilesApp({ entry = 'member', route, legacyAdminPat
               <button className={`member-nav ${entry === 'admin' && activeAdminGroup?.id === group.id ? 'active' : ''}`} type="button" onClick={() => activateAdminGroup(group.id)} key={group.id}>{group.label}</button>
             ))}
           </nav>}
-          {(activeTab === 'files' || activeTab === 'trash') && <><div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => setActiveSpaceId(space.id)}>{space.name}<small>{space.role}</small></button>)}</div>
+          {(activeTab === 'files' || activeTab === 'trash') && <><div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => setActiveSpaceId(space.id)}>{spaceDisplayName(space, text.mySpace)}<small>{space.role}</small></button>)}</div>
           <div className="member-sidebar-section"><p>{text.mounts}</p>{mounts.map((mount) => <button className={`member-mount ${mount.id === activeMountId ? 'selected' : ''}`} key={mount.id} type="button" onClick={() => setActiveMountId(mount.id)}><span>{mount.name}</span><small>{mount.health !== 'active' ? text.statusUnavailable : effectiveAccessFrom(mount).readOnly ? text.readOnly : text.readWrite}</small></button>)}</div></>}
         </aside>
 
@@ -1088,7 +1094,7 @@ export default function MemberFilesApp({ entry = 'member', route, legacyAdminPat
             <p className="member-modal-hint"><strong>{operationTarget.entry.name}</strong></p>
             <label>{text.moveTargetSpace}
               <select value={destinationSpaceId} onChange={(event) => setDestinationSpaceId(event.target.value)} required>
-                {spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}
+                {spaces.map((space) => <option key={space.id} value={space.id}>{spaceDisplayName(space, text.mySpace)}</option>)}
               </select>
             </label>
             <label>{text.moveTargetMount}

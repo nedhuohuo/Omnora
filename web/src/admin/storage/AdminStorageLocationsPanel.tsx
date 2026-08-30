@@ -20,7 +20,7 @@ import {
   reverifyAdminMount,
   updateAdminMount,
 } from '../../api';
-import { readableLabel } from '../../member/displayLabels';
+import { readableLabel, spaceDisplayName } from '../../member/displayLabels';
 import { type MemberLocale, localeMessages } from '../../member/i18n';
 import './storage-locations.css';
 
@@ -388,7 +388,7 @@ export default function AdminStorageLocationsPanel({ locale, mountId, onMountCha
               <header className="storage-detail-header">
                 <div>
                   <div className="storage-title-row"><h2>{detail.name}</h2><span className={`storage-status ${detail.health === 'active' ? 'active' : 'unavailable'}`}>{mountStatusLabel(detail.health, text)}</span></div>
-                  <p>{detail.spaceName} / {detail.rootPath}</p>
+                  <p>{spaceDisplayName(spaces.find((space) => space.id === detail.spaceId), text.mySpace) || detail.spaceName} / {detail.rootPath}</p>
                 </div>
                 {detail.health !== 'active' && <button className="member-secondary-action" type="button" onClick={() => void onReverify()} disabled={pendingAction === 'reverify'}>{text.reverifyMount}</button>}
               </header>
@@ -460,7 +460,7 @@ export default function AdminStorageLocationsPanel({ locale, mountId, onMountCha
         <div className="member-modal-backdrop">
           <form className="member-modal member-admin-form storage-create-modal" onSubmit={onCreateMount}>
             <h2 className="member-admin-form-wide">{text.storageLocationCreate}</h2>
-            <label>{text.mountSpace}<select value={mountForm.spaceId} onChange={(event) => setMountForm({ ...mountForm, spaceId: event.target.value })} required>{spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select></label>
+            <label>{text.mountSpace}<select value={mountForm.spaceId} onChange={(event) => setMountForm({ ...mountForm, spaceId: event.target.value })} required>{spaces.map((space) => <option key={space.id} value={space.id}>{spaceDisplayName(space, text.mySpace)}</option>)}</select></label>
             <label>{text.mountName}<input value={mountForm.displayName} onChange={(event) => setMountForm({ ...mountForm, displayName: event.target.value })} required /></label>
             <label>{text.mountMode}<select value={mountForm.mode} onChange={(event) => setMountForm({ ...mountForm, mode: event.target.value as AdminMountDetail['mode'] })}><option value="read_write">{text.readWrite}</option><option value="read_only">{text.readOnly}</option></select></label>
             <label className="member-admin-form-wide">{text.mountRoot}<div className="member-path-suggest"><input value={mountForm.rootPath} onChange={(event) => setMountForm({ ...mountForm, rootPath: event.target.value })} onFocus={() => setShowPathSuggestions(true)} onBlur={() => window.setTimeout(() => setShowPathSuggestions(false), 120)} placeholder={text.mountRootPlaceholder} autoComplete="off" required />{showPathSuggestions && <div className="member-path-suggest-menu" role="listbox" aria-label={text.mountRoot}>{pathSuggestions.length === 0 ? <div className="member-path-suggest-empty">{text.noPathSuggestions}</div> : pathSuggestions.map((entry) => <button key={entry.path} type="button" className="member-path-suggest-item" onMouseDown={(event) => event.preventDefault()} onClick={() => setMountForm({ ...mountForm, rootPath: entry.path })}>{entry.path}</button>)}</div>}</div><small className="member-path-hint">{text.mountRootHint}</small>{allowedRoots.length > 0 && <div className="member-path-roots"><span>{text.allowedRoots}</span>{allowedRoots.map((root) => <button key={root} type="button" className="member-path-root" onClick={() => setMountForm({ ...mountForm, rootPath: root })}>{root}</button>)}</div>}</label>
@@ -473,7 +473,7 @@ export default function AdminStorageLocationsPanel({ locale, mountId, onMountCha
       {deleteOpen && detail && (
         <div className="member-modal-backdrop">
           <form className="member-modal" onSubmit={onDeleteMount}>
-            <h2>{text.deleteMount}</h2><p className="member-modal-hint">{text.deleteMountDetail}</p><p className="member-modal-hint"><strong>{detail.name}</strong> / {detail.spaceName}</p>
+            <h2>{text.deleteMount}</h2><p className="member-modal-hint">{text.deleteMountDetail}</p><p className="member-modal-hint"><strong>{detail.name}</strong> / {spaceDisplayName(spaces.find((space) => space.id === detail.spaceId), text.mySpace) || detail.spaceName}</p>
             <label className="member-admin-checkbox"><input type="checkbox" checked={deleteData} onChange={(event) => setDeleteData(event.target.checked)} />{text.deleteMountData}</label><p className="member-modal-hint">{text.deleteMountDataHint}</p>
             <div><button type="button" onClick={() => { setDeleteOpen(false); setDeleteData(false); }}>{text.cancel}</button><button className="member-modal-danger" type="submit" disabled={pendingAction === 'delete'}>{text.confirmDeleteMount}</button></div>
           </form>

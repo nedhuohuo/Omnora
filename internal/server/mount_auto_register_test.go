@@ -45,6 +45,29 @@ func TestSelectConfiguredMountsKeepsShallowIndependentMountPoints(t *testing.T) 
 	}
 }
 
+func TestAddManagedRootFallbackOnlyWhenDiscoveryIsUnavailable(t *testing.T) {
+	managedRoot := t.TempDir()
+	existing := []mountid.MountInfo{{Available: true, Point: filepath.Join(managedRoot, "existing")}}
+	if got := addManagedRootFallback(existing, managedRoot, true); len(got) != 1 || got[0].Point != existing[0].Point {
+		t.Fatalf("fallback replaced discovered mounts: %#v", got)
+	}
+	if got := addManagedRootFallback(nil, managedRoot, false); len(got) != 0 {
+		t.Fatalf("disabled fallback returned %#v", got)
+	}
+	got := addManagedRootFallback(nil, managedRoot, true)
+	if len(got) != 1 || !got[0].Available || got[0].Point != managedRoot {
+		t.Fatalf("managed fallback = %#v", got)
+	}
+}
+
+func TestAddManagedRootFallbackRejectsInvalidDirectory(t *testing.T) {
+	for _, root := range []string{"", ".", filepath.Join(t.TempDir(), "missing")} {
+		if got := addManagedRootFallback(nil, root, true); len(got) != 0 {
+			t.Fatalf("invalid managed root %q fallback = %#v", root, got)
+		}
+	}
+}
+
 func TestNewServerAutoRegistersDockerMountsIdempotently(t *testing.T) {
 	db := openAutoMountTestDB(t)
 	initialized := initializeAutoMountTestAdmin(t, db)
@@ -65,6 +88,81 @@ func TestNewServerAutoRegistersDockerMountsIdempotently(t *testing.T) {
 		t.Fatalf("second automatic registration added %d mounts, want 0", registered)
 	}
 	assertAutoMountRows(t, db, initialized.Account.ID, managedRoot, slotRoot)
+}
+
+func TestNewServerRepairsMissingAdminGrantForPersonalAutoMount(t *testing.T) {
+	db := openAutoMountTestDB(t)
+	initialized := initializeAutoMountTestAdmin(t, db)
+	managedRoot, externalRoot, _ := autoMountTestRoots(t)
+	captured, err := mountid.Capture(managedRoot)
+	if err != nil {
+		t.Fatalf("capture managed root: %v", err)
+	}
+	identityJSON, err := json.Marshal(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().Exec(`
+INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status, mount_identity_json)
+VALUES ('manual-managed', ?, 'Manual Managed', ?, 'managed', 'read_write', 'active', ?)
+`, initialized.PersonalSpace.ID, managedRoot, string(identityJSON)); err != nil {
+		t.Fatalf("insert manual mount: %v", err)
+	}
+
+	NewServer(config.Config{
+		Storage: config.StorageConfig{ManagedDir: managedRoot, PredeclaredMountRoot: externalRoot},
+		Routes:  map[domain.RouteGroup]bool{},
+	}, db, withMountDiscovery(func(string, string) ([]mountid.MountInfo, error) {
+		return []mountid.MountInfo{{Available: true, Point: managedRoot}}, nil
+	}))
+
+	var permission string
+	if err := db.SQL().QueryRow(`
+SELECT permission FROM mount_account_grants WHERE mount_id = 'manual-managed' AND account_id = ?
+`, initialized.Account.ID).Scan(&permission); err != nil {
+		t.Fatalf("load repaired grant: %v", err)
+	}
+	if permission != "manager" {
+		t.Fatalf("repaired permission = %q, want manager", permission)
+	}
+}
+
+func TestNewServerDoesNotRepairGrantOutsideAdminPersonalSpace(t *testing.T) {
+	db := openAutoMountTestDB(t)
+	initialized := initializeAutoMountTestAdmin(t, db)
+	managedRoot, externalRoot, _ := autoMountTestRoots(t)
+	captured, err := mountid.Capture(managedRoot)
+	if err != nil {
+		t.Fatalf("capture managed root: %v", err)
+	}
+	identityJSON, err := json.Marshal(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().Exec(`
+INSERT INTO spaces(id, kind, name, status) VALUES ('shared-space', 'shared', 'Shared', 'active');
+INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status, mount_identity_json)
+VALUES ('shared-managed', 'shared-space', 'Shared Managed', ?, 'managed', 'read_write', 'active', ?);
+`, managedRoot, string(identityJSON)); err != nil {
+		t.Fatalf("insert shared mount: %v", err)
+	}
+
+	NewServer(config.Config{
+		Storage: config.StorageConfig{ManagedDir: managedRoot, PredeclaredMountRoot: externalRoot},
+		Routes:  map[domain.RouteGroup]bool{},
+	}, db, withMountDiscovery(func(string, string) ([]mountid.MountInfo, error) {
+		return []mountid.MountInfo{{Available: true, Point: managedRoot}}, nil
+	}))
+
+	var grants int
+	if err := db.SQL().QueryRow(`
+SELECT COUNT(1) FROM mount_account_grants WHERE mount_id = 'shared-managed' AND account_id = ?
+`, initialized.Account.ID).Scan(&grants); err != nil {
+		t.Fatalf("count shared mount grants: %v", err)
+	}
+	if grants != 0 {
+		t.Fatalf("shared mount automatic grants = %d, want 0", grants)
+	}
 }
 
 func TestInitializeAutoRegistersDockerMounts(t *testing.T) {

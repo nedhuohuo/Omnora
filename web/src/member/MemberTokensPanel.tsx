@@ -13,7 +13,7 @@ import { type MemberLocale, localeMessages } from './i18n';
 import type { MemberMount, MemberSpace } from './types';
 import { createClientId } from './clientId';
 import { copyText } from './clipboard';
-import { joinReadableLabels, readableLabel } from './displayLabels';
+import { joinReadableLabels, readableLabel, spaceDisplayName } from './displayLabels';
 
 // Canonical backend scopes (see internal/aitoken/types.go). The UI presents a
 // simplified read choice that expands to the full read-only set.
@@ -49,9 +49,10 @@ function tokenStatusLabel(status: string | undefined, text: LocaleText) {
 
 type BoundaryDraft = { key: string; spaceId: string; mountId: string; path: string };
 
-function boundarySummary(boundary: AiTokenBoundary, spaces: MemberSpace[], mountsBySpace: Record<string, MemberMount[]>) {
+function boundarySummary(boundary: AiTokenBoundary, spaces: MemberSpace[], mountsBySpace: Record<string, MemberMount[]>, personalLabel: string) {
   const path = boundary.path && boundary.path !== '.' ? boundary.path : '/';
-  const spaceName = readableLabel(boundary.spaceName) || spaces.find((space) => space.id === boundary.spaceId)?.name;
+  const matchedSpace = spaces.find((space) => space.id === boundary.spaceId);
+  const spaceName = matchedSpace ? spaceDisplayName(matchedSpace, personalLabel) : readableLabel(boundary.spaceName);
   const mountName = readableLabel(boundary.mountName) || mountsBySpace[boundary.spaceId]?.find((mount) => mount.id === boundary.mountId)?.name;
   const location = joinReadableLabels([spaceName, mountName]);
   return location ? `${location} · ${path}` : path;
@@ -202,7 +203,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
             <tr key={token.id}>
               <td>{token.name}</td>
               <td>{(token.scopes ?? []).join(', ') || '--'}</td>
-              <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => boundarySummary(boundary, spaces, mountsBySpace)).join('; ')}</td>
+              <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => boundarySummary(boundary, spaces, mountsBySpace, text.mySpace)).join('; ')}</td>
               <td>{formatDate(token.expiresAt, locale, '--')}</td>
               <td>{tokenStatusLabel(token.status, text)}</td>
               <td><button className="member-table-action member-table-danger" type="button" onClick={() => setDeleteTarget(token)} disabled={loading}>{text.tokenRevoke}</button></td>
@@ -224,7 +225,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
                 <div className="member-token-boundary-row" key={boundary.key}>
                   <select value={boundary.spaceId} onChange={(event) => updateBoundary(boundary.key, { spaceId: event.target.value, mountId: '' })}>
                     <option value="" disabled>{text.tokenBoundarySpace}</option>
-                    {spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}
+                    {spaces.map((space) => <option key={space.id} value={space.id}>{spaceDisplayName(space, text.mySpace)}</option>)}
                   </select>
                   <select value={boundary.mountId} onChange={(event) => updateBoundary(boundary.key, { mountId: event.target.value })}>
                     <option value="" disabled>{text.tokenBoundaryMount}</option>

@@ -15,6 +15,7 @@ import {
   updatePreferences,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
+import { applyThemePreference } from './theme';
 
 function describeError(error: unknown) {
   if (error instanceof ApiError) {
@@ -31,28 +32,6 @@ function formatDate(value: string | undefined, locale: MemberLocale) {
   if (!value) return '--';
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? '--' : new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
-}
-
-const systemDarkQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
-let currentTheme: ThemePreference = 'system';
-
-function resolveTheme(theme: ThemePreference): 'light' | 'dark' {
-  if (theme === 'system') {
-    return systemDarkQuery?.matches ? 'dark' : 'light';
-  }
-  return theme;
-}
-
-function applyTheme() {
-  document.documentElement.setAttribute('data-theme', resolveTheme(currentTheme));
-}
-
-// Re-resolve a "system" preference when the OS color scheme changes.
-systemDarkQuery?.addEventListener?.('change', applyTheme);
-
-export function applyThemePreference(theme: ThemePreference) {
-  currentTheme = theme;
-  applyTheme();
 }
 
 export default function MemberAccountPanel({ locale }: { locale: MemberLocale }) {

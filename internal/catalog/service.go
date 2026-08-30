@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"omnora/internal/storage"
@@ -217,8 +216,8 @@ type SearchItem struct {
 	ModifiedAt          time.Time `json:"modifiedAt"`
 	IdentityFingerprint string    `json:"identityFingerprint"`
 	EffectivePermission string    `json:"effectivePermission,omitempty"`
-	CanWrite             bool      `json:"canWrite"`
-	CanShare             bool      `json:"canShare"`
+	CanWrite            bool      `json:"canWrite"`
+	CanShare            bool      `json:"canShare"`
 }
 
 type ExcludedMount struct {
@@ -613,8 +612,8 @@ func stableID(mountID, relativePath string) string {
 }
 
 func identityFingerprint(kind EntryKind, info os.FileInfo) string {
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		return fmt.Sprintf("%s:%d:%d:%d:%d:%d", kind, stat.Dev, stat.Ino, info.Size(), info.ModTime().UnixNano(), info.Mode().Perm())
+	if device, inode, ok := catalogFileIdentity(info); ok {
+		return fmt.Sprintf("%s:%d:%d:%d:%d:%d", kind, device, inode, info.Size(), info.ModTime().UnixNano(), info.Mode().Perm())
 	}
 	return fmt.Sprintf("%s:%d:%d:%d", kind, info.Size(), info.ModTime().UnixNano(), info.Mode().Perm())
 }

@@ -30,7 +30,7 @@ import {
   revokeAdminUserSessions,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
-import { joinReadableLabels, readableLabel } from './displayLabels';
+import { joinReadableLabels, readableLabel, spaceDisplayName } from './displayLabels';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
@@ -462,7 +462,7 @@ export function AdminSpacesPanel({ locale }: { locale: MemberLocale }) {
         <>
           <label className="member-admin-inline-form"><span>{text.spaceSelect}</span>
             <select value={selectedSpaceId} onChange={(event) => setSelectedSpaceId(event.target.value)}>
-              {spaces.map((space) => <option key={space.id} value={space.id}>{space.name} ({space.type})</option>)}
+              {spaces.map((space) => <option key={space.id} value={space.id}>{spaceDisplayName(space, text.mySpace)} ({space.type})</option>)}
             </select>
           </label>
 

@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -25,7 +27,23 @@ func discoverConfiguredMounts(managedRoot, externalRoot string) ([]mountid.Mount
 	if err != nil {
 		return nil, err
 	}
+	entries = addManagedRootFallback(entries, managedRoot, runtime.GOOS != "linux")
 	return selectConfiguredMounts(entries, managedRoot, externalRoot), nil
+}
+
+func addManagedRootFallback(entries []mountid.MountInfo, managedRoot string, enabled bool) []mountid.MountInfo {
+	if !enabled || len(entries) != 0 {
+		return entries
+	}
+	managedRoot = filepath.Clean(strings.TrimSpace(managedRoot))
+	if managedRoot == "" || managedRoot == "." {
+		return entries
+	}
+	info, err := os.Stat(managedRoot)
+	if err != nil || !info.IsDir() {
+		return entries
+	}
+	return append(entries, mountid.MountInfo{Available: true, Point: managedRoot})
 }
 
 func selectConfiguredMounts(entries []mountid.MountInfo, managedRoot, externalRoot string) []mountid.MountInfo {
@@ -131,6 +149,23 @@ func (s *Server) autoRegisterDockerMounts(ctx context.Context, accountID, spaceI
 	for _, candidate := range candidates {
 		rootPath := filepath.Clean(candidate.Point)
 		if _, ok := existingPaths[rootPath]; ok {
+			mountID, changed, grantErr := s.ensureAutoMountGrant(ctx, rootPath, accountID, spaceID)
+			if grantErr != nil {
+				registrationErrors = append(registrationErrors, fmt.Errorf("grant %s: %w", rootPath, grantErr))
+				continue
+			}
+			if changed {
+				metadata, _ := audit.MetadataFromMap(map[string]any{"automatic": true, "rootPath": rootPath})
+				if err := audit.NewRecorder(s.sqlDB()).Record(ctx, audit.Event{
+					ActorAccountID: accountID,
+					Action:         "mount_auto_grant",
+					TargetType:     "mount",
+					TargetID:       mountID,
+					MetadataJSON:   metadata,
+				}); err != nil {
+					slog.Warn("record automatic mount grant audit", "mount_id", mountID, "error", err)
+				}
+			}
 			continue
 		}
 		identity, err := mountid.VerifyCandidateRoot(rootPath, existing)
@@ -219,6 +254,37 @@ VALUES (?, ?, 'manager', ?, ?)
 		}
 	}
 	return registered, errors.Join(registrationErrors...)
+}
+
+func (s *Server) ensureAutoMountGrant(ctx context.Context, rootPath, accountID, spaceID string) (string, bool, error) {
+	var mountID string
+	var permission sql.NullString
+	err := s.sqlDB().QueryRowContext(ctx, `
+SELECT m.id, g.permission
+FROM mounts m
+LEFT JOIN mount_account_grants g ON g.mount_id = m.id AND g.account_id = ?
+WHERE m.root_path = ? AND m.space_id = ? AND m.status <> 'deleted'
+LIMIT 1
+`, accountID, rootPath, spaceID).Scan(&mountID, &permission)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if permission.Valid && permission.String == string(domain.SpacePermissionManager) {
+		return mountID, false, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.sqlDB().ExecContext(ctx, `
+INSERT INTO mount_account_grants(mount_id, account_id, permission, created_at, updated_at)
+VALUES (?, ?, 'manager', ?, ?)
+ON CONFLICT(mount_id, account_id) DO UPDATE SET permission = 'manager', updated_at = excluded.updated_at
+`, mountID, accountID, now, now)
+	if err != nil {
+		return "", false, err
+	}
+	return mountID, true, nil
 }
 
 func (s *Server) firstAdminPersonalSpace(ctx context.Context) (string, string, error) {

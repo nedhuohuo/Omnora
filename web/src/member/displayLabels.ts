@@ -10,3 +10,8 @@ export function readableLabel(value: string | undefined) {
 export function joinReadableLabels(values: Array<string | undefined>) {
   return values.map(readableLabel).filter(Boolean).join(' / ');
 }
+
+export function spaceDisplayName(space: { type?: string; name?: string } | undefined, personalLabel: string) {
+  if (space?.type === 'personal') return personalLabel;
+  return readableLabel(space?.name) || space?.name?.trim() || '';
+}

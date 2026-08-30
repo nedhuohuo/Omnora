@@ -93,6 +93,10 @@ VALUES ('sh1', 'pub1', 'hashed-secret', 'legacy-plaintext-secret', 'a1', 's1', '
 	if err := (&DB{sql: raw}).migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	var personalSpaceName string
+	if err := raw.QueryRow(`SELECT name FROM spaces WHERE id = 's1'`).Scan(&personalSpaceName); err != nil || personalSpaceName != "My Space" {
+		t.Fatalf("personal space name = %q, err = %v", personalSpaceName, err)
+	}
 	var allow int
 	if err := raw.QueryRow(`SELECT allow_public_shares FROM mounts WHERE id = 'm1'`).Scan(&allow); err != nil || allow != 1 {
 		t.Fatalf("existing allow_public_shares = %d, err = %v", allow, err)

@@ -85,6 +85,9 @@ func TestInitializeConsumesTokenOnceAndCreatesAdminSpace(t *testing.T) {
 	if created.PersonalSpace.Kind != "personal" || created.PersonalSpace.OwnerAccountID != created.Account.ID {
 		t.Fatalf("personal space not tied to account: %#v", created.PersonalSpace)
 	}
+	if created.PersonalSpace.Name != "My Space" {
+		t.Fatalf("personal space name = %q, want My Space", created.PersonalSpace.Name)
+	}
 
 	var permission string
 	err = db.QueryRowContext(ctx, `

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 const defaultMountInfoPath = "/proc/self/mountinfo"
@@ -141,15 +140,15 @@ func capture(root, mountInfoPath string) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat == nil {
-		return Identity{}, fmt.Errorf("%w: stat_t unavailable for %q", ErrIdentityUnverifiable, cleaned)
+	device, inode, err := filesystemIdentity(cleaned, info)
+	if err != nil {
+		return Identity{}, err
 	}
 
 	identity := Identity{
 		Path:   cleaned,
-		Device: uint64(stat.Dev),
-		Inode:  uint64(stat.Ino),
+		Device: device,
+		Inode:  inode,
 	}
 	if identity.Device == 0 || identity.Inode == 0 {
 		return Identity{}, fmt.Errorf("%w: device or inode unavailable for %q", ErrIdentityUnverifiable, cleaned)
