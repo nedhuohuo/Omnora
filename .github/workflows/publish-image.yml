@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - codex/aliyun-test-deploy
     tags:
       - "v*"
   workflow_dispatch:
@@ -41,10 +40,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
+          # main: latest + sha-<commit>
+          # v* tag: exact version tag + sha-<commit>
+          # workflow_dispatch on other refs: sha-<commit> only
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=codex-aliyun-test-deploy,enable={{is_default_branch}}
-            type=ref,event=branch
             type=ref,event=tag
             type=sha,prefix=sha-
 
