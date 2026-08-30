@@ -46,6 +46,23 @@ one-time bootstrap token.
 Do not reinitialize Omnora with an empty database if you expect previous spaces,
 mounts, ACLs, shares, Tokens, audit events, or upload sessions to remain.
 
+## Incompatible Database Recovery
+
+If Omnora detects that a versioned SQLite database is missing core tables or
+columns required by its original schema, it does not attempt a partial data
+migration. The container checkpoints and closes SQLite, renames the database in
+place to:
+
+```text
+omnora.db.incompatible-<UTC timestamp>.bak
+```
+
+It then creates a fresh database from the current migrations and logs the backup
+path and incompatibility reason. The operator must run first initialization
+again. NAS file contents are not deleted or moved; only Omnora accounts, spaces,
+mount registrations, grants, shares, and other database state start fresh. Keep
+the `.bak` file until the replacement instance has been verified.
+
 ## Verification Command Sketch
 
 Before reinstall, create a known file under a registered mount:

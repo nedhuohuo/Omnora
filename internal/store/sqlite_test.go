@@ -45,6 +45,120 @@ func TestOpenSQLiteAppliesMigrationsAndWAL(t *testing.T) {
 	}
 }
 
+func TestOpenSQLiteBacksUpIncompatibleSchemaAndRecreates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "omnora.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+CREATE TABLE schema_migrations (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO schema_migrations(version, name) VALUES (1, '001_initial_schema.sql');
+CREATE TABLE legacy_marker(value TEXT NOT NULL);
+INSERT INTO legacy_marker(value) VALUES ('preserved');
+CREATE TABLE catalog_entries(id TEXT PRIMARY KEY, mount_id TEXT NOT NULL);
+`); err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := OpenSQLite(context.Background(), SQLiteOptions{Path: path, BusyTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("OpenSQLite() incompatible reset error = %v", err)
+	}
+	defer db.Close()
+
+	for _, table := range []string{"spaces", "mounts", "catalog_entries", "jobs"} {
+		var count int
+		if err := db.SQL().QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("fresh table %s count = %d, err = %v", table, count, err)
+		}
+	}
+	var accounts int
+	if err := db.SQL().QueryRow(`SELECT COUNT(1) FROM accounts`).Scan(&accounts); err != nil || accounts != 0 {
+		t.Fatalf("fresh accounts = %d, err = %v", accounts, err)
+	}
+
+	backups, err := filepath.Glob(path + ".incompatible-*.bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("incompatible backups = %#v, want one", backups)
+	}
+	backup, err := sql.Open("sqlite", backups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	var marker string
+	if err := backup.QueryRow(`SELECT value FROM legacy_marker`).Scan(&marker); err != nil || marker != "preserved" {
+		t.Fatalf("backup marker = %q, err = %v", marker, err)
+	}
+}
+
+func TestOpenSQLiteUpgradesCompatibleOlderSchemaWithoutReset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "omnora.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := migrationFiles.ReadFile("migrations/001_initial_schema.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+CREATE TABLE schema_migrations (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(string(body)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+INSERT INTO schema_migrations(version, name) VALUES (1, '001_initial_schema.sql');
+INSERT INTO accounts(id, email, display_name, role, status)
+VALUES ('existing', 'existing@example.test', 'Existing', 'admin', 'active');
+`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := OpenSQLite(context.Background(), SQLiteOptions{Path: path, BusyTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("OpenSQLite() compatible upgrade error = %v", err)
+	}
+	defer db.Close()
+	var accounts, version int
+	if err := db.SQL().QueryRow(`SELECT COUNT(1) FROM accounts WHERE id = 'existing'`).Scan(&accounts); err != nil || accounts != 1 {
+		t.Fatalf("preserved accounts = %d, err = %v", accounts, err)
+	}
+	if err := db.SQL().QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 9 {
+		t.Fatalf("migration version = %d, err = %v", version, err)
+	}
+	backups, err := filepath.Glob(path + ".incompatible-*.bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 0 {
+		t.Fatalf("compatible upgrade created backups: %#v", backups)
+	}
+}
+
 func TestMountGrantMigrationPreservesExistingAccessAndClosesNewMounts(t *testing.T) {
 	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "migration.db"))
 	if err != nil {

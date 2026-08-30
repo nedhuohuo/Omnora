@@ -6,6 +6,8 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log/slog"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,22 +36,51 @@ func OpenSQLite(ctx context.Context, opts SQLiteOptions) (*DB, error) {
 		opts.BusyTimeout = 5 * time.Second
 	}
 
-	db, err := sql.Open("sqlite", opts.Path)
+	open := func() (*DB, error) {
+		db, err := sql.Open("sqlite", opts.Path)
+		if err != nil {
+			return nil, err
+		}
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxLifetime(0)
+
+		wrapped := &DB{sql: db}
+		if err := wrapped.configure(ctx, opts.BusyTimeout); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		return wrapped, nil
+	}
+
+	wrapped, err := open()
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
-
-	wrapped := &DB{sql: db}
-	if err := wrapped.configure(ctx, opts.BusyTimeout); err != nil {
-		db.Close()
+	if reason, err := wrapped.incompatibleSchemaReason(ctx); err != nil {
+		_ = wrapped.Close()
 		return nil, err
+	} else if reason != "" {
+		backupPath, err := wrapped.backupIncompatibleDatabase(ctx, opts.Path)
+		if err != nil {
+			return nil, err
+		}
+		slog.Warn("incompatible sqlite schema backed up; creating a fresh database", "reason", reason, "backup_path", backupPath)
+		wrapped, err = open()
+		if err != nil {
+			return nil, fmt.Errorf("open fresh sqlite database after backing up %s: %w", backupPath, err)
+		}
 	}
 	if err := wrapped.migrate(ctx); err != nil {
-		db.Close()
+		_ = wrapped.Close()
 		return nil, err
+	}
+	if reason, err := wrapped.incompatibleSchemaReason(ctx); err != nil {
+		_ = wrapped.Close()
+		return nil, err
+	} else if reason != "" {
+		_ = wrapped.Close()
+		return nil, fmt.Errorf("sqlite schema is incomplete after migration: %s", reason)
 	}
 	return wrapped, nil
 }
@@ -64,6 +95,113 @@ func (db *DB) Ping(ctx context.Context) error {
 
 func (db *DB) SQL() *sql.DB {
 	return db.sql
+}
+
+var compatibilityTables = []string{"spaces", "mounts", "catalog_entries", "jobs"}
+
+var compatibilityColumns = map[string][]string{
+	"mounts":          {"space_id"},
+	"catalog_entries": {"space_id"},
+}
+
+func (db *DB) incompatibleSchemaReason(ctx context.Context) (string, error) {
+	hasMigrations, err := db.tableExists(ctx, "schema_migrations")
+	if err != nil {
+		return "", err
+	}
+	if !hasMigrations {
+		count, err := db.applicationTableCount(ctx)
+		if err != nil {
+			return "", err
+		}
+		if count > 0 {
+			return "database has application tables but no migration history", nil
+		}
+		return "", nil
+	}
+
+	var versions int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(1) FROM schema_migrations`).Scan(&versions); err != nil {
+		return "", err
+	}
+	if versions == 0 {
+		count, err := db.applicationTableCount(ctx)
+		if err != nil {
+			return "", err
+		}
+		if count > 0 {
+			return "database has application tables but empty migration history", nil
+		}
+		return "", nil
+	}
+
+	for _, table := range compatibilityTables {
+		exists, err := db.tableExists(ctx, table)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return "missing required table: " + table, nil
+		}
+	}
+	for table, columns := range compatibilityColumns {
+		for _, column := range columns {
+			exists, err := db.columnExists(ctx, table, column)
+			if err != nil {
+				return "", err
+			}
+			if !exists {
+				return "missing required column: " + table + "." + column, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func (db *DB) tableExists(ctx context.Context, table string) (bool, error) {
+	var count int
+	err := db.sql.QueryRowContext(ctx, `SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count)
+	return count > 0, err
+}
+
+func (db *DB) columnExists(ctx context.Context, table, column string) (bool, error) {
+	var count int
+	err := db.sql.QueryRowContext(ctx, `SELECT COUNT(1) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count)
+	return count > 0, err
+}
+
+func (db *DB) applicationTableCount(ctx context.Context) (int, error) {
+	var count int
+	err := db.sql.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM sqlite_master
+WHERE type = 'table'
+  AND name NOT LIKE 'sqlite_%'
+  AND name <> 'schema_migrations'
+`).Scan(&count)
+	return count, err
+}
+
+func (db *DB) backupIncompatibleDatabase(ctx context.Context, path string) (string, error) {
+	if _, err := db.sql.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		_ = db.Close()
+		return "", fmt.Errorf("checkpoint incompatible sqlite database: %w", err)
+	}
+	if err := db.Close(); err != nil {
+		return "", fmt.Errorf("close incompatible sqlite database: %w", err)
+	}
+
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	backupPath := path + ".incompatible-" + stamp + ".bak"
+	if err := os.Rename(path, backupPath); err != nil {
+		return "", fmt.Errorf("back up incompatible sqlite database to %s: %w", backupPath, err)
+	}
+	for _, sidecar := range []string{path + "-wal", path + "-shm", path + "-journal"} {
+		if err := os.Remove(sidecar); err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("remove stale sqlite sidecar %s after backup %s: %w", sidecar, backupPath, err)
+		}
+	}
+	return backupPath, nil
 }
 
 func (db *DB) configure(ctx context.Context, busyTimeout time.Duration) error {
