@@ -18,6 +18,7 @@ func TestRouteMatrixDeclaresCredentialBoundaries(t *testing.T) {
 		{http.MethodPost, "/api/v1/account/totp/disable", RouteAuthCookie, true, true},
 		{http.MethodDelete, "/api/v1/account/sessions/sess_1", RouteAuthCookie, true, false},
 		{http.MethodPost, "/api/v1/ai-tokens", RouteAuthCookie, true, true},
+		{http.MethodPatch, "/api/v1/ai-tokens/tok_1", RouteAuthCookie, true, true},
 		{http.MethodDelete, "/api/v1/ai-tokens/tok_1", RouteAuthCookie, true, false},
 		{http.MethodGet, "/api/v1/admin/overview", RouteAuthCookie, false, false},
 		{http.MethodPatch, "/api/v1/admin/route-groups/mcp", RouteAuthCookie, true, false},
@@ -35,6 +36,10 @@ func TestRouteMatrixDeclaresCredentialBoundaries(t *testing.T) {
 		{http.MethodGet, "/api/v1/share/current", RouteAuthShareCookie, false, false},
 		{http.MethodPost, "/api/v1/shares", RouteAuthCookie, true, false},
 		{http.MethodPost, "/api/v1/share/action", RouteAuthShareCookie, true, false},
+		{http.MethodPost, "/api/v1/team-spaces", RouteAuthCookie, true, false},
+		{http.MethodGet, "/api/v1/team-spaces/sp1/members", RouteAuthCookie, false, false},
+		{http.MethodPut, "/api/v1/team-spaces/sp1/members/u1", RouteAuthCookie, true, false},
+		{http.MethodDelete, "/api/v1/team-spaces/sp1/members/u1", RouteAuthCookie, true, false},
 		{http.MethodPost, "/mcp", RouteAuthBearer, false, false},
 	}
 	for _, tt := range tests {
@@ -42,6 +47,36 @@ func TestRouteMatrixDeclaresCredentialBoundaries(t *testing.T) {
 		if rule.Mode != tt.mode || rule.CSRF != tt.csrf || rule.RequiresRecentAuth != tt.reauth {
 			t.Errorf("%s %s => %#v, want mode=%s csrf=%t reauth=%t", tt.method, tt.path, rule, tt.mode, tt.csrf, tt.reauth)
 		}
+	}
+}
+
+func TestTeamSpaceRoutesAreExplicitlyDeclared(t *testing.T) {
+	want := []RouteRule{
+		{Method: http.MethodPost, Pattern: "/api/v1/team-spaces", Mode: RouteAuthCookie, CSRF: true},
+		{Method: http.MethodGet, Pattern: "/api/v1/team-spaces/*/members", Mode: RouteAuthCookie},
+		{Method: http.MethodPut, Pattern: "/api/v1/team-spaces/*/members/*", Mode: RouteAuthCookie, CSRF: true},
+		{Method: http.MethodDelete, Pattern: "/api/v1/team-spaces/*/members/*", Mode: RouteAuthCookie, CSRF: true},
+	}
+	for _, expected := range want {
+		found := false
+		for _, rule := range routeMatrix {
+			if rule.Method == expected.Method && rule.Pattern == expected.Pattern && rule.Mode == expected.Mode && rule.CSRF == expected.CSRF {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing explicit route rule %#v", expected)
+		}
+	}
+}
+
+func TestTeamSpaceMemberRoutePatternMatches(t *testing.T) {
+	if !routePatternMatches("/api/v1/team-spaces/*/members/*", "/api/v1/team-spaces/sp1/members/u1") {
+		t.Fatal("expected team-space member route to match")
+	}
+	if routePatternMatches("/api/v1/team-spaces/*/members/*", "/api/v1/team-spaces/sp1/members") {
+		t.Fatal("member collection must not match member mutation rule")
 	}
 }
 

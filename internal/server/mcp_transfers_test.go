@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -273,6 +274,37 @@ func TestMCPDownloadACLDegradeReturnsForbidden(t *testing.T) {
 	srv.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("ACL downgrade status = %d, want 403", recorder.Code)
+	}
+}
+
+func TestMCPTransferFolderPolicyErrorsAreStableAndSanitized(t *testing.T) {
+	const hostPath = "/srv/omnora/private/mount/secret"
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "folder denied", err: access.ErrFolderDenied, wantStatus: http.StatusForbidden, wantCode: "folder_denied"},
+		{name: "denylist review required", err: access.ErrFolderDenylistReviewRequired, wantStatus: http.StatusConflict, wantCode: "folder_denylist_review_required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := fmt.Errorf("host path %s: %w", hostPath, tt.err)
+			if code := transferErrorCode(err); code != tt.wantCode {
+				t.Fatalf("transferErrorCode() = %q, want %q", code, tt.wantCode)
+			}
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/mcp/transfers/ticket", nil)
+			writeMCPTransferError(recorder, request, err)
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			body := recorder.Body.String()
+			if !strings.Contains(body, `"code":"`+tt.wantCode+`"`) || strings.Contains(body, hostPath) {
+				t.Fatalf("unsafe or unstable transfer error body: %s", body)
+			}
+		})
 	}
 }
 

@@ -383,6 +383,10 @@ func safeErrorMessage(code string) string {
 	switch code {
 	case "forbidden":
 		return "The requested resource is not accessible."
+	case "folder_denied":
+		return "The requested folder is not accessible."
+	case "folder_denylist_review_required":
+		return "The folder denylist requires review before this mount can be accessed."
 	case "boundary_violation":
 		return "The target is outside the token boundary."
 	case "readonly_mount":
@@ -420,6 +424,10 @@ func safeErrorMessage(code string) string {
 
 func stableErrorCode(err error) (string, bool) {
 	switch {
+	case errors.Is(err, access.ErrFolderDenied):
+		return "folder_denied", false
+	case errors.Is(err, access.ErrFolderDenylistReviewRequired):
+		return "folder_denylist_review_required", false
 	case errors.Is(err, access.ErrBoundaryViolation):
 		return "boundary_violation", false
 	case errors.Is(err, access.ErrReadonlyMount):

@@ -43,7 +43,7 @@ Inspector 应选择 Modern transport，先完成 `initialize`，再通过 `tools
 ## 工具目录（24 个）
 
 完整目录由 `internal/mcpapi/catalog.go` 运行时生成。scope 只决定工具是否出现在
-`tools/list`，每次调用都会按工具需要重新检查账号、空间 ACL、目录边界和挂载状态；传输
+`tools/list`，每次调用都会按工具需要重新检查账号、空间 ACL、空间授权、文件夹黑名单和挂载状态；传输
 和高风险对象操作还会校验对象指纹。
 
 | 工具 | scope | 高风险确认 |

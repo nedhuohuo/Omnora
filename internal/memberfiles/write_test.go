@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"omnora/internal/access"
+	"omnora/internal/aitoken"
 	"omnora/internal/catalog"
 	"omnora/internal/domain"
 	"omnora/internal/files"
@@ -244,5 +245,102 @@ func TestListTrashAllowsReadOnlyManagedMount(t *testing.T) {
 	}
 	if _, err := s.Trash(context.Background(), f.session(), f.locator("small.txt")); !errors.Is(err, access.ErrReadonlyMount) {
 		t.Fatalf("Trash(read-only) error = %v, want readonly", err)
+	}
+}
+
+func TestSpaceGrantTrashFiltersDeniedPathsAndBlocksRecursivePurgeRestore(t *testing.T) {
+	f := newReadFixture(t)
+	ctx := context.Background()
+	privateDir := filepath.Join(f.root, "private")
+	if err := os.MkdirAll(privateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(private) error = %v", err)
+	}
+	writeReadFile(t, filepath.Join(privateDir, "hidden.txt"), "hidden")
+	writeReadFile(t, filepath.Join(f.root, "visible.txt"), "visible")
+	s := f.service()
+	hidden, err := s.Trash(ctx, f.session(), f.locator("private/hidden.txt"))
+	if err != nil {
+		t.Fatalf("Trash(hidden) error = %v", err)
+	}
+	visible, err := s.Trash(ctx, f.session(), f.locator("visible.txt"))
+	if err != nil {
+		t.Fatalf("Trash(visible) error = %v", err)
+	}
+
+	subject := f.spaceGrantToken(t, []aitoken.SpaceGrant{{
+		SpaceID:    f.spaceID,
+		Permission: domain.SpacePermissionEditor,
+		FolderDenylist: []aitoken.FolderDeny{{
+			MountID:             f.mountID,
+			RelativePath:        "private",
+			IdentityFingerprint: memberfilesDirectoryFingerprint(t, privateDir),
+		}},
+	}}, aitoken.ScopeTrashRead, aitoken.ScopeFilesRestore, aitoken.ScopeFilesPurge)
+
+	listed, err := s.ListTrash(ctx, subject, f.locator("."))
+	if err != nil {
+		t.Fatalf("ListTrash(space grant) error = %v", err)
+	}
+	if listed.TotalCount != 1 || len(listed.Items) != 1 || listed.Items[0].ID != visible.TrashID {
+		t.Fatalf("ListTrash(space grant) = %#v, want only visible trash item", listed)
+	}
+	for _, item := range listed.Items {
+		if strings.Contains(item.OriginalPath, "private") || strings.Contains(item.Name, "hidden") {
+			t.Fatalf("ListTrash leaked denied original path: %#v", item)
+		}
+	}
+	if _, err := s.RestoreTrash(ctx, subject, f.locator("."), hidden.TrashID); !errors.Is(err, access.ErrFolderDenied) {
+		t.Fatalf("RestoreTrash(denied) error = %v, want folder denied", err)
+	}
+	if _, err := s.PurgeTrash(ctx, subject, f.locator("."), hidden.TrashID); !errors.Is(err, access.ErrFolderDenied) {
+		t.Fatalf("PurgeTrash(denied) error = %v, want folder denied", err)
+	}
+	if _, err := s.EmptyTrash(ctx, subject, f.locator(".")); !errors.Is(err, access.ErrFolderDenied) {
+		t.Fatalf("EmptyTrash(with deny subtree) error = %v, want folder denied", err)
+	}
+	if _, err := s.RestoreTrash(ctx, subject, f.locator("."), visible.TrashID); err != nil {
+		t.Fatalf("RestoreTrash(visible) error = %v", err)
+	}
+}
+
+func TestSpaceGrantPermanentDeleteRejectsAncestorOfDeniedDirectory(t *testing.T) {
+	f := newReadFixture(t)
+	ctx := context.Background()
+	deniedDir := filepath.Join(f.root, "tree", "denied")
+	if err := os.MkdirAll(deniedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(denied) error = %v", err)
+	}
+	writeReadFile(t, filepath.Join(deniedDir, "keep.txt"), "keep")
+	subject := f.spaceGrantToken(t, []aitoken.SpaceGrant{{
+		SpaceID:    f.spaceID,
+		Permission: domain.SpacePermissionEditor,
+		FolderDenylist: []aitoken.FolderDeny{{
+			MountID:             f.mountID,
+			RelativePath:        "tree/denied",
+			IdentityFingerprint: memberfilesDirectoryFingerprint(t, deniedDir),
+		}},
+	}}, aitoken.ScopeFilesPurge)
+
+	if _, err := f.service().DeletePermanently(ctx, subject, f.locator("tree")); !errors.Is(err, access.ErrFolderDenied) {
+		t.Fatalf("DeletePermanently(deny ancestor) error = %v, want folder denied", err)
+	}
+	if _, err := os.Stat(filepath.Join(deniedDir, "keep.txt")); err != nil {
+		t.Fatalf("denied descendant changed after rejected delete: %v", err)
+	}
+}
+
+func TestSpaceGrantWithoutDenyCanEmptyTrashAtMountRoot(t *testing.T) {
+	f := newReadFixture(t)
+	ctx := context.Background()
+	writeReadFile(t, filepath.Join(f.root, "purge-me.txt"), "purge")
+	if _, err := f.service().Trash(ctx, f.session(), f.locator("purge-me.txt")); err != nil {
+		t.Fatalf("Trash() error = %v", err)
+	}
+	subject := f.spaceGrantToken(t, []aitoken.SpaceGrant{{
+		SpaceID: f.spaceID, Permission: domain.SpacePermissionEditor,
+	}}, aitoken.ScopeFilesPurge)
+	result, err := f.service().EmptyTrash(ctx, subject, f.locator("."))
+	if err != nil || result.AffectedCount != 1 {
+		t.Fatalf("EmptyTrash(space grant root) = %#v, error = %v", result, err)
 	}
 }

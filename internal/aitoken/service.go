@@ -6,9 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
+
+	"omnora/internal/domain"
 )
 
 const timestampLayout = time.RFC3339Nano
@@ -155,6 +160,7 @@ WHERE key = 'credential_generation'
 		AccountID:            accountID,
 		Name:                 name,
 		Scopes:               scopes,
+		AuthorizationModel:   AuthorizationModelLegacyBoundary,
 		Boundaries:           boundaries,
 		CredentialGeneration: credentialGeneration,
 		CreatedAt:            now,
@@ -168,9 +174,9 @@ WHERE key = 'credential_generation'
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-	INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, credential_generation, created_at, expires_at, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, token.ID, token.PublicID, token.SecretHash, token.AccountID, token.Name, scopeJSON, token.CredentialGeneration, formatTime(token.CreatedAt), formatTokenExpiry(token.ExpiresAt), formatTime(now))
+		INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, authorization_model, credential_generation, created_at, expires_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, token.ID, token.PublicID, token.SecretHash, token.AccountID, token.Name, scopeJSON, token.AuthorizationModel, token.CredentialGeneration, formatTime(token.CreatedAt), formatTokenExpiry(token.ExpiresAt), formatTime(now))
 	if err != nil {
 		return IssuedToken{}, err
 	}
@@ -197,6 +203,446 @@ VALUES (?, ?, ?, ?)
 		Secret:      secret,
 		BearerToken: publicID + "." + secret,
 	}, nil
+}
+
+func (s *Service) CreateSpaceGrant(ctx context.Context, req CreateSpaceGrantRequest) (IssuedToken, error) {
+	return s.CreateSpaceGrantSecure(ctx, req, nil)
+}
+
+// VerifySpaceGrantDirectories resolves and fingerprints denylisted directories
+// on the server. API callers submit paths only; the returned grants contain
+// the server-captured identity fingerprints required by CreateSpaceGrantSecure.
+func (s *Service) VerifySpaceGrantDirectories(ctx context.Context, grants []SpaceGrant) ([]SpaceGrant, error) {
+	normalized, err := normalizeSpaceGrants(grants)
+	if err != nil {
+		return nil, err
+	}
+	verified := make([]SpaceGrant, len(normalized))
+	roots := make(map[spaceMountKey]string)
+	for index, grant := range normalized {
+		verified[index] = grant
+		verified[index].FolderDenylist = append([]FolderDeny(nil), grant.FolderDenylist...)
+		for denyIndex, deny := range grant.FolderDenylist {
+			key := spaceMountKey{spaceID: grant.SpaceID, mountID: deny.MountID}
+			rootPath, exists := roots[key]
+			if !exists {
+				if err := s.db.QueryRowContext(ctx, `
+SELECT root_path FROM mounts WHERE id = ? AND space_id = ? AND status = 'active'
+				`, deny.MountID, grant.SpaceID).Scan(&rootPath); err != nil {
+					if errors.Is(err, sql.ErrNoRows) {
+						return nil, ErrInvalidInput
+					}
+					return nil, err
+				}
+				roots[key] = strings.TrimSpace(rootPath)
+			}
+			fingerprint, err := captureDenyDirectoryFingerprint(rootPath, deny.RelativePath)
+			if err != nil {
+				return nil, ErrInvalidInput
+			}
+			verified[index].FolderDenylist[denyIndex].IdentityFingerprint = fingerprint
+		}
+	}
+	return verified, nil
+}
+
+func (s *Service) CreateSpaceGrantSecure(ctx context.Context, req CreateSpaceGrantRequest, auditWriter TokenAuditWriter) (IssuedToken, error) {
+	if s == nil || s.db == nil {
+		return IssuedToken{}, ErrInvalidInput
+	}
+	accountID := strings.TrimSpace(req.AccountID)
+	name := strings.TrimSpace(req.Name)
+	now := s.now().UTC().Round(0)
+	if accountID == "" || name == "" || (!req.ExpiresAt.IsZero() && !now.Before(req.ExpiresAt)) {
+		return IssuedToken{}, ErrInvalidInput
+	}
+	scopes, err := ValidateScopes(req.Scopes)
+	if err != nil {
+		return IssuedToken{}, err
+	}
+	grants, err := normalizeSpaceGrants(req.SpaceGrants)
+	if err != nil {
+		return IssuedToken{}, err
+	}
+	grants, verifiedMountRoots, err := s.verifySpaceGrantDirectories(ctx, grants)
+	if err != nil {
+		return IssuedToken{}, err
+	}
+	scopeJSON, err := marshalScopes(scopes)
+	if err != nil {
+		return IssuedToken{}, err
+	}
+	publicID, err := newPrefixedID("ait")
+	if err != nil {
+		return IssuedToken{}, err
+	}
+	secret, err := newSecret()
+	if err != nil {
+		return IssuedToken{}, err
+	}
+	tokenID, err := newPrefixedID("aitok")
+	if err != nil {
+		return IssuedToken{}, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return IssuedToken{}, err
+	}
+	defer tx.Rollback()
+	var credentialGeneration int64
+	if err := tx.QueryRowContext(ctx, `
+SELECT CAST(ss.value AS INTEGER)
+FROM accounts a
+CROSS JOIN system_state ss
+WHERE a.id = ? AND a.status = 'active' AND ss.key = 'credential_generation'
+`, accountID).Scan(&credentialGeneration); errors.Is(err, sql.ErrNoRows) {
+		return IssuedToken{}, ErrInvalidInput
+	} else if err != nil {
+		return IssuedToken{}, err
+	}
+	grants, err = validateSpaceGrantAccess(ctx, tx, accountID, grants, verifiedMountRoots)
+	if err != nil {
+		return IssuedToken{}, err
+	}
+	token := Token{
+		ID:                   tokenID,
+		PublicID:             publicID,
+		SecretHash:           hashSecret(secret),
+		AccountID:            accountID,
+		Name:                 name,
+		Scopes:               scopes,
+		AuthorizationModel:   AuthorizationModelSpaceGrant,
+		SpaceGrants:          grants,
+		CredentialGeneration: credentialGeneration,
+		CreatedAt:            now,
+		ExpiresAt:            req.ExpiresAt.UTC().Round(0),
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO ai_tokens(id, public_id, secret_hash, account_id, name, scopes, authorization_model, credential_generation, created_at, expires_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, token.ID, token.PublicID, token.SecretHash, token.AccountID, token.Name, scopeJSON, token.AuthorizationModel, token.CredentialGeneration, formatTime(token.CreatedAt), formatTokenExpiry(token.ExpiresAt), formatTime(now)); err != nil {
+		return IssuedToken{}, err
+	}
+	if err := insertSpaceGrants(ctx, tx, token.ID, grants, now); err != nil {
+		return IssuedToken{}, err
+	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx, token); err != nil {
+			return IssuedToken{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return IssuedToken{}, err
+	}
+	return IssuedToken{Token: token, Secret: secret, BearerToken: publicID + "." + secret}, nil
+}
+
+func (s *Service) UpdateSecure(ctx context.Context, req UpdateRequest, auditWriter TokenAuditWriter) (Token, error) {
+	if s == nil || s.db == nil {
+		return Token{}, ErrInvalidInput
+	}
+	accountID := strings.TrimSpace(req.AccountID)
+	tokenID := strings.TrimSpace(req.TokenID)
+	name := strings.TrimSpace(req.Name)
+	now := s.now().UTC().Round(0)
+	if accountID == "" || tokenID == "" || name == "" || (!req.ExpiresAt.IsZero() && !now.Before(req.ExpiresAt)) {
+		return Token{}, ErrInvalidInput
+	}
+	scopes, err := ValidateScopes(req.Scopes)
+	if err != nil {
+		return Token{}, err
+	}
+	grants, err := normalizeSpaceGrants(req.SpaceGrants)
+	if err != nil {
+		return Token{}, err
+	}
+	grants, verifiedMountRoots, err := s.verifySpaceGrantDirectories(ctx, grants)
+	if err != nil {
+		return Token{}, err
+	}
+	scopeJSON, err := marshalScopes(scopes)
+	if err != nil {
+		return Token{}, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Token{}, err
+	}
+	defer tx.Rollback()
+	var token Token
+	var createdAt string
+	var lastUsedAt sql.NullString
+	err = tx.QueryRowContext(ctx, `
+SELECT t.public_id, t.secret_hash, t.credential_generation, t.created_at, t.last_used_at
+FROM ai_tokens t
+JOIN accounts a ON a.id = t.account_id
+WHERE t.id = ? AND t.account_id = ? AND t.revoked_at IS NULL AND a.status = 'active'
+  AND t.credential_generation = CAST((SELECT value FROM system_state WHERE key = 'credential_generation') AS INTEGER)
+`, tokenID, accountID).Scan(&token.PublicID, &token.SecretHash, &token.CredentialGeneration, &createdAt, &lastUsedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Token{}, ErrInvalidInput
+	}
+	if err != nil {
+		return Token{}, err
+	}
+	grants, err = validateSpaceGrantAccess(ctx, tx, accountID, grants, verifiedMountRoots)
+	if err != nil {
+		return Token{}, err
+	}
+	token.ID = tokenID
+	token.AccountID = accountID
+	token.Name = name
+	token.Scopes = scopes
+	token.AuthorizationModel = AuthorizationModelSpaceGrant
+	token.SpaceGrants = grants
+	token.ExpiresAt = req.ExpiresAt.UTC().Round(0)
+	token.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return Token{}, err
+	}
+	if lastUsedAt.Valid {
+		token.LastUsedAt, err = parseTime(lastUsedAt.String)
+		if err != nil {
+			return Token{}, err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE ai_tokens
+SET name = ?, scopes = ?, authorization_model = ?, expires_at = ?, updated_at = ?
+WHERE id = ? AND account_id = ? AND revoked_at IS NULL
+`, token.Name, scopeJSON, token.AuthorizationModel, formatTokenExpiry(token.ExpiresAt), formatTime(now), token.ID, token.AccountID)
+	if err != nil {
+		return Token{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Token{}, err
+	} else if affected != 1 {
+		return Token{}, ErrInvalidInput
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ai_token_folder_denies WHERE token_id = ?`, token.ID); err != nil {
+		return Token{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ai_token_space_grants WHERE token_id = ?`, token.ID); err != nil {
+		return Token{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ai_token_boundaries WHERE token_id = ?`, token.ID); err != nil {
+		return Token{}, err
+	}
+	if err := insertSpaceGrants(ctx, tx, token.ID, grants, now); err != nil {
+		return Token{}, err
+	}
+	if auditWriter != nil {
+		if err := auditWriter(ctx, tx, token); err != nil {
+			return Token{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Token{}, err
+	}
+	return token, nil
+}
+
+type spaceMountKey struct {
+	spaceID string
+	mountID string
+}
+
+func (s *Service) verifySpaceGrantDirectories(ctx context.Context, grants []SpaceGrant) ([]SpaceGrant, map[spaceMountKey]string, error) {
+	verified := make([]SpaceGrant, len(grants))
+	verifiedMountRoots := make(map[spaceMountKey]string)
+	for index, grant := range grants {
+		verified[index] = grant
+		verified[index].FolderDenylist = append([]FolderDeny(nil), grant.FolderDenylist...)
+		for denyIndex, deny := range grant.FolderDenylist {
+			key := spaceMountKey{spaceID: grant.SpaceID, mountID: deny.MountID}
+			rootPath, exists := verifiedMountRoots[key]
+			if !exists {
+				err := s.db.QueryRowContext(ctx, `
+SELECT root_path
+FROM mounts
+WHERE id = ? AND space_id = ? AND status = 'active'
+				`, deny.MountID, grant.SpaceID).Scan(&rootPath)
+				if errors.Is(err, sql.ErrNoRows) {
+					return nil, nil, ErrInvalidInput
+				}
+				if err != nil {
+					return nil, nil, err
+				}
+				rootPath = strings.TrimSpace(rootPath)
+				verifiedMountRoots[key] = rootPath
+			}
+			fingerprint, err := captureDenyDirectoryFingerprint(rootPath, deny.RelativePath)
+			if err != nil || strings.TrimSpace(deny.IdentityFingerprint) == "" || strings.TrimSpace(deny.IdentityFingerprint) != fingerprint {
+				return nil, nil, ErrInvalidInput
+			}
+			verified[index].FolderDenylist[denyIndex].IdentityFingerprint = fingerprint
+		}
+	}
+	return verified, verifiedMountRoots, nil
+}
+
+func validateSpaceGrantAccess(ctx context.Context, tx *sql.Tx, accountID string, grants []SpaceGrant, verifiedMountRoots map[spaceMountKey]string) ([]SpaceGrant, error) {
+	validated := make([]SpaceGrant, len(grants))
+	validatedMounts := make(map[spaceMountKey]struct{}, len(verifiedMountRoots))
+	for index, grant := range grants {
+		validated[index] = grant
+		validated[index].FolderDenylist = append([]FolderDeny(nil), grant.FolderDenylist...)
+		var accountPermission domain.SpacePermission
+		err := tx.QueryRowContext(ctx, `
+SELECT sm.permission
+FROM space_members sm
+JOIN spaces sp ON sp.id = sm.space_id
+WHERE sm.account_id = ? AND sm.space_id = ? AND sp.status = 'active'
+	`, accountID, grant.SpaceID).Scan(&accountPermission)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrInvalidInput
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !grantPermissionAllows(accountPermission, grant.Permission) {
+			return nil, ErrInvalidInput
+		}
+		for _, deny := range grant.FolderDenylist {
+			key := spaceMountKey{spaceID: grant.SpaceID, mountID: deny.MountID}
+			if _, alreadyValidated := validatedMounts[key]; alreadyValidated {
+				continue
+			}
+			var rootPath string
+			err := tx.QueryRowContext(ctx, `
+SELECT root_path
+FROM mounts
+WHERE id = ? AND space_id = ? AND status = 'active'
+			`, deny.MountID, grant.SpaceID).Scan(&rootPath)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, ErrInvalidInput
+			}
+			if err != nil {
+				return nil, err
+			}
+			verifiedRoot, exists := verifiedMountRoots[key]
+			if !exists || strings.TrimSpace(rootPath) != verifiedRoot {
+				return nil, ErrInvalidInput
+			}
+			validatedMounts[key] = struct{}{}
+		}
+	}
+	return validated, nil
+}
+
+func captureDenyDirectoryFingerprint(rootPath, relativePath string) (string, error) {
+	root := filepath.Clean(strings.TrimSpace(rootPath))
+	if root == "." || !filepath.IsAbs(root) {
+		return "", ErrInvalidInput
+	}
+	relative := filepath.FromSlash(strings.TrimSpace(relativePath))
+	if relative == "" || relative == "." || filepath.IsAbs(relative) {
+		return "", ErrInvalidInput
+	}
+	target := filepath.Clean(filepath.Join(root, relative))
+	within, err := filepath.Rel(root, target)
+	if err != nil || filepath.IsAbs(within) || within == ".." || strings.HasPrefix(within, ".."+string(os.PathSeparator)) {
+		return "", ErrInvalidInput
+	}
+	initialInfo, err := lstatDenyDirectoryPath(root, filepath.ToSlash(within))
+	if err != nil {
+		return "", err
+	}
+	initialFingerprint, err := fingerprintFromFileInfo(initialInfo)
+	if err != nil {
+		return "", err
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", err
+	}
+	canonicalRelative, err := filepath.Rel(canonicalRoot, canonicalTarget)
+	if err != nil || filepath.IsAbs(canonicalRelative) || canonicalRelative == ".." || strings.HasPrefix(canonicalRelative, ".."+string(os.PathSeparator)) {
+		return "", ErrInvalidInput
+	}
+	expectedTarget := filepath.Clean(filepath.Join(canonicalRoot, filepath.FromSlash(within)))
+	if canonicalTarget != expectedTarget {
+		return "", ErrInvalidInput
+	}
+	finalInfo, err := lstatDenyDirectoryPath(root, filepath.ToSlash(within))
+	if err != nil {
+		return "", err
+	}
+	finalFingerprint, err := fingerprintFromFileInfo(finalInfo)
+	if err != nil || finalFingerprint != initialFingerprint {
+		return "", ErrInvalidInput
+	}
+	return finalFingerprint, nil
+}
+
+func fingerprintFromFileInfo(info os.FileInfo) (string, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat == nil || stat.Dev == 0 || stat.Ino == 0 {
+		return "", ErrInvalidInput
+	}
+	return fmt.Sprintf("dev:%d:ino:%d", uint64(stat.Dev), uint64(stat.Ino)), nil
+}
+
+func lstatDenyDirectoryPath(root, relative string) (os.FileInfo, error) {
+	current := root
+	info, err := os.Lstat(current)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, ErrInvalidInput
+	}
+	for _, component := range strings.Split(filepath.FromSlash(relative), string(os.PathSeparator)) {
+		if component == "" {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err = os.Lstat(current)
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return nil, ErrInvalidInput
+		}
+	}
+	return info, nil
+}
+
+func grantPermissionAllows(actual, requested domain.SpacePermission) bool {
+	switch requested {
+	case domain.SpacePermissionViewer:
+		return actual == domain.SpacePermissionViewer || actual == domain.SpacePermissionEditor || actual == domain.SpacePermissionManager
+	case domain.SpacePermissionEditor:
+		return actual == domain.SpacePermissionEditor || actual == domain.SpacePermissionManager
+	default:
+		return false
+	}
+}
+
+func insertSpaceGrants(ctx context.Context, tx *sql.Tx, tokenID string, grants []SpaceGrant, now time.Time) error {
+	for _, grant := range grants {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO ai_token_space_grants(token_id, space_id, permission, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?)
+`, tokenID, grant.SpaceID, grant.Permission, formatTime(now), formatTime(now)); err != nil {
+			return err
+		}
+		for _, deny := range grant.FolderDenylist {
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO ai_token_folder_denies(token_id, space_id, mount_id, relative_path, identity_fingerprint, status, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, tokenID, grant.SpaceID, deny.MountID, deny.RelativePath, deny.IdentityFingerprint, deny.Status, formatTime(now), formatTime(now)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Service) VerifyBearer(ctx context.Context, bearer string) (Principal, error) {
@@ -230,13 +676,15 @@ WHERE id = ? AND revoked_at IS NULL
 	}
 
 	return Principal{
-		AccountID:  token.AccountID,
-		TokenID:    token.ID,
-		PublicID:   token.PublicID,
-		Scopes:     token.Scopes,
-		Boundaries: token.Boundaries,
-		ExpiresAt:  token.ExpiresAt,
-		LastUsedAt: now,
+		AccountID:          token.AccountID,
+		TokenID:            token.ID,
+		PublicID:           token.PublicID,
+		Scopes:             token.Scopes,
+		AuthorizationModel: token.AuthorizationModel,
+		Boundaries:         token.Boundaries,
+		SpaceGrants:        token.SpaceGrants,
+		ExpiresAt:          token.ExpiresAt,
+		LastUsedAt:         now,
 	}, nil
 }
 
@@ -256,13 +704,15 @@ func (s *Service) RefreshPrincipal(ctx context.Context, tokenID string) (Princip
 		return Principal{}, ErrInvalidToken
 	}
 	return Principal{
-		AccountID:  token.AccountID,
-		TokenID:    token.ID,
-		PublicID:   token.PublicID,
-		Scopes:     token.Scopes,
-		Boundaries: token.Boundaries,
-		ExpiresAt:  token.ExpiresAt,
-		LastUsedAt: token.LastUsedAt,
+		AccountID:          token.AccountID,
+		TokenID:            token.ID,
+		PublicID:           token.PublicID,
+		Scopes:             token.Scopes,
+		AuthorizationModel: token.AuthorizationModel,
+		Boundaries:         token.Boundaries,
+		SpaceGrants:        token.SpaceGrants,
+		ExpiresAt:          token.ExpiresAt,
+		LastUsedAt:         token.LastUsedAt,
 	}, nil
 }
 
@@ -305,12 +755,28 @@ func (s *Service) loadToken(ctx context.Context, publicID string) (loadedToken, 
 	if s == nil || s.db == nil {
 		return loadedToken{}, ErrInvalidToken
 	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return loadedToken{}, err
+	}
+	defer tx.Rollback()
+	token, err := s.loadTokenTx(ctx, tx, publicID)
+	if err != nil {
+		return loadedToken{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return loadedToken{}, err
+	}
+	return token, nil
+}
+
+func (s *Service) loadTokenTx(ctx context.Context, tx *sql.Tx, publicID string) (loadedToken, error) {
 	var token loadedToken
 	var scopesJSON, createdAt, expiresAt string
 	var lastUsedAt sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-	SELECT t.id, t.public_id, t.secret_hash, t.account_id, t.name, t.scopes,
-	       t.credential_generation, t.created_at, t.expires_at, t.last_used_at, t.revoked_at
+	err := tx.QueryRowContext(ctx, `
+		SELECT t.id, t.public_id, t.secret_hash, t.account_id, t.name, t.scopes, t.authorization_model,
+		       t.credential_generation, t.created_at, t.expires_at, t.last_used_at, t.revoked_at
 FROM ai_tokens t
 JOIN accounts a ON a.id = t.account_id
 WHERE t.public_id = ?
@@ -323,6 +789,7 @@ WHERE t.public_id = ?
 		&token.AccountID,
 		&token.Name,
 		&scopesJSON,
+		&token.AuthorizationModel,
 		&token.CredentialGeneration,
 		&createdAt,
 		&expiresAt,
@@ -357,8 +824,7 @@ WHERE t.public_id = ?
 			return loadedToken{}, err
 		}
 	}
-	token.Boundaries, err = s.loadBoundaries(ctx, token.ID)
-	if err != nil {
+	if err := s.loadAuthorizationTx(ctx, tx, &token); err != nil {
 		return loadedToken{}, err
 	}
 	return token, nil
@@ -368,12 +834,28 @@ func (s *Service) loadTokenByID(ctx context.Context, tokenID string) (loadedToke
 	if s == nil || s.db == nil {
 		return loadedToken{}, ErrInvalidToken
 	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return loadedToken{}, err
+	}
+	defer tx.Rollback()
+	token, err := s.loadTokenByIDTx(ctx, tx, tokenID)
+	if err != nil {
+		return loadedToken{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return loadedToken{}, err
+	}
+	return token, nil
+}
+
+func (s *Service) loadTokenByIDTx(ctx context.Context, tx *sql.Tx, tokenID string) (loadedToken, error) {
 	var token loadedToken
 	var scopesJSON, createdAt, expiresAt string
 	var lastUsedAt sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-	SELECT t.id, t.public_id, t.secret_hash, t.account_id, t.name, t.scopes,
-	       t.credential_generation, t.created_at, t.expires_at, t.last_used_at, t.revoked_at
+	err := tx.QueryRowContext(ctx, `
+		SELECT t.id, t.public_id, t.secret_hash, t.account_id, t.name, t.scopes, t.authorization_model,
+		       t.credential_generation, t.created_at, t.expires_at, t.last_used_at, t.revoked_at
 FROM ai_tokens t
 JOIN accounts a ON a.id = t.account_id
 WHERE t.id = ?
@@ -386,6 +868,7 @@ WHERE t.id = ?
 		&token.AccountID,
 		&token.Name,
 		&scopesJSON,
+		&token.AuthorizationModel,
 		&token.CredentialGeneration,
 		&createdAt,
 		&expiresAt,
@@ -419,15 +902,14 @@ WHERE t.id = ?
 			return loadedToken{}, err
 		}
 	}
-	token.Boundaries, err = s.loadBoundaries(ctx, token.ID)
-	if err != nil {
+	if err := s.loadAuthorizationTx(ctx, tx, &token); err != nil {
 		return loadedToken{}, err
 	}
 	return token, nil
 }
 
-func (s *Service) loadBoundaries(ctx context.Context, tokenID string) ([]DirectoryBoundary, error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *Service) loadBoundariesTx(ctx context.Context, tx *sql.Tx, tokenID string) ([]DirectoryBoundary, error) {
+	rows, err := tx.QueryContext(ctx, `
 SELECT space_id, mount_id, relative_path
 FROM ai_token_boundaries
 WHERE token_id = ?
@@ -450,6 +932,85 @@ ORDER BY space_id, mount_id, relative_path
 		return nil, err
 	}
 	return boundaries, nil
+}
+
+func (s *Service) loadAuthorizationTx(ctx context.Context, tx *sql.Tx, token *loadedToken) error {
+	switch token.AuthorizationModel {
+	case AuthorizationModelLegacyBoundary:
+		boundaries, err := s.loadBoundariesTx(ctx, tx, token.ID)
+		if err != nil {
+			return err
+		}
+		token.Boundaries = boundaries
+		token.SpaceGrants = nil
+		return nil
+	case AuthorizationModelSpaceGrant:
+		grants, err := s.loadSpaceGrantsTx(ctx, tx, token.ID)
+		if err != nil || len(grants) == 0 {
+			return ErrInvalidToken
+		}
+		token.Boundaries = nil
+		token.SpaceGrants = grants
+		return nil
+	default:
+		return ErrInvalidToken
+	}
+}
+
+func (s *Service) loadSpaceGrantsTx(ctx context.Context, tx *sql.Tx, tokenID string) ([]SpaceGrant, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT g.space_id, g.permission,
+       d.mount_id, d.relative_path, d.identity_fingerprint, d.status
+FROM ai_token_space_grants g
+LEFT JOIN ai_token_folder_denies d
+  ON d.token_id = g.token_id AND d.space_id = g.space_id
+WHERE g.token_id = ?
+ORDER BY g.space_id, d.mount_id, d.relative_path
+`, tokenID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var grants []SpaceGrant
+	grantIndex := make(map[string]int)
+	for rows.Next() {
+		var spaceID string
+		var permission domain.SpacePermission
+		var mountID, relativePath, identityFingerprint, status sql.NullString
+		if err := rows.Scan(&spaceID, &permission, &mountID, &relativePath, &identityFingerprint, &status); err != nil {
+			return nil, err
+		}
+		index, exists := grantIndex[spaceID]
+		if !exists {
+			index = len(grants)
+			grantIndex[spaceID] = index
+			grants = append(grants, SpaceGrant{SpaceID: spaceID, Permission: permission})
+		}
+		if mountID.Valid {
+			grants[index].FolderDenylist = append(grants[index].FolderDenylist, FolderDeny{
+				MountID:             mountID.String,
+				RelativePath:        relativePath.String,
+				IdentityFingerprint: identityFingerprint.String,
+				Status:              FolderDenyStatus(status.String),
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	normalized, err := normalizeSpaceGrants(grants)
+	if err != nil {
+		return nil, ErrInvalidToken
+	}
+	for _, grant := range normalized {
+		for _, deny := range grant.FolderDenylist {
+			if strings.TrimSpace(deny.IdentityFingerprint) == "" {
+				return nil, ErrInvalidToken
+			}
+		}
+	}
+	return normalized, nil
 }
 
 type loadedToken struct {

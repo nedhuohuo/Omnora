@@ -151,6 +151,10 @@ func (s *Server) apiRoutes() {
 	s.mux.Handle("POST /api/v1/account/totp/setup", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.setupTOTP)))
 	s.mux.Handle("POST /api/v1/account/totp/confirm", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.confirmTOTP)))
 	s.mux.Handle("GET /api/v1/spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listSpaces)))
+	s.mux.Handle("POST /api/v1/team-spaces", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createTeamSpace)))
+	s.mux.Handle("GET /api/v1/team-spaces/{spaceId}/members", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listTeamSpaceMembers)))
+	s.mux.Handle("PUT /api/v1/team-spaces/{spaceId}/members/{accountRef}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.putTeamSpaceMember)))
+	s.mux.Handle("DELETE /api/v1/team-spaces/{spaceId}/members/{accountRef}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.deleteTeamSpaceMember)))
 	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listMounts)))
 	s.mux.Handle("GET /api/v1/spaces/{spaceId}/mounts/{mountId}/children", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listChildren)))
 	s.mux.Handle("POST /api/v1/spaces/{spaceId}/mounts/{mountId}/directories", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createDirectory)))
@@ -201,6 +205,7 @@ func (s *Server) apiRoutes() {
 	s.registerOpenAPIRoutes()
 	s.mux.Handle("GET /api/v1/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.listAITokens)))
 	s.mux.Handle("POST /api/v1/ai-tokens", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createAIToken)))
+	s.mux.Handle("PATCH /api/v1/ai-tokens/{tokenId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.updateAIToken)))
 	s.mux.Handle("DELETE /api/v1/ai-tokens/{tokenId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.revokeAIToken)))
 	s.mux.Handle("POST /api/v1/uploads", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.createUpload)))
 	s.mux.Handle("GET /api/v1/uploads/{uploadId}", s.gate(domain.RouteGroupREST, http.HandlerFunc(s.getUpload)))
@@ -641,6 +646,10 @@ func (s *Server) listSpaces(w http.ResponseWriter, r *http.Request) {
 	session, err := s.requireSession(r)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	if err := s.ensurePersonalStorage(r.Context(), session.AccountID); err != nil && !isMissingPersonalSpace(err) {
+		writeDBError(w, r, err)
 		return
 	}
 	spaces, err := s.memberFiles.ListSpaces(r.Context(), access.Subject{AccountID: session.AccountID})
@@ -1401,7 +1410,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
 `, mountID, req.SpaceID, mount.DisplayName, mount.RootPath, mount.Kind, mount.Mode, indexEnabled, string(identityJSON))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			httpx.WriteError(w, r, http.StatusConflict, "mount_conflict", "mount display name already exists in this space")
+			httpx.WriteError(w, r, http.StatusConflict, "mount_conflict", "mount display name or root directory is already registered")
 			return
 		}
 		writeDBError(w, r, err)
@@ -1508,6 +1517,114 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type aiTokenFolderDenyRequest struct {
+	MountID      string `json:"mountId"`
+	MountIDAlt   string `json:"mount_id"`
+	Path         string `json:"path"`
+	RelativePath string `json:"relativePath"`
+}
+
+type aiTokenSpaceGrantRequest struct {
+	SpaceID        string                     `json:"spaceId"`
+	SpaceIDAlt     string                     `json:"space_id"`
+	Permission     string                     `json:"permission"`
+	FolderDenylist []aiTokenFolderDenyRequest `json:"folderDenylist"`
+	FolderDenies   []aiTokenFolderDenyRequest `json:"folderDenies"`
+}
+
+func (s *Server) listAITokenSpaceGrants(ctx context.Context, tokenID string) ([]map[string]any, error) {
+	rows, err := s.sqlDB().QueryContext(ctx, `
+SELECT g.space_id, COALESCE(sp.name, ''), g.permission,
+       d.mount_id, COALESCE(m.display_name, ''), d.relative_path, d.status
+FROM ai_token_space_grants g
+LEFT JOIN spaces sp ON sp.id = g.space_id
+LEFT JOIN ai_token_folder_denies d ON d.token_id = g.token_id AND d.space_id = g.space_id
+LEFT JOIN mounts m ON m.id = d.mount_id AND m.space_id = d.space_id
+WHERE g.token_id = ?
+ORDER BY g.space_id, d.mount_id, d.relative_path
+`, tokenID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type grantRow struct {
+		spaceID, spaceName, permission           string
+		mountID, mountName, relativePath, status sql.NullString
+	}
+	grants := make([]map[string]any, 0)
+	grantIndex := make(map[string]int)
+	for rows.Next() {
+		var row grantRow
+		if err := rows.Scan(&row.spaceID, &row.spaceName, &row.permission, &row.mountID, &row.mountName, &row.relativePath, &row.status); err != nil {
+			return nil, err
+		}
+		index, ok := grantIndex[row.spaceID]
+		if !ok {
+			index = len(grants)
+			grantIndex[row.spaceID] = index
+			grants = append(grants, map[string]any{
+				"spaceId": row.spaceID, "spaceName": row.spaceName, "permission": row.permission,
+				"folderDenylist": []map[string]any{},
+			})
+		}
+		if row.mountID.Valid {
+			denies := grants[index]["folderDenylist"].([]map[string]any)
+			denies = append(denies, map[string]any{
+				"mountId": row.mountID.String, "mountName": row.mountName.String,
+				"path": row.relativePath.String, "status": row.status.String,
+			})
+			grants[index]["folderDenylist"] = denies
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return grants, nil
+}
+
+func parseAITokenSpaceGrants(raw []aiTokenSpaceGrantRequest) ([]aitoken.SpaceGrant, error) {
+	grants := make([]aitoken.SpaceGrant, 0, len(raw))
+	for _, item := range raw {
+		spaceID := item.SpaceID
+		if spaceID == "" {
+			spaceID = item.SpaceIDAlt
+		}
+		denies := item.FolderDenylist
+		if len(denies) == 0 {
+			denies = item.FolderDenies
+		}
+		grant := aitoken.SpaceGrant{SpaceID: spaceID, Permission: domain.SpacePermission(item.Permission)}
+		for _, deny := range denies {
+			mountID := deny.MountID
+			if mountID == "" {
+				mountID = deny.MountIDAlt
+			}
+			relativePath := deny.Path
+			if relativePath == "" {
+				relativePath = deny.RelativePath
+			}
+			grant.FolderDenylist = append(grant.FolderDenylist, aitoken.FolderDeny{MountID: mountID, RelativePath: relativePath})
+		}
+		grants = append(grants, grant)
+	}
+	return grants, nil
+}
+
+func parseAITokenExpiry(value, alt string) (time.Time, error) {
+	if value == "" {
+		value = alt
+	}
+	if value == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil || !time.Now().UTC().Before(parsed.UTC()) {
+		return time.Time{}, fmt.Errorf("expiresAt must be a future RFC3339 timestamp")
+	}
+	return parsed, nil
+}
+
 func (s *Server) listAITokens(w http.ResponseWriter, r *http.Request) {
 	session, err := s.requireSession(r)
 	if err != nil {
@@ -1515,7 +1632,7 @@ func (s *Server) listAITokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.sqlDB().QueryContext(r.Context(), `
-SELECT t.id, t.public_id, t.name, t.scopes, t.created_at, t.expires_at,
+SELECT t.id, t.public_id, t.name, t.scopes, t.authorization_model, t.created_at, t.expires_at,
        COALESCE(t.last_used_at, ''), COALESCE(t.revoked_at, ''),
        COALESCE(group_concat(b.space_id || char(31) || COALESCE(sp.name, '') || char(31) || b.mount_id || char(31) || COALESCE(m.display_name, '') || char(31) || b.relative_path, char(30)), '')
 FROM ai_tokens t
@@ -1535,12 +1652,20 @@ LIMIT ?
 
 	items := []map[string]any{}
 	for rows.Next() {
-		var id, publicID, name, scopesJSON, createdAt, expiresAt, lastUsedAt, revokedAt, boundaryList string
-		if err := rows.Scan(&id, &publicID, &name, &scopesJSON, &createdAt, &expiresAt, &lastUsedAt, &revokedAt, &boundaryList); err != nil {
+		var id, publicID, name, scopesJSON, authorizationModel, createdAt, expiresAt, lastUsedAt, revokedAt, boundaryList string
+		if err := rows.Scan(&id, &publicID, &name, &scopesJSON, &authorizationModel, &createdAt, &expiresAt, &lastUsedAt, &revokedAt, &boundaryList); err != nil {
 			writeDBError(w, r, err)
 			return
 		}
-		items = append(items, aiTokenResponse(id, publicID, name, scopesJSON, createdAt, expiresAt, lastUsedAt, revokedAt, parseBoundaryList(boundaryList)))
+		item := aiTokenResponse(id, publicID, name, scopesJSON, createdAt, expiresAt, lastUsedAt, revokedAt, parseBoundaryList(boundaryList))
+		item["authorizationModel"] = authorizationModel
+		grants, err := s.listAITokenSpaceGrants(r.Context(), id)
+		if err != nil {
+			writeDBError(w, r, err)
+			return
+		}
+		item["spaceGrants"] = grants
+		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
 		writeDBError(w, r, err)
@@ -1556,9 +1681,11 @@ func (s *Server) createAIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name       string   `json:"name"`
-		Scopes     []string `json:"scopes"`
-		Boundaries []struct {
+		Name               string                     `json:"name"`
+		Scopes             []string                   `json:"scopes"`
+		AuthorizationModel string                     `json:"authorizationModel"`
+		SpaceGrants        []aiTokenSpaceGrantRequest `json:"spaceGrants"`
+		Boundaries         []struct {
 			SpaceID      string `json:"spaceId"`
 			SpaceIDAlt   string `json:"space_id"`
 			MountID      string `json:"mountId"`
@@ -1572,23 +1699,60 @@ func (s *Server) createAIToken(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.ExpiresAt == "" {
-		req.ExpiresAt = req.ExpiresAtAlt
-	}
-	// An empty expiresAt creates a token that never expires; otherwise it must
-	// be a future RFC3339 timestamp.
-	var expiresAt time.Time
-	if req.ExpiresAt != "" {
-		parsed, parseErr := time.Parse(time.RFC3339, req.ExpiresAt)
-		if parseErr != nil || !time.Now().UTC().Before(parsed.UTC()) {
-			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "expiresAt must be a future RFC3339 timestamp")
-			return
-		}
-		expiresAt = parsed
+	expiresAt, expiryErr := parseAITokenExpiry(req.ExpiresAt, req.ExpiresAtAlt)
+	if expiryErr != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", expiryErr.Error())
+		return
 	}
 	scopes := make([]aitoken.Scope, 0, len(req.Scopes))
 	for _, scope := range req.Scopes {
 		scopes = append(scopes, aitoken.Scope(scope))
+	}
+	model := aitoken.AuthorizationModel(req.AuthorizationModel)
+	if model == "" {
+		if len(req.SpaceGrants) > 0 {
+			model = aitoken.AuthorizationModelSpaceGrant
+		} else {
+			model = aitoken.AuthorizationModelLegacyBoundary
+		}
+	}
+	if model == aitoken.AuthorizationModelSpaceGrant {
+		if len(req.Boundaries) > 0 {
+			httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "space-grant tokens cannot include legacy boundaries")
+			return
+		}
+		grants, parseErr := parseAITokenSpaceGrants(req.SpaceGrants)
+		if parseErr != nil {
+			writeTokenError(w, r, parseErr)
+			return
+		}
+		verified, verifyErr := s.tokens.VerifySpaceGrantDirectories(r.Context(), grants)
+		if verifyErr != nil {
+			writeTokenError(w, r, verifyErr)
+			return
+		}
+		issued, createErr := s.tokens.CreateSpaceGrantSecure(r.Context(), aitoken.CreateSpaceGrantRequest{
+			AccountID: session.AccountID, Name: req.Name, Scopes: scopes, SpaceGrants: verified, ExpiresAt: expiresAt,
+		}, func(ctx context.Context, tx *sql.Tx, token aitoken.Token) error {
+			return s.recordAuditTx(ctx, tx, r, session.AccountID, "ai_token_create", "ai_token", token.ID, "{}")
+		})
+		if createErr != nil {
+			writeTokenError(w, r, createErr)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusCreated, map[string]any{
+			"token":  map[string]any{"id": issued.Token.ID, "publicId": issued.Token.PublicID, "name": issued.Token.Name, "scopes": issued.Token.Scopes, "expiresAt": issued.Token.ExpiresAt, "authorizationModel": issued.Token.AuthorizationModel, "spaceGrants": spaceGrantPayload(issued.Token.SpaceGrants)},
+			"secret": issued.Secret, "bearerToken": issued.BearerToken,
+		})
+		return
+	}
+	if model != aitoken.AuthorizationModelLegacyBoundary {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "authorizationModel is invalid")
+		return
+	}
+	if len(req.SpaceGrants) > 0 {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", "legacy boundary tokens cannot include space grants")
+		return
 	}
 	boundaries := make([]aitoken.DirectoryBoundary, 0, len(req.Boundaries))
 	for _, raw := range req.Boundaries {
@@ -1654,6 +1818,64 @@ func (s *Server) createAIToken(w http.ResponseWriter, r *http.Request) {
 		},
 		"secret":      issued.Secret,
 		"bearerToken": issued.BearerToken,
+	})
+}
+
+func (s *Server) updateAIToken(w http.ResponseWriter, r *http.Request) {
+	session, err := s.requireSession(r)
+	if err != nil {
+		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
+		return
+	}
+	var req struct {
+		Name               string                     `json:"name"`
+		Scopes             []string                   `json:"scopes"`
+		AuthorizationModel string                     `json:"authorizationModel"`
+		ConvertLegacy      bool                       `json:"convertLegacy"`
+		SpaceGrants        []aiTokenSpaceGrantRequest `json:"spaceGrants"`
+		ExpiresAt          string                     `json:"expiresAt"`
+		ExpiresAtAlt       string                     `json:"expires_at"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.AuthorizationModel != string(aitoken.AuthorizationModelSpaceGrant) && !req.ConvertLegacy {
+		httpx.WriteError(w, r, http.StatusConflict, "legacy_boundary_token_requires_conversion", "editing this token requires explicit conversion to account-level space grants")
+		return
+	}
+	expiresAt, expiryErr := parseAITokenExpiry(req.ExpiresAt, req.ExpiresAtAlt)
+	if expiryErr != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", expiryErr.Error())
+		return
+	}
+	scopes := make([]aitoken.Scope, 0, len(req.Scopes))
+	for _, scope := range req.Scopes {
+		scopes = append(scopes, aitoken.Scope(scope))
+	}
+	grants, parseErr := parseAITokenSpaceGrants(req.SpaceGrants)
+	if parseErr != nil {
+		writeTokenError(w, r, parseErr)
+		return
+	}
+	verified, verifyErr := s.tokens.VerifySpaceGrantDirectories(r.Context(), grants)
+	if verifyErr != nil {
+		writeTokenError(w, r, verifyErr)
+		return
+	}
+	updated, err := s.tokens.UpdateSecure(r.Context(), aitoken.UpdateRequest{
+		AccountID: session.AccountID, TokenID: r.PathValue("tokenId"), Name: req.Name, Scopes: scopes, SpaceGrants: verified, ExpiresAt: expiresAt,
+	}, func(ctx context.Context, tx *sql.Tx, token aitoken.Token) error {
+		return s.recordAuditTx(ctx, tx, r, session.AccountID, "ai_token_update", "ai_token", token.ID, "{}")
+	})
+	if err != nil {
+		writeTokenError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"token": map[string]any{
+			"id": updated.ID, "publicId": updated.PublicID, "name": updated.Name, "scopes": updated.Scopes,
+			"expiresAt": updated.ExpiresAt, "authorizationModel": updated.AuthorizationModel, "spaceGrants": spaceGrantPayload(updated.SpaceGrants),
+		},
 	})
 }
 
@@ -2014,17 +2236,6 @@ WHERE id = ? AND status = 'active'
 	if err != nil {
 		return validatedMount{}, err
 	}
-	// Shared-slot registration: an external root path that is a direct child
-	// of the predeclared mount root (a slot) receives a per-space subdirectory
-	// named after the space ID, so multiple spaces can share one slot without
-	// parent-child path conflicts.
-	if kind == "external" && s.isSlotPath(rootPath) {
-		target := filepath.Join(rootPath, spaceID)
-		if err := os.Mkdir(target, 0o750); err != nil && !errors.Is(err, os.ErrExist) {
-			return validatedMount{}, fmt.Errorf("%w: cannot create shared slot subdirectory: %v", errMountNotWritable, err)
-		}
-		rootPath = target
-	}
 	existing, err := s.loadMountIdentities(r)
 	if err != nil {
 		return validatedMount{}, err
@@ -2067,10 +2278,10 @@ func (s *Server) mountRootAllowedForKind(kind, candidatePath string) bool {
 	return candidatePath == configuredRoot || strings.HasPrefix(candidatePath, configuredRoot+string(filepath.Separator))
 }
 
-// isSlotPath reports whether candidatePath is a direct child of the
-// predeclared external mount root (a slot). Slots are not registered directly;
-// registration allocates a per-space subdirectory under them.
-func (s *Server) isSlotPath(candidatePath string) bool {
+// isExternalSlot reports whether candidatePath is a direct child of the
+// predeclared external root. Slots are deployment-level bind-mount entries;
+// registering one uses that exact directory as the mount root.
+func (s *Server) isExternalSlot(candidatePath string) bool {
 	root := filepath.Clean(strings.TrimSpace(s.cfg.Storage.PredeclaredMountRoot))
 	candidatePath = filepath.Clean(strings.TrimSpace(candidatePath))
 	if root == "." || root == string(filepath.Separator) || candidatePath == root {
@@ -2265,6 +2476,22 @@ func parseBoundaryList(value string) []map[string]string {
 		case 5:
 			items = append(items, map[string]string{"spaceId": parts[0], "spaceName": parts[1], "mountId": parts[2], "mountName": parts[3], "path": parts[4]})
 		}
+	}
+	return items
+}
+
+func spaceGrantPayload(grants []aitoken.SpaceGrant) []map[string]any {
+	items := make([]map[string]any, 0, len(grants))
+	for _, grant := range grants {
+		denies := make([]map[string]any, 0, len(grant.FolderDenylist))
+		for _, deny := range grant.FolderDenylist {
+			denies = append(denies, map[string]any{
+				"mountId": deny.MountID, "path": deny.RelativePath, "status": deny.Status,
+			})
+		}
+		items = append(items, map[string]any{
+			"spaceId": grant.SpaceID, "permission": grant.Permission, "folderDenylist": denies,
+		})
 	}
 	return items
 }

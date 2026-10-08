@@ -46,6 +46,10 @@ type CheckRequest struct {
 	Locator            Locator
 	RequiredPermission domain.SpacePermission
 	Write              bool
+	// Recursive must be set for operations that affect an entire subtree, such
+	// as deleting or moving a directory. It prevents an allowed parent from
+	// being used to mutate a denied descendant.
+	Recursive bool
 }
 
 type AuthorizedMount struct {
@@ -114,6 +118,28 @@ func (g *Guard) Authorize(ctx context.Context, req CheckRequest) (AuthorizedMoun
 		return AuthorizedMount{}, fmt.Errorf("%w: write requires editor permission", ErrForbidden)
 	}
 
+	var spaceGrant *aitoken.SpaceGrant
+	if principal != nil {
+		switch principal.AuthorizationModel {
+		case aitoken.AuthorizationModelLegacyBoundary:
+			// Legacy tokens retain their exact mount/path boundary semantics.
+		case aitoken.AuthorizationModelSpaceGrant:
+			grant, ok := principalSpaceGrant(*principal, req.Locator.SpaceID)
+			if !ok {
+				return AuthorizedMount{}, fmt.Errorf("%w: space is not granted", ErrForbidden)
+			}
+			if !permissionAllows(grant.Permission, req.RequiredPermission) {
+				return AuthorizedMount{}, fmt.Errorf("%w: token space permission is insufficient", ErrForbidden)
+			}
+			if req.Write && !permissionAllows(grant.Permission, domain.SpacePermissionEditor) {
+				return AuthorizedMount{}, fmt.Errorf("%w: token space permission is read-only", ErrForbidden)
+			}
+			spaceGrant = &grant
+		default:
+			return AuthorizedMount{}, fmt.Errorf("%w: unsupported token authorization model", ErrForbidden)
+		}
+	}
+
 	mount, err := g.loadMount(ctx, req.Locator.SpaceID, req.Locator.MountID)
 	if err != nil {
 		return AuthorizedMount{}, err
@@ -126,14 +152,28 @@ func (g *Guard) Authorize(ctx context.Context, req CheckRequest) (AuthorizedMoun
 	if err != nil {
 		return AuthorizedMount{}, fmt.Errorf("%w: %v", ErrBoundaryViolation, err)
 	}
-	if principal != nil && !withinBoundaries(*principal, req.Locator.SpaceID, req.Locator.MountID, cleaned) {
-		return AuthorizedMount{}, ErrBoundaryViolation
+	if principal != nil && principal.AuthorizationModel == aitoken.AuthorizationModelLegacyBoundary {
+		if !withinBoundaries(*principal, req.Locator.SpaceID, req.Locator.MountID, cleaned) {
+			return AuthorizedMount{}, ErrBoundaryViolation
+		}
 	}
-	if err := rejectSymlinkPath(mount.Root, cleaned); err != nil {
-		return AuthorizedMount{}, err
-	}
-	if err := g.VerifyMountIdentity(ctx, mount); err != nil {
-		return AuthorizedMount{}, err
+	if principal != nil && spaceGrant != nil {
+		if err := g.VerifyMountIdentity(ctx, mount); err != nil {
+			return AuthorizedMount{}, err
+		}
+		if err := g.enforceFolderPolicy(ctx, *principal, *spaceGrant, mount, cleaned, req.Recursive); err != nil {
+			return AuthorizedMount{}, err
+		}
+		if err := rejectSymlinkPath(mount.Root, cleaned); err != nil {
+			return AuthorizedMount{}, err
+		}
+	} else {
+		if err := rejectSymlinkPath(mount.Root, cleaned); err != nil {
+			return AuthorizedMount{}, err
+		}
+		if err := g.VerifyMountIdentity(ctx, mount); err != nil {
+			return AuthorizedMount{}, err
+		}
 	}
 	mount.RelativePath = cleaned
 	return mount, nil
@@ -294,6 +334,22 @@ func accessRank(permission domain.SpacePermission) int {
 	default:
 		return 0
 	}
+}
+
+func principalSpaceGrant(principal aitoken.Principal, spaceID string) (aitoken.SpaceGrant, bool) {
+	var matched aitoken.SpaceGrant
+	found := false
+	for _, grant := range principal.SpaceGrants {
+		if grant.SpaceID != spaceID {
+			continue
+		}
+		if found {
+			return aitoken.SpaceGrant{}, false
+		}
+		matched = grant
+		found = true
+	}
+	return matched, found
 }
 
 func withinBoundaries(principal aitoken.Principal, spaceID, mountID, cleaned string) bool {

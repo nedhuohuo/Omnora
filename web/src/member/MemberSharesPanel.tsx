@@ -10,12 +10,20 @@ import {
   listShares,
   listSpaces,
   type SharePayload,
+  type TeamSpaceMemberPayload,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
 import { formatDirectoryChildren, type MemberDirectoryEntry, type MemberMount, type MemberSpace } from './types';
 import { copyText } from './clipboard';
 import { joinReadableLabels } from './displayLabels';
 import FileTypeIcon from './FileTypeIcon';
+import {
+  canManageTeamMembers,
+  defaultTeamMemberPermission,
+  defaultTeamSpaceService,
+  teamSpacesForAccount,
+  type TeamSpaceService,
+} from './teamSpaces';
 
 type LocaleText = (typeof localeMessages)[MemberLocale];
 
@@ -119,6 +127,162 @@ export function resolveShareFragment(result: CreateShareResponse) {
   if (result.fragment) return result.fragment;
   if (result.publicId && result.secret) return `${result.publicId}.${result.secret}`;
   return '';
+}
+
+export function createTeamSpaceFromName(service: TeamSpaceService, name: string) {
+  const normalizedName = name.trim();
+  if (!normalizedName) return Promise.reject(new Error('Team space name is required'));
+  return service.createTeamSpace({ name: normalizedName });
+}
+
+export function addTeamSpaceMember(service: TeamSpaceService, spaceId: string, accountRef: string) {
+  const normalizedAccountRef = accountRef.trim();
+  if (!normalizedAccountRef) return Promise.reject(new Error('Member email or account ID is required'));
+  return service.putTeamSpaceMember(spaceId, normalizedAccountRef, defaultTeamMemberPermission);
+}
+
+type TeamSpacesSectionProps = {
+  spaces: MemberSpace[];
+  service: TeamSpaceService;
+  onChanged: () => void | Promise<void>;
+};
+
+export function TeamSpacesSection({ spaces, service, onChanged }: TeamSpacesSectionProps) {
+  const teamSpaces = teamSpacesForAccount(spaces);
+  const [newSpaceName, setNewSpaceName] = useState('');
+  const [newMemberRefs, setNewMemberRefs] = useState<Record<string, string>>({});
+  const [membersBySpace, setMembersBySpace] = useState<Record<string, TeamSpaceMemberPayload[]>>({});
+  const [loadingMembers, setLoadingMembers] = useState<Record<string, boolean>>({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const managedTeamSpaces = spaces.filter(canManageTeamMembers);
+    void Promise.all(managedTeamSpaces.map(async (space) => {
+      setLoadingMembers((current) => ({ ...current, [space.id]: true }));
+      try {
+        const response = await service.listTeamSpaceMembers(space.id, controller.signal);
+        if (!controller.signal.aborted) {
+          setMembersBySpace((current) => ({ ...current, [space.id]: response.items ?? [] }));
+        }
+      } catch (caught) {
+        if (!controller.signal.aborted) setError(describeError(caught));
+      } finally {
+        if (!controller.signal.aborted) setLoadingMembers((current) => ({ ...current, [space.id]: false }));
+      }
+    }));
+    return () => controller.abort();
+  }, [spaces, service]);
+
+  async function createTeamSpace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    try {
+      await createTeamSpaceFromName(service, newSpaceName);
+      setNewSpaceName('');
+      await onChanged();
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addMember(spaceId: string, event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    try {
+      const member = await addTeamSpaceMember(service, spaceId, newMemberRefs[spaceId] ?? '');
+      setMembersBySpace((current) => ({ ...current, [spaceId]: [...(current[spaceId] ?? []).filter((item) => item.accountId !== member.accountId), member] }));
+      setNewMemberRefs((current) => ({ ...current, [spaceId]: '' }));
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function updateMember(spaceId: string, accountId: string, permission: TeamSpaceMemberPayload['permission']) {
+    setSaving(true);
+    setError('');
+    try {
+      const member = await service.putTeamSpaceMember(spaceId, accountId, permission);
+      setMembersBySpace((current) => ({ ...current, [spaceId]: (current[spaceId] ?? []).map((item) => item.accountId === member.accountId ? member : item) }));
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeMember(spaceId: string, accountId: string) {
+    setSaving(true);
+    setError('');
+    try {
+      await service.removeTeamSpaceMember(spaceId, accountId);
+      setMembersBySpace((current) => ({ ...current, [spaceId]: (current[spaceId] ?? []).filter((item) => item.accountId !== accountId) }));
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="member-collaboration-section" aria-labelledby="team-spaces-title">
+      <div className="member-section-heading">
+        <div><h2 id="team-spaces-title">团队空间</h2><p>创建团队共同维护的文件空间；空间成员权限由空间管理员管理。</p></div>
+      </div>
+      <form className="member-admin-form" onSubmit={createTeamSpace}>
+        <label>团队空间名称<input value={newSpaceName} onChange={(event) => setNewSpaceName(event.target.value)} required /></label>
+        <div className="member-admin-form-wide member-admin-table-actions"><button className="member-primary" type="submit" disabled={saving || !newSpaceName.trim()}>创建团队空间</button></div>
+      </form>
+      {error && <div className="member-error member-page-error" role="alert">操作失败: {error}</div>}
+      {teamSpaces.length === 0 ? <div className="member-empty">暂无团队空间。</div> : (
+        <div className="member-collaboration-list">
+          {teamSpaces.map((space) => {
+            const canManage = canManageTeamMembers(space);
+            const members = membersBySpace[space.id] ?? [];
+            return (
+              <article key={space.id} className="member-collaboration-card">
+                <div>
+                  <strong>{space.name}</strong>
+                  <p>{canManage ? '你是空间管理员，可管理成员。' : `你的权限：${space.role}`}</p>
+                  {canManage && (
+                    <div className="member-collaboration-list">
+                      <h3>管理成员</h3>
+                      {loadingMembers[space.id] ? <div className="member-loading">正在加载成员…</div> : members.length === 0 ? <p>暂无其他成员。</p> : members.map((member) => (
+                        <div key={member.accountId} className="member-collaboration-actions">
+                          <span>{member.displayName || member.email || member.accountId}</span>
+                          <label>
+                            <span>成员权限</span>
+                            <select value={member.permission} onChange={(event) => void updateMember(space.id, member.accountId, event.target.value as TeamSpaceMemberPayload['permission'])} disabled={saving}>
+                              <option value="viewer">仅查看</option>
+                              <option value="editor">可编辑</option>
+                              <option value="manager">管理员</option>
+                            </select>
+                          </label>
+                          <button className="member-table-action member-table-danger" type="button" onClick={() => void removeMember(space.id, member.accountId)} disabled={saving}>移除</button>
+                        </div>
+                      ))}
+                      <form onSubmit={(event) => void addMember(space.id, event)}>
+                        <label>成员邮箱或账号 ID<input value={newMemberRefs[space.id] ?? ''} onChange={(event) => setNewMemberRefs((current) => ({ ...current, [space.id]: event.target.value }))} required /></label>
+                        <button type="submit" disabled={saving || !(newMemberRefs[space.id] ?? '').trim()}>添加成员（默认仅查看）</button>
+                      </form>
+                    </div>
+                  )}
+                </div>
+                <span className={`member-collaboration-permission ${space.role}`}>{space.role}</span>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function ShareTargetPicker({
@@ -314,7 +478,7 @@ export function ShareCreateModal({ text, spaceId, mountId, relativePath, targetL
   );
 }
 
-export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) {
+export default function MemberSharesPanel({ locale, teamSpaceService = defaultTeamSpaceService }: { locale: MemberLocale; teamSpaceService?: TeamSpaceService }) {
   const text = localeMessages[locale];
   const [shares, setShares] = useState<SharePayload[]>([]);
   const [spaces, setSpaces] = useState<MemberSpace[]>([]);
@@ -413,8 +577,10 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
       {managerSpaces.length === 0 && <p className="member-readonly">{text.shareManagerOnlyHint}</p>}
       {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
 
-      {loading ? <div className="member-loading">{text.loading}</div> : shares.length === 0 ? <div className="member-empty">{text.shareListEmpty}</div> : (
-        <table className="member-admin-table">
+      <section className="member-collaboration-section" aria-labelledby="public-shares-title">
+        <div className="member-section-heading"><div><h2 id="public-shares-title">{text.publicSharesTitle}</h2><p>{text.publicSharesDetail}</p></div></div>
+        {loading ? <div className="member-loading">{text.loading}</div> : shares.length === 0 ? <div className="member-empty">{text.shareListEmpty}</div> : (
+          <table className="member-admin-table">
           <thead><tr><th>{text.shareColumnTarget}</th><th>{text.shareColumnStatus}</th><th>{text.shareColumnExpires}</th><th>{text.shareColumnVisits}</th><th>{text.shareColumnDownloads}</th><th>{text.actions}</th></tr></thead>
           <tbody>{shares.map((share) => {
             const location = shareLocationLabel(share);
@@ -432,8 +598,11 @@ export default function MemberSharesPanel({ locale }: { locale: MemberLocale }) 
               </tr>
             );
           })}</tbody>
-        </table>
-      )}
+          </table>
+        )}
+      </section>
+
+      <TeamSpacesSection spaces={spaces} service={teamSpaceService} onChanged={load} />
 
       {formOpen && (
         <div className="member-modal-backdrop">

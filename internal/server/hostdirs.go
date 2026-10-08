@@ -159,11 +159,10 @@ func (s *Server) suggestHostDirectories(rawPath string) (hostDirectorySuggestion
 		if !isUnderAnyRoot(candidate, roots) {
 			continue
 		}
-		// External slots appear as suggestions only after the operator binds a
-		// host directory to them, which surfaces as their own bind mount in
-		// the container mount table. Unbound slots stay hidden even when an
-		// empty directory exists at the path.
-		if rootKindForPath(candidate, rootDetails) == "external" && s.isSlotPath(candidate) && !s.isBoundSlot(candidate) {
+		// Direct children of the external root appear as suggestions only when
+		// the operator bound a host directory to them. An unbound empty folder
+		// must not be presented as a real NAS directory.
+		if rootKindForPath(candidate, rootDetails) == "external" && s.isExternalSlot(candidate) && !s.isBoundSlot(candidate) {
 			continue
 		}
 		add(candidate)

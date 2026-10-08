@@ -360,6 +360,10 @@ func writeMemberFilesError(w http.ResponseWriter, r *http.Request, err error, fo
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", err.Error())
 	case errors.Is(err, memberfiles.ErrMutationInvalidPath):
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", "path is invalid")
+	case errors.Is(err, access.ErrFolderDenied):
+		httpx.WriteError(w, r, http.StatusForbidden, "folder_denied", "folder is denied by the token folder blacklist")
+	case errors.Is(err, access.ErrFolderDenylistReviewRequired):
+		httpx.WriteError(w, r, http.StatusConflict, "folder_denylist_review_required", "folder blacklist requires administrator review")
 	case errors.Is(err, memberfiles.ErrUploadConflict), errors.Is(err, memberfiles.ErrMutationConflict):
 		code := "upload_conflict"
 		message := "upload could not be completed"

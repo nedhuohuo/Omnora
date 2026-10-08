@@ -500,7 +500,7 @@ func (s *Server) createAdminSpace(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	name, err := normalizeAdminSpaceName(req.Name)
+	name, err := normalizeSpaceName(req.Name)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
 		return
@@ -539,7 +539,7 @@ VALUES (?, ?, 'manager', ?, ?)
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": spaceID, "type": "shared", "name": name})
 }
 
-func normalizeAdminSpaceName(value string) (string, error) {
+func normalizeSpaceName(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "", fmt.Errorf("name is required")
@@ -566,7 +566,7 @@ func (s *Server) renameAdminSpace(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	name, err := normalizeAdminSpaceName(req.Name)
+	name, err := normalizeSpaceName(req.Name)
 	if err != nil {
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
 		return

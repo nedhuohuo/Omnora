@@ -151,11 +151,10 @@ shown. Remove the whole-root bind (`./mounts:/mnt/omnora:rw`) when adopting
 this layout — with the whole root bound, slots are not independent mount
 points and are never treated as bound.
 
-Registering a mount against a slot creates a per-space subdirectory
-automatically (named by the space ID) and registers that subdirectory, so
-multiple spaces can share one slot. The slot itself must not be registered as
-a mount; registering it blocks every child path via the parent-child conflict
-check.
+Registering a mount against a slot registers that exact slot directory. No
+per-space subdirectory is created, so the NAS files that already exist in the
+folder are visible at the mount root. A slot can belong to only one active
+space; use a separate NAS folder/bind mount when separate spaces are needed.
 
 Effective write access is still `Docker volume mode ∩ Omnora mount mode`. If you later switch the Compose bind back to `:ro`, existing `read_write` mounts will fail create/upload until the volume is remounted read-write.
 

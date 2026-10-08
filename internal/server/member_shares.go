@@ -105,6 +105,10 @@ func writeMemberShareError(w http.ResponseWriter, r *http.Request, err error) {
 		httpx.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "session is not valid")
 	case errors.Is(err, access.ErrBoundaryViolation):
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_path", "path is invalid")
+	case errors.Is(err, access.ErrFolderDenied):
+		httpx.WriteError(w, r, http.StatusForbidden, "folder_denied", "folder is denied by the token folder blacklist")
+	case errors.Is(err, access.ErrFolderDenylistReviewRequired):
+		httpx.WriteError(w, r, http.StatusConflict, "folder_denylist_review_required", "folder blacklist requires administrator review")
 	case errors.Is(err, membershare.ErrInvalidInput):
 		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
 	case errors.Is(err, access.ErrMountIdentityUnverifiable):

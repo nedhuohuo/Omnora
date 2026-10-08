@@ -110,12 +110,12 @@ func (s *Service) List(ctx context.Context, subject access.Subject, filter ListF
 	if limit > maxListLimit {
 		limit = maxListLimit
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	baseQuery := `
 SELECT sh.id, sh.public_id, sh.space_id, COALESCE(sp.name, ''),
        sh.mount_id, COALESCE(m.display_name, ''), sh.relative_path,
        sh.creator_account_id, COALESCE(a.email, ''), COALESCE(a.display_name, ''),
        sh.allow_preview, sh.allow_download, sh.max_visits, sh.used_visits,
-       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, '')
+       sh.max_downloads, sh.used_downloads, sh.expires_at, COALESCE(sh.revoked_at, ''), sh.created_at
 FROM shares sh
 JOIN spaces sp ON sp.id = sh.space_id
 JOIN mounts m ON m.id = sh.mount_id AND m.space_id = sh.space_id
@@ -128,65 +128,90 @@ WHERE sp.status = 'active' AND m.status = 'active'
             AND manager.permission = 'manager'
       ))
   AND (? = '' OR sh.space_id = ?)
+	`
+	now := s.now().UTC()
+	items := make([]Share, 0, limit)
+	cursorCreatedAt, cursorID := "", ""
+	for len(items) < limit {
+		query := baseQuery
+		args := []any{subject.AccountID, subject.AccountID, spaceID, spaceID}
+		if cursorCreatedAt != "" {
+			query += `
+  AND (sh.created_at < ? OR (sh.created_at = ? AND sh.id < ?))
+`
+			args = append(args, cursorCreatedAt, cursorCreatedAt, cursorID)
+		}
+		query += `
 ORDER BY sh.created_at DESC, sh.id DESC
 LIMIT ?
-`, subject.AccountID, subject.AccountID, spaceID, spaceID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	// Buffer rows before per-item live checks. SQLite may expose only one
-	// connection in constrained deployments; querying Guard while a rows
-	// cursor is open can otherwise deadlock that connection.
-	candidates := make([]Share, 0)
-	now := s.now().UTC()
-	for rows.Next() {
-		item, err := scanShare(rows, now)
+`
+		args = append(args, maxListLimit)
+		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := cleanSharePath(item.RelativePath); err != nil {
-			// A legacy or manually-corrupted row must never become a path
-			// disclosure or a boundary bypass in a member listing.
-			continue
+
+		// Buffer one batch before live checks. SQLite may expose only one
+		// connection in constrained deployments; querying Guard while a rows
+		// cursor is open can otherwise deadlock that connection.
+		candidates := make([]shareListCandidate, 0, maxListLimit)
+		for rows.Next() {
+			item, createdAt, err := scanShare(rows, now)
+			if err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			candidates = append(candidates, shareListCandidate{item: item, createdAt: createdAt})
 		}
-		candidates = append(candidates, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	items := make([]Share, 0, len(candidates))
-	for _, item := range candidates {
-		// A creator retains visibility of their own share even if they are no
-		// longer an ACL member. A current manager, or any non-creator, must
-		// pass the normal live viewer check.
-		if item.CreatorAccountID == subject.AccountID {
-			mount, err := s.guard.LoadMount(ctx, item.SpaceID, item.MountID)
-			if err != nil || s.guard.VerifyMountIdentity(ctx, mount) != nil {
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if len(candidates) == 0 {
+			break
+		}
+
+		for _, candidate := range candidates {
+			item := candidate.item
+			if _, err := cleanSharePath(item.RelativePath); err != nil {
 				continue
 			}
-		} else if _, err := s.guard.Authorize(ctx, access.CheckRequest{
-			Subject:            subject,
-			Scope:              aitoken.ScopeSharesRead,
-			Locator:            access.Locator{SpaceID: item.SpaceID, MountID: item.MountID, Path: item.RelativePath},
-			RequiredPermission: domain.SpacePermissionViewer,
-		}); err != nil {
-			continue
+			// Creator/manager decides which rows are candidates; every candidate
+			// still passes current ACL, token grant, deny policy, mount state, and
+			// identity checks before path metadata is returned.
+			if _, err := s.guard.Authorize(ctx, access.CheckRequest{
+				Subject:            subject,
+				Scope:              aitoken.ScopeSharesRead,
+				Locator:            access.Locator{SpaceID: item.SpaceID, MountID: item.MountID, Path: item.RelativePath},
+				RequiredPermission: domain.SpacePermissionViewer,
+			}); err != nil {
+				continue
+			}
+			items = append(items, item)
+			if len(items) == limit {
+				break
+			}
 		}
-		if subject.Principal != nil && !withinBoundaries(*subject.Principal, item.SpaceID, item.MountID, item.RelativePath) {
-			continue
+		if len(items) == limit || len(candidates) < maxListLimit {
+			break
 		}
-		items = append(items, item)
+		last := candidates[len(candidates)-1]
+		cursorCreatedAt, cursorID = last.createdAt, last.item.ID
 	}
 	return items, nil
 }
 
-// Create validates a manager-authorized target, stores only a hash of the
-// fragment secret, and returns the complete capability exactly once.
+type shareListCandidate struct {
+	item      Share
+	createdAt string
+}
+
+// Create validates a browser-session manager target or an MCP space-grant
+// editor target on a writable mount, stores only a hash of the fragment secret,
+// and returns the complete capability exactly once.
 func (s *Service) Create(ctx context.Context, subject access.Subject, req CreateRequest) (IssuedShare, error) {
 	return s.CreateSecure(ctx, subject, req, nil)
 }
@@ -221,11 +246,17 @@ func (s *Service) CreateSecure(ctx context.Context, subject access.Subject, req 
 		return IssuedShare{}, fmt.Errorf("%w: password is invalid", ErrInvalidInput)
 	}
 
+	requiredPermission := domain.SpacePermissionManager
+	write := false
+	if subject.Principal != nil && subject.Principal.AuthorizationModel == aitoken.AuthorizationModelSpaceGrant {
+		requiredPermission = domain.SpacePermissionEditor
+		write = true
+	}
 	mount, err := s.guard.Authorize(ctx, access.CheckRequest{
 		Subject:            subject,
 		Scope:              aitoken.ScopeSharesCreate,
 		Locator:            access.Locator{SpaceID: req.Locator.SpaceID, MountID: req.Locator.MountID, Path: req.Locator.Path},
-		RequiredPermission: domain.SpacePermissionManager,
+		RequiredPermission: requiredPermission, Write: write,
 	})
 	if err != nil {
 		return IssuedShare{}, mapAccessError(err)
@@ -338,14 +369,16 @@ FROM shares WHERE id = ?
 	if creatorID != subject.AccountID && !manager {
 		return ErrForbidden
 	}
-	if subject.Principal != nil && !withinBoundaries(*subject.Principal, spaceID, mountID, relativePath) {
-		return access.ErrBoundaryViolation
+	requiredPermission := domain.SpacePermissionViewer
+	if subject.Principal != nil && subject.Principal.AuthorizationModel == aitoken.AuthorizationModelSpaceGrant {
+		requiredPermission = domain.SpacePermissionEditor
 	}
-	mount, err := s.guard.LoadMount(ctx, spaceID, mountID)
-	if err != nil {
-		return mapAccessError(err)
-	}
-	if err := s.guard.VerifyMountIdentity(ctx, mount); err != nil {
+	if _, err := s.guard.Authorize(ctx, access.CheckRequest{
+		Subject:            subject,
+		Scope:              aitoken.ScopeSharesRevoke,
+		Locator:            access.Locator{SpaceID: spaceID, MountID: mountID, Path: relativePath},
+		RequiredPermission: requiredPermission,
+	}); err != nil {
 		return mapAccessError(err)
 	}
 	now := formatSQLiteTime(s.now().UTC())
@@ -410,14 +443,16 @@ func (s *Service) PreviewRevoke(ctx context.Context, subject access.Subject, sha
 	if item.CreatorAccountID != subject.AccountID && !manager {
 		return Share{}, ErrForbidden
 	}
-	if subject.Principal != nil && !withinBoundaries(*subject.Principal, item.SpaceID, item.MountID, item.RelativePath) {
-		return Share{}, access.ErrBoundaryViolation
+	requiredPermission := domain.SpacePermissionViewer
+	if subject.Principal != nil && subject.Principal.AuthorizationModel == aitoken.AuthorizationModelSpaceGrant {
+		requiredPermission = domain.SpacePermissionEditor
 	}
-	mount, err := s.guard.LoadMount(ctx, item.SpaceID, item.MountID)
-	if err != nil {
-		return Share{}, mapAccessError(err)
-	}
-	if err := s.guard.VerifyMountIdentity(ctx, mount); err != nil {
+	if _, err := s.guard.Authorize(ctx, access.CheckRequest{
+		Subject:            subject,
+		Scope:              aitoken.ScopeSharesRevoke,
+		Locator:            access.Locator{SpaceID: item.SpaceID, MountID: item.MountID, Path: item.RelativePath},
+		RequiredPermission: requiredPermission,
+	}); err != nil {
 		return Share{}, mapAccessError(err)
 	}
 	return item, nil
@@ -528,26 +563,6 @@ func mapAccessError(err error) error {
 	}
 }
 
-func withinBoundaries(principal aitoken.Principal, spaceID, mountID, relativePath string) bool {
-	cleaned, err := cleanSharePath(relativePath)
-	if err != nil {
-		return false
-	}
-	for _, boundary := range principal.Boundaries {
-		if boundary.SpaceID != spaceID || boundary.MountID != mountID {
-			continue
-		}
-		boundaryPath, err := storage.CleanRelativePath(boundary.RelativePath)
-		if err != nil {
-			continue
-		}
-		if boundaryPath == "." || cleaned == boundaryPath || strings.HasPrefix(cleaned, boundaryPath+"/") {
-			return true
-		}
-	}
-	return false
-}
-
 // cleanSharePath is stricter than path.Clean: a persisted share path is
 // expected to have been normalized at creation time, so a legacy row that
 // contains an explicit traversal component is rejected rather than silently
@@ -571,30 +586,30 @@ func cleanSharePath(value string) (string, error) {
 	return cleaned, nil
 }
 
-func scanShare(rows *sql.Rows, now time.Time) (Share, error) {
+func scanShare(rows *sql.Rows, now time.Time) (Share, string, error) {
 	var item Share
 	var allowPreview, allowDownload int
 	var maxVisits, maxDownloads sql.NullInt64
-	var expiresAt, revokedAt string
+	var expiresAt, revokedAt, createdAt string
 	if err := rows.Scan(
 		&item.ID, &item.PublicID, &item.SpaceID, &item.SpaceName,
 		&item.MountID, &item.MountName, &item.RelativePath,
 		&item.CreatorAccountID, &item.CreatorEmail, &item.CreatorDisplayName,
 		&allowPreview, &allowDownload, &maxVisits, &item.UsedVisits,
-		&maxDownloads, &item.UsedDownloads, &expiresAt, &revokedAt,
+		&maxDownloads, &item.UsedDownloads, &expiresAt, &revokedAt, &createdAt,
 	); err != nil {
-		return Share{}, err
+		return Share{}, "", err
 	}
 	var err error
 	item.ExpiresAt, err = parseSQLiteTime(expiresAt)
 	if err != nil {
-		return Share{}, err
+		return Share{}, "", err
 	}
 	if revokedAt != "" {
 		parsedRevokedAt, parseErr := parseSQLiteTime(revokedAt)
 		err = parseErr
 		if err != nil {
-			return Share{}, err
+			return Share{}, "", err
 		}
 		item.RevokedAt = &parsedRevokedAt
 	}
@@ -616,7 +631,7 @@ func scanShare(rows *sql.Rows, now time.Time) (Share, error) {
 	default:
 		item.Status = "active"
 	}
-	return item, nil
+	return item, createdAt, nil
 }
 
 func parseSQLiteTime(value string) (time.Time, error) {

@@ -38,6 +38,9 @@ func TestLoadEnvDefaultsFailClosed(t *testing.T) {
 	if cfg.Initialization.TTL != 30*time.Minute {
 		t.Fatalf("initialization ttl = %s", cfg.Initialization.TTL)
 	}
+	if cfg.Storage.PersonalStorageDir != "/var/lib/omnora/personal" {
+		t.Fatalf("personal storage dir = %q", cfg.Storage.PersonalStorageDir)
+	}
 	for _, group := range domain.AllRouteGroups {
 		if cfg.Routes.Enabled(group) {
 			t.Fatalf("route group %s should be disabled by default", group)

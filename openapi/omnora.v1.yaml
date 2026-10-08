@@ -207,7 +207,11 @@ paths:
   /spaces:
     get:
       tags: [Spaces]
-      summary: List spaces available to the current subject.
+      summary: List spaces available to the current account.
+      description: >
+        Files, recycle bin, sharing, AI Tokens, documents, and account settings are
+        account-level functions. A space only scopes the file content and permissions
+        used by a file operation.
       x-omnora-route-group: rest
       parameters:
         - $ref: "#/components/parameters/Limit"
@@ -227,6 +231,157 @@ paths:
                       $ref: "#/components/schemas/Space"
                   nextCursor:
                     type: string
+  /team-spaces:
+    post:
+      tags: [Spaces]
+      summary: Create a team space with managed storage.
+      description: >
+        Any active account may create a shared team space. The creator becomes its
+        manager and the server creates the default managed read-write mount at
+        <ManagedDir>/team-spaces/<space-id>; client requests never contain host paths.
+      x-omnora-route-group: rest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamSpaceCreateRequest"
+      responses:
+        "201":
+          description: Team space and its default managed mount created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamSpaceCreateResponse"
+        "400":
+          description: The team-space name is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Managed storage is unavailable or unsafe; absolute paths are never disclosed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /team-spaces/{spaceId}/members:
+    get:
+      tags: [Spaces]
+      summary: List members of a team space as its current manager.
+      description: >
+        This account-level control-plane operation is allowed only to a current manager
+        of the target shared space. Personal spaces cannot be managed through this API.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: Active team-space members.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TeamSpaceMember"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The space is personal (`personal_space_protected`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /team-spaces/{spaceId}/members/{accountRef}:
+    put:
+      tags: [Spaces]
+      summary: Add or update an active team-space member.
+      description: >
+        Only a current manager may change membership. accountRef resolves an active
+        account by opaque account ID or case-insensitive email. New members default to
+        viewer when the client uses the default permission. The last manager cannot be
+        removed or demoted.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - $ref: "#/components/parameters/AccountRef"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamSpaceMemberUpdateRequest"
+      responses:
+        "200":
+          description: Team-space membership added or updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamSpaceMember"
+        "400":
+          description: The member reference or permission is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The space is personal or the update would leave no manager.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    delete:
+      tags: [Spaces]
+      summary: Remove a team-space member.
+      description: >
+        Only a current manager may remove a member. accountRef is named consistently
+        with PUT, but clients must pass the canonical accountId returned by the member
+        list. Removing the last manager fails closed.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - $ref: "#/components/parameters/AccountRef"
+      responses:
+        "204":
+          description: Team-space membership removed.
+        "400":
+          description: The member reference is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The space is personal or removal would leave no manager.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
   /spaces/{spaceId}:
     x-omnora-stale: true
     get:
@@ -705,7 +860,7 @@ paths:
                       $ref: "#/components/schemas/AiToken"
     post:
       tags: [AI Tokens]
-      summary: Create an AI Token with explicit scopes and directory boundaries.
+      summary: Create an account-level AI Token with whole-space grants and optional folder denylist.
       x-omnora-route-group: rest
       requestBody:
         required: true
@@ -721,6 +876,25 @@ paths:
               schema:
                 $ref: "#/components/schemas/CreateAiTokenResponse"
   /ai-tokens/{tokenId}:
+    patch:
+      tags: [AI Tokens]
+      summary: Replace an AI Token's account-level space grants and folder denylist.
+      x-omnora-route-group: rest
+      parameters:
+        - $ref: "#/components/parameters/TokenId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAiTokenRequest"
+      responses:
+        "200":
+          description: Updated token metadata. The bearer secret is unchanged and is not returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateAiTokenResponse"
     delete:
       tags: [AI Tokens]
       summary: Revoke an AI Token.
@@ -2398,6 +2572,15 @@ components:
       required: true
       schema:
         $ref: "#/components/schemas/OpaqueId"
+    AccountRef:
+      name: accountRef
+      in: path
+      required: true
+      description: Active-account opaque ID or case-insensitive email address.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 320
     MountId:
       name: mountId
       in: path
@@ -2630,6 +2813,47 @@ components:
         role:
           type: string
           enum: [viewer, editor, manager]
+    TeamSpaceCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Display name after trimming; control characters are rejected.
+    TeamSpaceCreateResponse:
+      type: object
+      required: [space, mount]
+      properties:
+        space:
+          $ref: "#/components/schemas/Space"
+        mount:
+          $ref: "#/components/schemas/Mount"
+    TeamSpaceMember:
+      type: object
+      required: [accountId, email, displayName, permission]
+      properties:
+        accountId:
+          $ref: "#/components/schemas/OpaqueId"
+        email:
+          type: string
+          format: email
+        displayName:
+          type: string
+        permission:
+          type: string
+          enum: [viewer, editor, manager]
+    TeamSpaceMemberUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [permission]
+      properties:
+        permission:
+          type: string
+          enum: [viewer, editor, manager]
+          default: viewer
     AdminSpace:
       type: object
       required: [id, type, name]
@@ -3031,7 +3255,7 @@ components:
           format: date-time
     AiToken:
       type: object
-      required: [id, name, scopes, expiresAt, status]
+      required: [id, name, scopes, expiresAt, status, authorizationModel]
       properties:
         id:
           $ref: "#/components/schemas/OpaqueId"
@@ -3048,9 +3272,20 @@ components:
         status:
           type: string
           enum: [active, revoked, expired]
+        authorizationModel:
+          type: string
+          enum: [legacy_boundary, space_grant]
+        boundaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/DirectoryBoundary"
+        spaceGrants:
+          type: array
+          items:
+            $ref: "#/components/schemas/SpaceGrant"
     CreateAiTokenRequest:
       type: object
-      required: [name, scopes, boundaries, expiresAt]
+      required: [name, scopes, spaceGrants]
       properties:
         name:
           type: string
@@ -3063,9 +3298,19 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DirectoryBoundary"
+        authorizationModel:
+          type: string
+          enum: [legacy_boundary, space_grant]
+          default: space_grant
+        spaceGrants:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/SpaceGrantInput"
         expiresAt:
           type: string
           format: date-time
+          description: Omit or leave empty for a non-expiring token.
     CreateAiTokenResponse:
       type: object
       required: [token, secret, bearerToken]
@@ -3078,6 +3323,78 @@ components:
         bearerToken:
           type: string
           description: One-time returned Authorization bearer value.
+    UpdateAiTokenRequest:
+      type: object
+      required: [name, scopes, authorizationModel, spaceGrants]
+      properties:
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        authorizationModel:
+          type: string
+          enum: [space_grant]
+        convertLegacy:
+          type: boolean
+          description: Must be true when explicitly converting a legacy boundary token.
+        spaceGrants:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/SpaceGrantInput"
+        expiresAt:
+          type: string
+          format: date-time
+    UpdateAiTokenResponse:
+      type: object
+      required: [token]
+      properties:
+        token:
+          $ref: "#/components/schemas/AiToken"
+    SpaceGrantInput:
+      type: object
+      required: [spaceId, permission]
+      properties:
+        spaceId:
+          $ref: "#/components/schemas/OpaqueId"
+        permission:
+          type: string
+          enum: [viewer, editor]
+        folderDenylist:
+          type: array
+          items:
+            $ref: "#/components/schemas/FolderDenyInput"
+    SpaceGrant:
+      allOf:
+        - $ref: "#/components/schemas/SpaceGrantInput"
+      type: object
+      properties:
+        spaceName:
+          type: string
+        folderDenylist:
+          type: array
+          items:
+            $ref: "#/components/schemas/FolderDeny"
+    FolderDenyInput:
+      type: object
+      required: [mountId, path]
+      properties:
+        mountId:
+          $ref: "#/components/schemas/OpaqueId"
+        path:
+          type: string
+    FolderDeny:
+      allOf:
+        - $ref: "#/components/schemas/FolderDenyInput"
+      type: object
+      properties:
+        mountName:
+          type: string
+        status:
+          type: string
+          enum: [active, needs_review]
     DirectoryBoundary:
       type: object
       required: [spaceId, mountId, path]

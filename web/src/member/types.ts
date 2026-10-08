@@ -1,8 +1,10 @@
 import type { DirectoryChildrenPayload } from '../api';
 
+export type MemberSpaceType = 'personal' | 'shared' | (string & {});
+
 export type MemberSpace = {
   id: string;
-  type: string;
+  type: MemberSpaceType;
   name: string;
   role: 'viewer' | 'editor' | 'manager';
 };

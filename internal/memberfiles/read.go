@@ -33,7 +33,28 @@ func (s *Service) List(ctx context.Context, subject access.Subject, locator acce
 	if err != nil {
 		return files.DirectoryListing{}, err
 	}
-	return s.files.ListDirectory(toFilesMount(mount), mount.RelativePath)
+	listing, err := s.files.ListDirectory(toFilesMount(mount), mount.RelativePath)
+	if err != nil {
+		return files.DirectoryListing{}, err
+	}
+	policy, applies, err := s.currentFolderPolicy(ctx, subject, mount.SpaceID, mount.ID)
+	if err != nil {
+		return files.DirectoryListing{}, err
+	}
+	if !applies {
+		return listing, nil
+	}
+	entries := listing.Entries[:0]
+	for _, entry := range listing.Entries {
+		if err := policy.CheckPath(entry.RelativePath); errors.Is(err, access.ErrFolderDenied) {
+			continue
+		} else if err != nil {
+			return files.DirectoryListing{}, err
+		}
+		entries = append(entries, entry)
+	}
+	listing.Entries = entries
+	return listing, nil
 }
 
 // Metadata returns mount-relative metadata after a live viewer check.
@@ -53,6 +74,17 @@ func (s *Service) Preview(ctx context.Context, subject access.Subject, locator a
 	permission := domain.SpacePermissionViewer
 	if scope == aitoken.ScopeSharesCreate {
 		permission = domain.SpacePermissionManager
+		if subject.Principal != nil {
+			var err error
+			subject, err = s.requireTokenScope(ctx, subject, scope)
+			if err != nil {
+				return files.Entry{}, err
+			}
+			if subject.Principal.AuthorizationModel == aitoken.AuthorizationModelSpaceGrant {
+				permission = domain.SpacePermissionEditor
+				write = true
+			}
+		}
 	}
 	if write {
 		permission = domain.SpacePermissionEditor
@@ -99,33 +131,70 @@ func (s *Service) Search(ctx context.Context, subject access.Subject, req Search
 			authorized[record.mount.ID] = append(authorized[record.mount.ID], relative)
 		}
 	}
-	result, err := s.catalog.Search(ctx, catalog.SearchOptions{
-		SpaceID:    req.SpaceID,
-		Query:      req.Query,
-		Limit:      req.Limit,
-		Cursor:     req.Cursor,
-		Boundaries: boundaries,
-	})
-	if err != nil {
-		return SearchResult{}, err
+	policies := make(map[string]access.FolderPolicy, len(records))
+	for _, record := range records {
+		policy, applies, err := s.currentFolderPolicy(ctx, subject, record.space.ID, record.mount.ID)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		if applies {
+			policies[record.mount.ID] = policy
+		}
 	}
 
-	items := make([]catalog.SearchItem, 0, len(result.Items))
-	for _, item := range result.Items {
-		cleaned, cleanErr := cleanCatalogPath(item.RelativePath)
-		if cleanErr != nil || item.SpaceID != req.SpaceID || !pathInBoundaries(item.MountID, cleaned, authorized) {
-			continue
+	limit := normalizeMemberSearchLimit(req.Limit)
+	items := make([]catalog.SearchItem, 0, limit)
+	var excluded []catalog.ExcludedMount
+	cursor := req.Cursor
+	nextCursor := ""
+	for len(items) < limit {
+		result, err := s.catalog.Search(ctx, catalog.SearchOptions{
+			SpaceID:    req.SpaceID,
+			Query:      req.Query,
+			Limit:      limit - len(items),
+			Cursor:     cursor,
+			Boundaries: boundaries,
+		})
+		if err != nil {
+			return SearchResult{}, err
 		}
-		item.RelativePath = cleaned
-		items = append(items, item)
-	}
-	excluded := make([]catalog.ExcludedMount, 0, len(result.ExcludedMounts))
-	for _, item := range result.ExcludedMounts {
-		if _, ok := authorized[item.MountID]; ok {
-			excluded = append(excluded, item)
+		if excluded == nil {
+			excluded = make([]catalog.ExcludedMount, 0, len(result.ExcludedMounts))
+			for _, item := range result.ExcludedMounts {
+				if _, ok := authorized[item.MountID]; ok {
+					excluded = append(excluded, item)
+				}
+			}
 		}
+		for _, item := range result.Items {
+			cleaned, cleanErr := cleanCatalogPath(item.RelativePath)
+			if cleanErr != nil || item.SpaceID != req.SpaceID || !pathInBoundaries(item.MountID, cleaned, authorized) {
+				continue
+			}
+			if policy, ok := policies[item.MountID]; ok {
+				if err := policy.CheckPath(cleaned); errors.Is(err, access.ErrFolderDenied) {
+					continue
+				} else if err != nil {
+					return SearchResult{}, err
+				}
+			}
+			item.RelativePath = cleaned
+			items = append(items, item)
+		}
+		if result.NextCursor == "" {
+			nextCursor = ""
+			break
+		}
+		nextCursor = result.NextCursor
+		if len(items) == limit {
+			break
+		}
+		if result.NextCursor == cursor {
+			return SearchResult{}, errors.New("member files: catalog search cursor did not advance")
+		}
+		cursor = result.NextCursor
 	}
-	return SearchResult{Items: items, ExcludedMounts: excluded, NextCursor: result.NextCursor}, nil
+	return SearchResult{Items: items, ExcludedMounts: excluded, NextCursor: nextCursor}, nil
 }
 
 // ReadText reads at most one bounded prefix of a regular UTF-8 file. Values
@@ -268,6 +337,16 @@ func pathInBoundaries(mountID, relativePath string, boundaries map[string][]stri
 		}
 	}
 	return false
+}
+
+func normalizeMemberSearchLimit(limit int) int {
+	if limit <= 0 {
+		return 50
+	}
+	if limit > 100 {
+		return 100
+	}
+	return limit
 }
 
 // cleanCatalogPath is stricter than the general storage normalizer for

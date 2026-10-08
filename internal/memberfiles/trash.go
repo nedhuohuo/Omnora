@@ -9,8 +9,8 @@ import (
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
 	"omnora/internal/domain"
-	"omnora/internal/files"
 	"omnora/internal/fileops"
+	"omnora/internal/files"
 )
 
 func (s *Service) Trash(ctx context.Context, subject access.Subject, locator access.Locator) (TrashResult, error) {
@@ -50,7 +50,13 @@ func (s *Service) TrashSecure(ctx context.Context, subject access.Subject, locat
 }
 
 func (s *Service) authorizeTrashSource(ctx context.Context, subject access.Subject, locator access.Locator) (access.AuthorizedMount, error) {
-	mount, err := s.authorizeMutationSource(ctx, subject, locator, aitoken.ScopeFilesTrash)
+	if err := s.validate(subject); err != nil {
+		return access.AuthorizedMount{}, err
+	}
+	mount, err := s.guard.Authorize(ctx, access.CheckRequest{
+		Subject: subject, Scope: aitoken.ScopeFilesTrash, Locator: locator,
+		RequiredPermission: domain.SpacePermissionEditor, Write: true, Recursive: true,
+	})
 	if err != nil {
 		return access.AuthorizedMount{}, err
 	}
@@ -83,14 +89,18 @@ func (s *Service) PreviewTrash(ctx context.Context, subject access.Subject, loca
 // invariant required by EmptyTrash. A narrower boundary may purge visible
 // items individually but cannot empty the entire managed trash.
 func (s *Service) PreviewEmptyTrash(ctx context.Context, subject access.Subject, locator access.Locator) (TrashListResult, error) {
-	result, err := s.PreviewTrash(ctx, subject, locator, aitoken.ScopeFilesPurge)
+	mount, err := s.authorizeTrashMount(ctx, subject, locator, aitoken.ScopeFilesPurge, domain.SpacePermissionEditor, true, true)
 	if err != nil {
 		return TrashListResult{}, err
 	}
-	if subject.Principal != nil && !s.hasRootBoundary(ctx, subject, locator.SpaceID, locator.MountID) {
-		return TrashListResult{}, access.ErrForbidden
+	items, err := s.files.ListTrash(toFilesMount(mount))
+	if err != nil {
+		return TrashListResult{}, err
 	}
-	return result, nil
+	if subject.Principal != nil {
+		items = s.filterTrashItems(ctx, subject, mount.SpaceID, mount.ID, items)
+	}
+	return summarizeTrash(items), nil
 }
 
 // ListTrashViewer is the compatibility entry point for the existing REST GET
@@ -101,7 +111,7 @@ func (s *Service) ListTrashViewer(ctx context.Context, subject access.Subject, l
 }
 
 func (s *Service) listTrashWithPermission(ctx context.Context, subject access.Subject, locator access.Locator, scope aitoken.Scope, permission domain.SpacePermission, write bool) (TrashListResult, error) {
-	mount, err := s.authorizeTrashMount(ctx, subject, locator, scope, permission, write)
+	mount, err := s.authorizeTrashMount(ctx, subject, locator, scope, permission, write, false)
 	if err != nil {
 		return TrashListResult{}, err
 	}
@@ -147,12 +157,16 @@ func (s *Service) RestoreTrashSecure(ctx context.Context, subject access.Subject
 }
 
 func (s *Service) authorizeRestoreSource(ctx context.Context, subject access.Subject, locator access.Locator, trashID string) (access.AuthorizedMount, error) {
-	mount, err := s.authorizeTrashMount(ctx, subject, locator, aitoken.ScopeFilesRestore, domain.SpacePermissionEditor, true)
+	mount, err := s.authorizeTrashMount(ctx, subject, locator, aitoken.ScopeFilesRestore, domain.SpacePermissionEditor, true, false)
 	if err != nil {
 		return access.AuthorizedMount{}, err
 	}
-	if !s.trashIDVisible(ctx, subject, mount.SpaceID, mount.ID, toFilesMount(mount), trashID) {
-		return access.AuthorizedMount{}, access.ErrForbidden
+	items, err := s.files.ListTrash(toFilesMount(mount))
+	if err != nil {
+		return access.AuthorizedMount{}, err
+	}
+	if err := s.authorizeTrashItem(ctx, subject, mount, aitoken.ScopeFilesRestore, items, trashID); err != nil {
+		return access.AuthorizedMount{}, err
 	}
 	return mount, nil
 }
@@ -167,7 +181,7 @@ func (s *Service) restoreResult(mount access.AuthorizedMount, restored string) M
 }
 
 func (s *Service) PurgeTrash(ctx context.Context, subject access.Subject, locator access.Locator, trashID string) (MutationResult, error) {
-	mount, err := s.authorizeTrashMount(ctx, subject, locator, aitoken.ScopeFilesPurge, domain.SpacePermissionEditor, true)
+	mount, err := s.authorizeTrashMount(ctx, subject, locator, aitoken.ScopeFilesPurge, domain.SpacePermissionEditor, true, false)
 	if err != nil {
 		return MutationResult{}, err
 	}
@@ -176,8 +190,8 @@ func (s *Service) PurgeTrash(ctx context.Context, subject access.Subject, locato
 		return MutationResult{}, err
 	}
 	var bytes int64
-	if subject.Principal != nil && !s.trashIDVisibleFromItems(ctx, subject, mount.SpaceID, mount.ID, items, trashID) {
-		return MutationResult{}, access.ErrForbidden
+	if err := s.authorizeTrashItem(ctx, subject, mount, aitoken.ScopeFilesPurge, items, trashID); err != nil {
+		return MutationResult{}, err
 	}
 	for _, item := range items {
 		if item.ID == trashID {
@@ -192,16 +206,13 @@ func (s *Service) PurgeTrash(ctx context.Context, subject access.Subject, locato
 }
 
 func (s *Service) EmptyTrash(ctx context.Context, subject access.Subject, locator access.Locator) (MutationResult, error) {
-	mount, err := s.authorizeTrashMount(ctx, subject, locator, aitoken.ScopeFilesPurge, domain.SpacePermissionEditor, true)
+	mount, err := s.authorizeTrashMount(ctx, subject, locator, aitoken.ScopeFilesPurge, domain.SpacePermissionEditor, true, true)
 	if err != nil {
 		return MutationResult{}, err
 	}
 	items, err := s.files.ListTrash(toFilesMount(mount))
 	if err != nil {
 		return MutationResult{}, err
-	}
-	if subject.Principal != nil && !s.hasRootBoundary(ctx, subject, mount.SpaceID, mount.ID) {
-		return MutationResult{}, access.ErrForbidden
 	}
 	summary := summarizeTrash(items)
 	removed, err := s.files.EmptyTrash(toFilesMount(mount))
@@ -212,7 +223,7 @@ func (s *Service) EmptyTrash(ctx context.Context, subject access.Subject, locato
 }
 
 func (s *Service) DeletePermanently(ctx context.Context, subject access.Subject, locator access.Locator) (MutationResult, error) {
-	mount, err := s.authorizeMutationSource(ctx, subject, locator, aitoken.ScopeFilesPurge)
+	mount, err := s.authorizeRecursiveMutationSource(ctx, subject, locator, aitoken.ScopeFilesPurge)
 	if err != nil {
 		return MutationResult{}, err
 	}
@@ -234,7 +245,7 @@ func (s *Service) DeletePermanentlySecure(ctx context.Context, subject access.Su
 	if s.fileOps == nil {
 		return s.DeletePermanently(ctx, subject, locator)
 	}
-	mount, err := s.authorizeMutationSource(ctx, subject, locator, aitoken.ScopeFilesPurge)
+	mount, err := s.authorizeRecursiveMutationSource(ctx, subject, locator, aitoken.ScopeFilesPurge)
 	if err != nil {
 		return MutationResult{}, err
 	}
@@ -245,14 +256,14 @@ func (s *Service) DeletePermanentlySecure(ctx context.Context, subject access.Su
 	return MutationResult{RelativePath: mount.RelativePath, ObjectFingerprint: entry.ObjectFingerprint, AffectedCount: 1, TotalBytes: entry.Size}, nil
 }
 
-func (s *Service) authorizeTrashMount(ctx context.Context, subject access.Subject, locator access.Locator, scope aitoken.Scope, permission domain.SpacePermission, write bool) (access.AuthorizedMount, error) {
+func (s *Service) authorizeTrashMount(ctx context.Context, subject access.Subject, locator access.Locator, scope aitoken.Scope, permission domain.SpacePermission, write, recursive bool) (access.AuthorizedMount, error) {
 	if locator.Path == "" {
 		locator.Path = "."
 	}
 	mount, err := s.guard.Authorize(ctx, access.CheckRequest{Subject: subject, Scope: scope, Locator: locator,
-		RequiredPermission: permission, Write: write})
+		RequiredPermission: permission, Write: write, Recursive: recursive})
 	fromBoundary := false
-	if err != nil && subject.Principal != nil {
+	if err != nil && subject.Principal != nil && !recursive {
 		// A token boundary may not include the mount root itself. Re-authorize
 		// against one current boundary to validate the mount, then filter trash
 		// metadata by those same boundaries before returning it.
@@ -286,6 +297,19 @@ func (s *Service) authorizeTrashMount(ctx context.Context, subject access.Subjec
 }
 
 func (s *Service) filterTrashItems(ctx context.Context, subject access.Subject, spaceID, mountID string, items []files.TrashItem) []files.TrashItem {
+	policy, applies, policyErr := s.currentFolderPolicy(ctx, subject, spaceID, mountID)
+	if policyErr != nil {
+		return nil
+	}
+	if applies {
+		filtered := make([]files.TrashItem, 0, len(items))
+		for _, item := range items {
+			if err := policy.CheckPath(item.OriginalPath); err == nil {
+				filtered = append(filtered, item)
+			}
+		}
+		return filtered
+	}
 	boundaries, err := s.currentBoundaries(ctx, subject, spaceID, mountID)
 	if err != nil {
 		return nil
@@ -323,6 +347,18 @@ func (s *Service) trashIDVisibleFromItems(ctx context.Context, subject access.Su
 		}
 		return false
 	}
+	policy, applies, err := s.currentFolderPolicy(ctx, subject, spaceID, mountID)
+	if err != nil {
+		return false
+	}
+	if applies {
+		for _, item := range items {
+			if item.ID == id {
+				return policy.CheckSubtree(item.OriginalPath) == nil
+			}
+		}
+		return false
+	}
 	for _, item := range s.filterTrashItems(ctx, subject, spaceID, mountID, items) {
 		if item.ID == id {
 			return true
@@ -332,6 +368,13 @@ func (s *Service) trashIDVisibleFromItems(ctx context.Context, subject access.Su
 }
 
 func (s *Service) hasRootBoundary(ctx context.Context, subject access.Subject, spaceID, mountID string) bool {
+	policy, applies, err := s.currentFolderPolicy(ctx, subject, spaceID, mountID)
+	if err != nil {
+		return false
+	}
+	if applies {
+		return policy.CheckSubtree(".") == nil
+	}
 	boundaries, err := s.currentBoundaries(ctx, subject, spaceID, mountID)
 	if err != nil {
 		return false
@@ -342,6 +385,37 @@ func (s *Service) hasRootBoundary(ctx context.Context, subject access.Subject, s
 		}
 	}
 	return false
+}
+
+func (s *Service) authorizeRecursiveMutationSource(ctx context.Context, subject access.Subject, locator access.Locator, scope aitoken.Scope) (access.AuthorizedMount, error) {
+	if err := s.validate(subject); err != nil {
+		return access.AuthorizedMount{}, err
+	}
+	return s.guard.Authorize(ctx, access.CheckRequest{
+		Subject: subject, Scope: scope, Locator: locator,
+		RequiredPermission: domain.SpacePermissionEditor, Write: true, Recursive: true,
+	})
+}
+
+func (s *Service) authorizeTrashItem(ctx context.Context, subject access.Subject, mount access.AuthorizedMount, scope aitoken.Scope, items []files.TrashItem, trashID string) error {
+	for _, item := range items {
+		if item.ID != trashID {
+			continue
+		}
+		_, err := s.guard.Authorize(ctx, access.CheckRequest{
+			Subject: subject, Scope: scope,
+			Locator: access.Locator{
+				SpaceID: mount.SpaceID,
+				MountID: mount.ID,
+				Path:    item.OriginalPath,
+			},
+			RequiredPermission: domain.SpacePermissionEditor,
+			Write:              true,
+			Recursive:          true,
+		})
+		return err
+	}
+	return files.ErrTrashItemNotFound
 }
 
 func summarizeTrash(items []files.TrashItem) TrashListResult {

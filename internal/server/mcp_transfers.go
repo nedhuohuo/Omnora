@@ -111,6 +111,10 @@ func safeTransferRangeLabel(value string) string {
 
 func transferErrorCode(err error) string {
 	switch {
+	case errors.Is(err, access.ErrFolderDenied):
+		return "folder_denied"
+	case errors.Is(err, access.ErrFolderDenylistReviewRequired):
+		return "folder_denylist_review_required"
 	case errors.Is(err, transferticket.ErrTicketExpired):
 		return "ticket_expired"
 	case errors.Is(err, transferticket.ErrTicketClosed):
@@ -443,6 +447,10 @@ func writeMCPTransferError(w http.ResponseWriter, r *http.Request, err error) {
 		httpx.WriteError(w, r, http.StatusConflict, "mount_unavailable", "mount is unavailable")
 	case errors.Is(err, access.ErrReadonlyMount):
 		httpx.WriteError(w, r, http.StatusForbidden, "readonly_mount", "mount is read-only")
+	case errors.Is(err, access.ErrFolderDenied):
+		httpx.WriteError(w, r, http.StatusForbidden, "folder_denied", "the requested folder is not accessible")
+	case errors.Is(err, access.ErrFolderDenylistReviewRequired):
+		httpx.WriteError(w, r, http.StatusConflict, "folder_denylist_review_required", "the folder denylist requires review before this mount can be accessed")
 	case errors.Is(err, access.ErrForbidden), errors.Is(err, access.ErrBoundaryViolation):
 		httpx.WriteError(w, r, http.StatusForbidden, "forbidden", "transfer is not authorized")
 	case errors.Is(err, access.ErrUnauthorized):

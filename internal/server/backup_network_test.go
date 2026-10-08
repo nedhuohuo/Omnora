@@ -125,11 +125,7 @@ func TestManagedSoftDeleteAndTrashRestore(t *testing.T) {
 func createTestMount(t *testing.T, db *store.DB, spaceID, mountID, ownerAccountID, mode, kind string) string {
 	t.Helper()
 	ctx := context.Background()
-	workspace, err := filepath.Abs(".")
-	if err != nil {
-		t.Fatalf("resolve workspace dir: %v", err)
-	}
-	root, err := os.MkdirTemp(workspace, ".control-plane-test-")
+	root, err := os.MkdirTemp("/private/tmp", "omnora-control-plane-test-")
 	if err != nil {
 		t.Fatalf("create mount root: %v", err)
 	}

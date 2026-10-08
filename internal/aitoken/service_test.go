@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -31,7 +33,7 @@ CREATE TABLE spaces (
 	status TEXT NOT NULL DEFAULT 'active'
 );
 
-CREATE TABLE mounts (
+	CREATE TABLE mounts (
 	id TEXT PRIMARY KEY,
 	space_id TEXT NOT NULL REFERENCES spaces(id),
 	display_name TEXT NOT NULL,
@@ -39,7 +41,14 @@ CREATE TABLE mounts (
 	kind TEXT NOT NULL,
 	mode TEXT NOT NULL,
 	status TEXT NOT NULL
-);
+	);
+
+	CREATE TABLE space_members (
+		space_id TEXT NOT NULL REFERENCES spaces(id),
+		account_id TEXT NOT NULL REFERENCES accounts(id),
+		permission TEXT NOT NULL,
+		PRIMARY KEY (space_id, account_id)
+	);
 
 CREATE TABLE system_state (
 	key TEXT PRIMARY KEY,
@@ -98,6 +107,12 @@ func TestCreateHashesSecretAndVerifyBearerReturnsPrincipal(t *testing.T) {
 	}
 	if len(principal.Boundaries) != 1 || principal.Boundaries[0].RelativePath != "docs/notes" {
 		t.Fatalf("principal boundaries = %#v, want normalized boundary", principal.Boundaries)
+	}
+	if issued.Token.AuthorizationModel != AuthorizationModelLegacyBoundary || principal.AuthorizationModel != AuthorizationModelLegacyBoundary {
+		t.Fatalf("legacy authorization models = %q, %q", issued.Token.AuthorizationModel, principal.AuthorizationModel)
+	}
+	if len(issued.Token.SpaceGrants) != 0 || len(principal.SpaceGrants) != 0 {
+		t.Fatalf("legacy token loaded space grants: token=%#v principal=%#v", issued.Token.SpaceGrants, principal.SpaceGrants)
 	}
 
 	var lastUsedAt string
@@ -425,9 +440,44 @@ func newTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func insertActiveAccountSpaceMount(t *testing.T, db *sql.DB) {
+func newConcurrentTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "aitoken-concurrent.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open concurrent sqlite: %v", err)
+	}
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close concurrent sqlite: %v", err)
+		}
+	})
+	for _, pragma := range []string{"PRAGMA foreign_keys = ON", "PRAGMA journal_mode = WAL", "PRAGMA busy_timeout = 5000"} {
+		if _, err := db.Exec(pragma); err != nil {
+			t.Fatalf("configure concurrent sqlite with %s: %v", pragma, err)
+		}
+	}
+	if _, err := db.Exec(coreSchema); err != nil {
+		t.Fatalf("install concurrent core schema: %v", err)
+	}
+	if err := InstallSchema(context.Background(), db); err != nil {
+		t.Fatalf("install concurrent aitoken schema: %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE ai_tokens ADD COLUMN credential_generation INTEGER`); err != nil {
+		t.Fatalf("install concurrent credential generation column: %v", err)
+	}
+	return db
+}
+
+func insertActiveAccountSpaceMount(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "private", "docs"), 0o755); err != nil {
+		t.Fatalf("create test mount directories: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, `
 INSERT INTO accounts(id, email, display_name, role, status)
 VALUES ('acct_1', 'ada@example.test', 'Ada', 'member', 'active')
@@ -442,10 +492,17 @@ VALUES ('space_1', 'personal', 'Ada Space', 'acct_1', 'active')
 	}
 	if _, err := db.ExecContext(ctx, `
 INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status)
-VALUES ('mount_1', 'space_1', 'Home', '/tmp/omnora', 'managed', 'read_only', 'active')
-`); err != nil {
+VALUES ('mount_1', 'space_1', 'Home', ?, 'managed', 'read_only', 'active')
+`, root); err != nil {
 		t.Fatalf("insert mount: %v", err)
 	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO space_members(space_id, account_id, permission)
+VALUES ('space_1', 'acct_1', 'manager')
+`); err != nil {
+		t.Fatalf("insert space member: %v", err)
+	}
+	return root
 }
 
 func cloneTokenDB(t *testing.T, source *sql.DB) *sql.DB {

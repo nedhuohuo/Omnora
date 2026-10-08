@@ -14,7 +14,7 @@ import (
 	"omnora/internal/domain"
 )
 
-func TestAdminMountCreateSharedSlot(t *testing.T) {
+func TestAdminMountCreateUsesExactExternalDirectory(t *testing.T) {
 	db, _ := newAPITestServer(t)
 	ctx := context.Background()
 	admin, _ := createAPITestAccounts(t, db)
@@ -37,7 +37,9 @@ func TestAdminMountCreateSharedSlot(t *testing.T) {
 	}
 	slot1 := filepath.Join(external, "slot1")
 	slot2 := filepath.Join(external, "slot2")
-	for _, dir := range []string{slot1, slot2} {
+	slot3 := filepath.Join(external, "slot3")
+	slot4 := filepath.Join(external, "slot4")
+	for _, dir := range []string{slot1, slot2, slot3, slot4} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
@@ -63,6 +65,12 @@ VALUES (?, 'shared', ?, ?, 'active')
 `, spaceID, spaceID, admin.ID); err != nil {
 			t.Fatalf("insert space %s: %v", spaceID, err)
 		}
+		if _, err := db.SQL().ExecContext(ctx, `
+INSERT INTO space_members(space_id, account_id, permission)
+VALUES (?, ?, 'manager')
+`, spaceID, admin.ID); err != nil {
+			t.Fatalf("add admin membership for %s: %v", spaceID, err)
+		}
 	}
 
 	adminCookie := issueAPITestSession(t, db, admin.ID)
@@ -79,28 +87,36 @@ VALUES (?, 'shared', ?, ?, 'active')
 		return rec
 	}
 
-	t.Run("two spaces share one slot", func(t *testing.T) {
-		for _, spaceID := range []string{"space-a", "space-b"} {
-			rec := register(spaceID, slot1, "Shared-"+spaceID)
-			if rec.Code != http.StatusCreated {
-				t.Fatalf("%s status = %d, body = %s", spaceID, rec.Code, rec.Body.String())
-			}
-			want := filepath.Join(slot1, spaceID)
-			if _, err := os.Stat(want); err != nil {
-				t.Fatalf("shared subdirectory %s: %v", want, err)
-			}
-			var rootPath string
-			if err := db.SQL().QueryRowContext(ctx, `SELECT root_path FROM mounts WHERE space_id = ? AND status = 'active'`, spaceID).Scan(&rootPath); err != nil {
-				t.Fatalf("load mount for %s: %v", spaceID, err)
-			}
-			if rootPath != want {
-				t.Fatalf("root_path = %q, want %q", rootPath, want)
-			}
+	t.Run("slot root is registered verbatim and keeps existing contents visible", func(t *testing.T) {
+		rec := register("space-a", slot1, "NAS Files")
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if _, err := os.Stat(filepath.Join(slot1, "readme.txt")); err != nil {
+			t.Fatalf("existing slot content must remain at the mounted root: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(slot1, "space-a")); !os.IsNotExist(err) {
+			t.Fatalf("space subdirectory must not be created, stat error = %v", err)
+		}
+		var rootPath string
+		if err := db.SQL().QueryRowContext(ctx, `SELECT root_path FROM mounts WHERE space_id = 'space-a' AND status = 'active'`).Scan(&rootPath); err != nil {
+			t.Fatalf("load mount: %v", err)
+		}
+		if rootPath != slot1 {
+			t.Fatalf("root_path = %q, want %q", rootPath, slot1)
+		}
+		var mountID string
+		if err := db.SQL().QueryRowContext(ctx, `SELECT id FROM mounts WHERE space_id = 'space-a' AND root_path = ?`, slot1).Scan(&mountID); err != nil {
+			t.Fatalf("load mounted slot id: %v", err)
+		}
+		listing := authorizedAPITestRequest(t, handler, "/api/v1/spaces/space-a/mounts/"+mountID+"/children?path=.", adminCookie)
+		if listing.Code != http.StatusOK || !bytes.Contains(listing.Body.Bytes(), []byte(`"name":"readme.txt"`)) {
+			t.Fatalf("mounted root must list original content, status = %d, body = %s", listing.Code, listing.Body.String())
 		}
 	})
 
-	t.Run("same space same slot conflicts", func(t *testing.T) {
-		rec := register("space-a", slot1, "Shared-a-again")
+	t.Run("same exact directory cannot belong to another space", func(t *testing.T) {
+		rec := register("space-b", slot1, "Duplicate NAS Files")
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
@@ -117,22 +133,18 @@ VALUES (?, 'shared', ?, ?, 'active')
 		}
 	})
 
-	t.Run("empty slot still registers", func(t *testing.T) {
-		// Empty slots are hidden from suggestions, but an operator-provided
-		// path remains valid and receives its per-space subdirectory.
-		rec := register("space-a", slot2, "Shared-slot2-a")
+	t.Run("empty slot is registered verbatim", func(t *testing.T) {
+		rec := register("space-b", slot2, "Empty NAS Files")
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
-		if _, err := os.Stat(filepath.Join(slot2, "space-a")); err != nil {
-			t.Fatalf("shared subdirectory: %v", err)
+		if _, err := os.Stat(filepath.Join(slot2, "space-b")); !os.IsNotExist(err) {
+			t.Fatalf("space subdirectory must not be created, stat error = %v", err)
 		}
 	})
 
 	t.Run("deep path registers as-is", func(t *testing.T) {
-		// A path below the slot layer is not shared-slot registration; it must
-		// be registered verbatim to keep the pre-existing flow intact.
-		custom := filepath.Join(slot1, "custom")
+		custom := filepath.Join(slot3, "custom")
 		if err := os.MkdirAll(custom, 0o755); err != nil {
 			t.Fatalf("mkdir custom: %v", err)
 		}
@@ -150,11 +162,11 @@ VALUES (?, 'shared', ?, ?, 'active')
 	})
 
 	t.Run("read-only slot rejected as not writable", func(t *testing.T) {
-		if err := os.Chmod(slot2, 0o555); err != nil {
-			t.Fatalf("chmod slot2: %v", err)
+		if err := os.Chmod(slot4, 0o555); err != nil {
+			t.Fatalf("chmod slot4: %v", err)
 		}
-		t.Cleanup(func() { _ = os.Chmod(slot2, 0o755) })
-		rec := register("space-b", slot2, "Shared-slot2-b")
+		t.Cleanup(func() { _ = os.Chmod(slot4, 0o755) })
+		rec := register("space-b", slot4, "Read-only NAS Files")
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}

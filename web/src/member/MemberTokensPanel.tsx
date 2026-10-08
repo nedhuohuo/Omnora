@@ -2,6 +2,7 @@ import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import {
   type AiTokenScope,
   type AiTokenBoundary,
+  type AiTokenSpaceGrant,
   type AiTokenListItem,
   ApiError,
   createAiToken,
@@ -11,6 +12,7 @@ import {
   listAiTokens,
   listMounts,
   listSpaces,
+  updateAiToken,
 } from '../api';
 import { type MemberLocale, localeMessages } from './i18n';
 import { useRecentReauth } from './RecentReauthProvider';
@@ -57,6 +59,12 @@ function tokenStatusLabel(status: string | undefined, text: LocaleText) {
 }
 
 type BoundaryDraft = { key: string; spaceId: string; mountId: string; path: string };
+type GrantDraft = {
+  key: string;
+  spaceId: string;
+  permission: 'viewer' | 'editor';
+  denies: Array<{ key: string; mountId: string; path: string }>;
+};
 
 function boundarySummary(boundary: AiTokenBoundary, spaces: MemberSpace[], mountsBySpace: Record<string, MemberMount[]>) {
   const path = boundary.path && boundary.path !== '.' ? boundary.path : '/';
@@ -64,6 +72,12 @@ function boundarySummary(boundary: AiTokenBoundary, spaces: MemberSpace[], mount
   const mountName = readableLabel(boundary.mountName) || mountsBySpace[boundary.spaceId]?.find((mount) => mount.id === boundary.mountId)?.name;
   const location = joinReadableLabels([spaceName, mountName]);
   return location ? `${location} · ${path}` : path;
+}
+
+function grantSummary(grant: AiTokenSpaceGrant, spaces: MemberSpace[]) {
+  const name = readableLabel(grant.spaceName) || spaces.find((space) => space.id === grant.spaceId)?.name || grant.spaceId;
+  const denied = grant.folderDenylist?.length ?? 0;
+  return `${name} · ${grant.permission === 'editor' ? 'editor' : 'viewer'}${denied ? ` · ${denied} denied` : ''}`;
 }
 
 export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) {
@@ -77,6 +91,8 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
   const [permanentDelete, setPermanentDelete] = useState(false);
   const [expiresAt, setExpiresAt] = useState('');
   const [boundaries, setBoundaries] = useState<BoundaryDraft[]>([]);
+  const [spaceGrants, setSpaceGrants] = useState<GrantDraft[]>([]);
+  const [editingToken, setEditingToken] = useState<AiTokenListItem | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -97,7 +113,10 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
       setTokens(nextTokens);
       setSpaces(spaceResponse.items);
       setBootstrap(bootstrapResponse);
-      const tokenSpaceIds = Array.from(new Set(nextTokens.flatMap((token) => (token.boundaries ?? []).map((boundary) => boundary.spaceId)).filter(Boolean)));
+      const tokenSpaceIds = Array.from(new Set(nextTokens.flatMap((token) => [
+        ...(token.boundaries ?? []).map((boundary) => boundary.spaceId),
+        ...(token.spaceGrants ?? []).map((grant) => grant.spaceId),
+      ]).filter(Boolean)));
       if (tokenSpaceIds.length > 0) {
         const mountEntries = await Promise.all(tokenSpaceIds.map(async (spaceId) => {
           try {
@@ -129,19 +148,57 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setBoundaries((current) => current.filter((boundary) => boundary.key !== key));
   }
 
+  function addSpaceGrant() {
+    const firstSpace = spaces[0]?.id ?? '';
+    setSpaceGrants((current) => [...current, { key: createClientId(), spaceId: firstSpace, permission: 'viewer', denies: [] }]);
+  }
+
+  function removeSpaceGrant(key: string) {
+    setSpaceGrants((current) => current.filter((grant) => grant.key !== key));
+  }
+
+  function updateSpaceGrant(key: string, patch: Partial<GrantDraft>) {
+    setSpaceGrants((current) => current.map((grant) => (grant.key === key ? { ...grant, ...patch } : grant)));
+  }
+
+  function addFolderDeny(key: string) {
+    setSpaceGrants((current) => current.map((grant) => grant.key === key ? {
+      ...grant,
+      denies: [...grant.denies, { key: createClientId(), mountId: '', path: '' }],
+    } : grant));
+  }
+
+  function updateFolderDeny(grantKey: string, denyKey: string, patch: Partial<{ mountId: string; path: string }>) {
+    setSpaceGrants((current) => current.map((grant) => grant.key === grantKey ? {
+      ...grant,
+      denies: grant.denies.map((deny) => deny.key === denyKey ? { ...deny, ...patch } : deny),
+    } : grant));
+  }
+
+  function removeFolderDeny(grantKey: string, denyKey: string) {
+    setSpaceGrants((current) => current.map((grant) => grant.key === grantKey ? {
+      ...grant,
+      denies: grant.denies.filter((deny) => deny.key !== denyKey),
+    } : grant));
+  }
+
   function updateBoundary(key: string, patch: Partial<BoundaryDraft>) {
     setBoundaries((current) => current.map((boundary) => (boundary.key === key ? { ...boundary, ...patch } : boundary)));
   }
 
   useEffect(() => {
-    boundaries.forEach((boundary) => {
-      if (boundary.spaceId && !mountsBySpace[boundary.spaceId]) {
-        void listMounts(boundary.spaceId).then((response) => {
-          setMountsBySpace((current) => ({ ...current, [boundary.spaceId]: response.items }));
+    const spaceIds = new Set([
+      ...boundaries.map((boundary) => boundary.spaceId),
+      ...spaceGrants.map((grant) => grant.spaceId),
+    ]);
+    spaceIds.forEach((spaceId) => {
+      if (spaceId && !mountsBySpace[spaceId]) {
+        void listMounts(spaceId).then((response) => {
+          setMountsBySpace((current) => ({ ...current, [spaceId]: response.items }));
         }).catch(() => undefined);
       }
     });
-  }, [boundaries, mountsBySpace]);
+  }, [boundaries, mountsBySpace, spaceGrants]);
 
   function resetForm() {
     setName('');
@@ -149,6 +206,28 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setPermanentDelete(false);
     setExpiresAt('');
     setBoundaries([]);
+    setSpaceGrants([]);
+    setEditingToken(null);
+  }
+
+  function openCreateForm() {
+    resetForm();
+    setFormOpen(true);
+  }
+
+  function openEditForm(token: AiTokenListItem) {
+    setEditingToken(token);
+    setName(token.name);
+    setExpiresAt(token.expiresAt ? token.expiresAt.slice(0, 16) : '');
+    setPreset('readOnly');
+    setPermanentDelete((token.scopes ?? []).includes('files:purge'));
+    setSpaceGrants((token.spaceGrants ?? []).map((grant) => ({
+      key: createClientId(),
+      spaceId: grant.spaceId,
+      permission: grant.permission,
+      denies: (grant.folderDenylist ?? []).map((deny) => ({ key: createClientId(), mountId: deny.mountId, path: deny.path })),
+    })));
+    setFormOpen(true);
   }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -157,30 +236,36 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
     setCreating(true);
     setError('');
     try {
-      const validBoundaries = boundaries.filter((boundary) => boundary.spaceId && boundary.mountId);
-      if (validBoundaries.length === 0) {
-        setError(text.tokenBoundaryRequired);
+      const validGrants = spaceGrants.filter((grant) => grant.spaceId).map((grant) => ({
+        spaceId: grant.spaceId,
+        permission: grant.permission,
+        folderDenylist: grant.denies.filter((deny) => deny.mountId && deny.path.trim()).map((deny) => ({ mountId: deny.mountId, path: deny.path.trim() })),
+      }));
+      if (validGrants.length === 0) {
+        setError(text.tokenSpaceRequired);
         return;
       }
       const scopes: AiTokenScope[] = [
         ...MCP_PRESETS[preset],
         ...(permanentDelete ? MCP_PRESETS.permanentDelete : []),
       ];
-      const result = await runSensitive(() => createAiToken({
+      const payload = {
         name: name.trim(),
         scopes,
-        boundaries: validBoundaries.map((boundary) => ({
-          spaceId: boundary.spaceId,
-          mountId: boundary.mountId,
-          path: boundary.path.trim() || '.',
-        })),
+        authorizationModel: 'space_grant' as const,
+        spaceGrants: validGrants,
         // An empty expiry means the token never expires.
         ...(expiresAt ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
-      }));
-      const connection = buildInspectorConnection(globalThis.location?.origin ?? '', result.bearerToken);
-      setCreatedToken({ bearerToken: result.bearerToken, connection });
-      setCopied(false);
-      setConnectionCopied(false);
+      };
+      if (editingToken) {
+        await runSensitive(() => updateAiToken(editingToken.id, payload));
+      } else {
+        const result = await runSensitive(() => createAiToken(payload));
+        const connection = buildInspectorConnection(globalThis.location?.origin ?? '', result.bearerToken);
+        setCreatedToken({ bearerToken: result.bearerToken, connection });
+        setCopied(false);
+        setConnectionCopied(false);
+      }
       setFormOpen(false);
       resetForm();
       await load();
@@ -225,7 +310,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
         <div><h1>{text.tokensTitle}</h1><p>{text.tokensTitleDetail}</p></div>
         <div className="member-admin-table-actions">
           <button className="member-secondary-action" type="button" onClick={() => void load()} disabled={loading}>{text.refresh}</button>
-          <button className="member-primary" type="button" onClick={() => setFormOpen(true)}>{text.tokenCreate}</button>
+          <button className="member-primary" type="button" onClick={openCreateForm}>{text.tokenCreate}</button>
         </div>
       </div>
 
@@ -240,11 +325,16 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
             <tr key={token.id}>
               <td>{token.name}</td>
               <td>{(token.scopes ?? []).join(', ') || '--'}</td>
-              <td>{(token.boundaries ?? []).length === 0 ? '--' : token.boundaries!.map((boundary) => boundarySummary(boundary, spaces, mountsBySpace)).join('; ')}</td>
+              <td>{token.authorizationModel === 'space_grant'
+                ? ((token.spaceGrants ?? []).length === 0 ? '--' : token.spaceGrants!.map((grant) => grantSummary(grant, spaces)).join('; '))
+                : ((token.boundaries ?? []).length === 0 ? text.tokenLegacyBoundary : token.boundaries!.map((boundary) => boundarySummary(boundary, spaces, mountsBySpace)).join('; '))}</td>
               <td>{formatDate(token.expiresAt, locale, text.tokenNeverExpires)}</td>
               <td>{formatDate(token.lastUsedAt, locale, '--')}</td>
               <td>{tokenStatusLabel(token.status, text)}</td>
-              <td><button className="member-table-action member-table-danger" type="button" onClick={() => setDeleteTarget(token)} disabled={loading}>{text.tokenRevoke}</button></td>
+              <td>
+                {token.authorizationModel === 'space_grant' && <button className="member-table-action" type="button" onClick={() => openEditForm(token)} disabled={loading}>{text.tokenEdit}</button>}
+                <button className="member-table-action member-table-danger" type="button" onClick={() => setDeleteTarget(token)} disabled={loading}>{text.tokenRevoke}</button>
+              </td>
             </tr>
           ))}</tbody>
         </table>
@@ -253,7 +343,7 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
       {formOpen && (
         <div className="member-modal-backdrop">
           <form className="member-modal member-admin-form" onSubmit={onSubmit}>
-            <h2 className="member-admin-form-wide">{text.tokenCreate}</h2>
+            <h2 className="member-admin-form-wide">{editingToken ? text.tokenEdit : text.tokenCreate}</h2>
             <label className="member-admin-form-wide">{text.tokenName}<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
             <fieldset className="member-admin-form-wide member-mcp-presets">
               <legend>{text.tokenPresetTitle}</legend>
@@ -273,26 +363,42 @@ export default function MemberTokensPanel({ locale }: { locale: MemberLocale }) 
             </fieldset>
             <label className="member-admin-form-wide">{text.tokenExpiresAt}<input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /><small className="member-path-hint">{text.tokenExpiryOptional}</small></label>
 
-            <div className="member-admin-form-wide member-token-boundaries">
-              {boundaries.map((boundary) => (
-                <div className="member-token-boundary-row" key={boundary.key}>
-                  <select value={boundary.spaceId} onChange={(event) => updateBoundary(boundary.key, { spaceId: event.target.value, mountId: '' })}>
-                    <option value="" disabled>{text.tokenBoundarySpace}</option>
+            <fieldset className="member-admin-form-wide member-token-boundaries">
+              <legend>{text.tokenSpaceAccessTitle}</legend>
+              <p className="member-path-hint">{text.tokenSpaceAccessHint}</p>
+              {spaceGrants.map((grant) => (
+                <div className="member-token-boundary-row" key={grant.key}>
+                  <select value={grant.spaceId} onChange={(event) => updateSpaceGrant(grant.key, { spaceId: event.target.value, denies: [] })}>
+                    <option value="" disabled>{text.tokenSpace}</option>
                     {spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}
                   </select>
-                  <select value={boundary.mountId} onChange={(event) => updateBoundary(boundary.key, { mountId: event.target.value })}>
-                    <option value="" disabled>{text.tokenBoundaryMount}</option>
-                    {(mountsBySpace[boundary.spaceId] ?? []).map((mount) => <option key={mount.id} value={mount.id}>{mount.name}</option>)}
+                  <select value={grant.permission} onChange={(event) => updateSpaceGrant(grant.key, { permission: event.target.value as 'viewer' | 'editor' })}>
+                    <option value="viewer">{text.tokenPermissionViewer}</option>
+                    <option value="editor">{text.tokenPermissionEditor}</option>
                   </select>
-                  <input value={boundary.path} onChange={(event) => updateBoundary(boundary.key, { path: event.target.value })} placeholder={text.tokenBoundaryPath} />
-                  <button type="button" onClick={() => removeBoundary(boundary.key)} aria-label={text.tokenBoundaryRemove} title={text.tokenBoundaryRemove}>×</button>
+                  <button type="button" onClick={() => removeSpaceGrant(grant.key)} aria-label={text.tokenRemoveSpace} title={text.tokenRemoveSpace}>×</button>
+                  <div className="member-token-denylist">
+                    <strong>{text.tokenFolderBlacklist}</strong>
+                    <small className="member-path-hint">{text.tokenFolderBlacklistHint}</small>
+                    {grant.denies.map((deny) => (
+                      <div className="member-token-boundary-row" key={deny.key}>
+                        <select value={deny.mountId} onChange={(event) => updateFolderDeny(grant.key, deny.key, { mountId: event.target.value })}>
+                          <option value="">{text.tokenBlacklistMount}</option>
+                          {(mountsBySpace[grant.spaceId] ?? []).map((mount) => <option key={mount.id} value={mount.id}>{mount.name}</option>)}
+                        </select>
+                        <input value={deny.path} onChange={(event) => updateFolderDeny(grant.key, deny.key, { path: event.target.value })} placeholder={text.tokenBlacklistPath} />
+                        <button type="button" onClick={() => removeFolderDeny(grant.key, deny.key)} aria-label={text.tokenBoundaryRemove} title={text.tokenBoundaryRemove}>×</button>
+                      </div>
+                    ))}
+                    <button type="button" onClick={() => addFolderDeny(grant.key)}>{text.tokenAddBlacklist}</button>
+                  </div>
                 </div>
               ))}
-              <button type="button" onClick={addBoundary}>{text.tokenAddBoundary}</button>
-            </div>
+              <button type="button" onClick={addSpaceGrant}>{text.tokenAddSpace}</button>
+            </fieldset>
 
             {error && <div className="member-error member-page-error member-admin-form-wide">{text.error}: {error}</div>}
-            <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={() => setFormOpen(false)}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{text.tokenSubmit}</button></div>
+            <div className="member-admin-form-wide member-modal-actions"><button type="button" onClick={() => { setFormOpen(false); resetForm(); }}>{text.cancel}</button><button className="member-primary" type="submit" disabled={creating}>{editingToken ? text.tokenSave : text.tokenSubmit}</button></div>
           </form>
         </div>
       )}

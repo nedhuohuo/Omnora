@@ -11,8 +11,8 @@ import (
 	"omnora/internal/aitoken"
 	"omnora/internal/catalog"
 	"omnora/internal/domain"
-	"omnora/internal/files"
 	"omnora/internal/fileops"
+	"omnora/internal/files"
 	"omnora/internal/storage"
 )
 
@@ -129,15 +129,24 @@ ORDER BY sp.kind, sp.name, sp.id
 			continue
 		}
 		if subject.Principal != nil {
-			// A persisted boundary alone is not sufficient: the mount may have
-			// been disabled, become unavailable, drifted in identity, or no
-			// longer belong to this space. visibleMounts replays the complete
-			// live Guard path for every current boundary.
-			records, err := s.visibleMounts(ctx, subject, space.ID, aitoken.ScopeSpacesRead)
-			if err != nil {
-				return nil, err
-			}
-			if len(records) == 0 {
+			switch subject.Principal.AuthorizationModel {
+			case aitoken.AuthorizationModelSpaceGrant:
+				if _, ok := memberfilesSpaceGrant(*subject.Principal, space.ID); !ok {
+					continue
+				}
+			case aitoken.AuthorizationModelLegacyBoundary:
+				// A persisted boundary alone is not sufficient: the mount may have
+				// been disabled, become unavailable, drifted in identity, or no
+				// longer belong to this space. visibleMounts replays the complete
+				// live Guard path for every current boundary.
+				records, err := s.visibleMounts(ctx, subject, space.ID, aitoken.ScopeSpacesRead)
+				if err != nil {
+					return nil, err
+				}
+				if len(records) == 0 {
+					continue
+				}
+			default:
 				continue
 			}
 		}
@@ -301,9 +310,24 @@ func (s *Service) currentBoundaries(ctx context.Context, subject access.Subject,
 	if strings.TrimSpace(subject.Principal.TokenID) == "" {
 		return nil, ErrUnauthorized
 	}
+	fresh, err := s.refreshPrincipal(ctx, subject)
+	if err != nil {
+		return nil, err
+	}
+	switch fresh.AuthorizationModel {
+	case aitoken.AuthorizationModelSpaceGrant:
+		if _, ok := memberfilesSpaceGrant(fresh, spaceID); ok {
+			return []string{"."}, nil
+		}
+		return nil, nil
+	case aitoken.AuthorizationModelLegacyBoundary:
+		// Continue with the persisted legacy boundary lookup below.
+	default:
+		return nil, access.ErrForbidden
+	}
 	rows, err := s.db.QueryContext(ctx, `
-	SELECT relative_path
-	FROM ai_token_boundaries
+		SELECT relative_path
+		FROM ai_token_boundaries
 WHERE token_id = ? AND space_id = ? AND mount_id = ?
 ORDER BY relative_path
 `, subject.Principal.TokenID, spaceID, mountID)
@@ -327,4 +351,61 @@ ORDER BY relative_path
 		return nil, err
 	}
 	return boundaries, nil
+}
+
+func (s *Service) currentFolderPolicy(ctx context.Context, subject access.Subject, spaceID, mountID string) (access.FolderPolicy, bool, error) {
+	if subject.Principal == nil {
+		return access.FolderPolicy{}, false, nil
+	}
+	fresh, err := s.refreshPrincipal(ctx, subject)
+	if err != nil {
+		return access.FolderPolicy{}, false, err
+	}
+	switch fresh.AuthorizationModel {
+	case aitoken.AuthorizationModelLegacyBoundary:
+		return access.FolderPolicy{}, false, nil
+	case aitoken.AuthorizationModelSpaceGrant:
+		grant, ok := memberfilesSpaceGrant(fresh, spaceID)
+		if !ok {
+			return access.FolderPolicy{}, false, access.ErrForbidden
+		}
+		policy, err := access.NewFolderPolicy(grant, mountID)
+		return policy, true, err
+	default:
+		return access.FolderPolicy{}, false, access.ErrForbidden
+	}
+}
+
+func (s *Service) refreshPrincipal(ctx context.Context, subject access.Subject) (aitoken.Principal, error) {
+	if subject.Principal == nil || strings.TrimSpace(subject.Principal.TokenID) == "" {
+		return aitoken.Principal{}, ErrUnauthorized
+	}
+	tokens := s.tokens
+	if tokens == nil {
+		tokens = aitoken.NewService(s.db)
+	}
+	fresh, err := tokens.RefreshPrincipal(ctx, subject.Principal.TokenID)
+	if err != nil {
+		return aitoken.Principal{}, err
+	}
+	if fresh.AccountID != subject.AccountID {
+		return aitoken.Principal{}, access.ErrUnauthorized
+	}
+	return fresh, nil
+}
+
+func memberfilesSpaceGrant(principal aitoken.Principal, spaceID string) (aitoken.SpaceGrant, bool) {
+	var matched aitoken.SpaceGrant
+	found := false
+	for _, grant := range principal.SpaceGrants {
+		if grant.SpaceID != spaceID {
+			continue
+		}
+		if found {
+			return aitoken.SpaceGrant{}, false
+		}
+		matched = grant
+		found = true
+	}
+	return matched, found
 }

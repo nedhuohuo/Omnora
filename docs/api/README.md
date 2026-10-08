@@ -35,7 +35,8 @@ curl -fsS -b /tmp/omnora.cookies \
   -d '{
     "name":"mcp-reader",
     "scopes":["spaces:read","files:list","files:metadata","files:text","files:download_ticket","search:read"],
-    "boundaries":[{"spaceId":"space-id","mountId":"mount-id","path":"docs"}],
+    "authorizationModel":"space_grant",
+    "spaceGrants":[{"spaceId":"space-id","permission":"viewer","folderDenylist":[{"mountId":"mount-id","path":"private"}]}],
     "expiresAt":"2026-09-01T00:00:00Z"
   }' "$OMNORA_BASE_URL/api/v1/ai-tokens"
 ```
@@ -46,6 +47,8 @@ AI Token scope 的完整枚举为：
 `files:restore`、`files:purge`、`shares:read`、`shares:create`、`shares:revoke`。
 明文 secret 和 `bearerToken` 只在创建响应显示一次；成员只能管理自己的 Token，管理员只能
 查看元数据和撤销。
+
+Token 的授权主体是账号下的整个空间，而不是插槽目录。`viewer` 默认仅查看，`editor` 还要同时满足账号 ACL 和挂载读写模式。`folderDenylist` 中的目录及其子目录禁止 MCP 访问；服务端创建或编辑时会采集目录身份指纹，目录被替换后进入 `needs_review` 并拒绝访问。旧版 `boundaries` Token 仍可使用，但转换为新模型必须显式提交 `convertLegacy: true`。
 
 ## 常用 REST 流程
 
@@ -58,9 +61,10 @@ AI Token scope 的完整枚举为：
 写入、删除、回收站、跨挂载复制/移动和分享都按实时 ACL、挂载身份、只读模式、目录边界
 和对象状态检查。高风险 MCP 工具还需要每次 MRTR 确认；REST 管理空间删除也有服务端确认。
 
-外部挂载注册到预声明根的直接子路径（插槽）时，系统自动在该插槽下创建以空间 ID 命名的
-子目录并注册为挂载，多个空间可共享同一插槽；插槽本身不注册。插槽只在其为独立 bind
-mount（部署者已映射 NAS 文件夹）时出现在宿主目录建议中，未绑定的插槽不展示。
+外部挂载注册到预声明根的直接子路径（插槽）时，系统直接注册该插槽目录本身；不会创建
+以空间 ID 命名的子目录，因此该目录既有的 NAS 文件会从挂载根目录显示。一个活动目录只能
+注册到一个空间。插槽只在其为独立 bind mount（部署者已映射 NAS 文件夹）时出现在宿主目录
+建议中，未绑定的插槽不展示。
 
 ## 错误、分页和传输
 

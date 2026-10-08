@@ -46,6 +46,9 @@ import { applyThemePreference } from './theme';
 import { RecentReauthProvider } from './RecentReauthProvider';
 import { stateForSession } from './sessionFlow';
 import { formatDirectoryChildren, mountDeletePolicy, mountSupportsTrash, type MemberDirectoryEntry, type MemberMount, type MemberSearchResult, type MemberSpace, type TransferItem } from './types';
+import MemberWorkspaceNavigation from './MemberWorkspaceNavigation';
+import { orderedMemberSpaceFolders } from './spaceNavigation';
+import { createSpaceRequestToken, createSpaceSelectionTransition, isSpaceRequestCurrent, mergeMountSelectionState, nextSpaceRequestGeneration, resolveAccessibleSpaceId, resolveTrashTabState, transitionSpaceRequestCommit, type SpaceRequestCommitPhase, type SpaceRequestToken, type SpaceSelectionState } from './spaceSelection';
 import { resumedUploadProgress, uploadStorageKey } from './uploadQueue';
 import { createClientId } from './clientId';
 import { useLocale } from './useLocale';
@@ -188,6 +191,10 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const fileInputRef = useRef<HTMLInputElement>(null);
   const controllersRef = useRef(new Map<string, AbortController>());
   const pendingDirectoryPathRef = useRef<string | null>(null);
+  const activeSpaceIdRef = useRef('');
+  const spaceRequestGenerationRef = useRef(0);
+  const activeTabRef = useRef<MemberTab | AdminTab>(activeTab);
+  activeTabRef.current = activeTab;
 
   const activeSpace = useMemo(() => spaces.find((space) => space.id === activeSpaceId) ?? null, [activeSpaceId, spaces]);
   const activeMount = useMemo(() => mounts.find((mount) => mount.id === activeMountId) ?? null, [activeMountId, mounts]);
@@ -195,21 +202,99 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   const mountUnavailable = activeMount?.health === 'unavailable' || activeMount?.health === 'disabled';
   const writeBlocked = readOnly || mountUnavailable;
 
+  function applySpaceSelection(selection: SpaceSelectionState) {
+    spaceRequestGenerationRef.current = nextSpaceRequestGeneration(
+      activeSpaceIdRef.current,
+      selection.activeSpaceId,
+      spaceRequestGenerationRef.current,
+    );
+    activeSpaceIdRef.current = selection.activeSpaceId;
+    setActiveSpaceId(selection.activeSpaceId);
+    setMounts(selection.mounts);
+    setActiveMountId(selection.activeMountId);
+    setDestinationSpaceId(selection.destinationSpaceId);
+    setDestinationMounts(selection.destinationMounts);
+    setDestinationMountId(selection.destinationMountId);
+    setDestinationPath(selection.destinationPath);
+    setRelativePath(selection.relativePath);
+    setEntries(selection.entries);
+    setTrashItems(selection.trashItems);
+    setReadOnly(selection.readOnly);
+    setLoading(selection.loading);
+    setError(selection.error);
+    setSearchQuery(selection.searchQuery);
+    setSearchResults(selection.searchResults);
+    setSearchNextCursor(selection.searchNextCursor);
+    setNewFolderOpen(selection.newFolderOpen);
+    setFolderName(selection.folderName);
+    setPreview(selection.preview);
+    setPreviewFailed(selection.previewFailed);
+    setPreviewText(selection.previewText);
+    setPreviewBlobUrl(selection.previewBlobUrl);
+    setShareTarget(selection.shareTarget);
+    setShareCreatedResult(selection.shareCreatedResult);
+    setRenameTarget(selection.renameTarget);
+    setRenameValue(selection.renameValue);
+    setRenameBusy(selection.renameBusy);
+    setDeleteTarget(selection.deleteTarget);
+    setDeleteBusy(selection.deleteBusy);
+    setOperationTarget(selection.operationTarget);
+    setOperationBusy(selection.operationBusy);
+    setResumeSelectMode(selection.resumeSelectMode);
+  }
+
+  function currentSpaceRequest(spaceId: string): SpaceRequestToken {
+    return createSpaceRequestToken(spaceId, spaceRequestGenerationRef.current);
+  }
+
+  function requestIsCurrent(request: SpaceRequestToken): boolean {
+    return isSpaceRequestCurrent(request, activeSpaceIdRef.current, spaceRequestGenerationRef.current);
+  }
+
+  function commitCurrentSpaceRequest(
+    request: SpaceRequestToken,
+    phase: SpaceRequestCommitPhase,
+    commit: () => void,
+  ): boolean {
+    const transition = transitionSpaceRequestCommit(
+      { committed: false },
+      request,
+      activeSpaceIdRef.current,
+      spaceRequestGenerationRef.current,
+      { phase, patch: { committed: true } },
+    );
+    if (!transition.state.committed) return false;
+    commit();
+    return true;
+  }
+
+  function applySpaceTransition(spaceId: string, tab = activeTabRef.current) {
+    const transition = createSpaceSelectionTransition(tab, spaceId);
+    setActiveTab(transition.activeTab);
+    applySpaceSelection(transition);
+  }
+
   const refreshDirectory = useCallback(async (spaceId: string, mountId: string, path: string) => {
     if (!spaceId || !mountId) return;
+    const request = currentSpaceRequest(spaceId);
+    if (!requestIsCurrent(request)) return;
     setLoading(true);
     setError('');
     try {
       const listing = formatDirectoryChildren(await listDirectoryChildren(spaceId, mountId, path));
-      setRelativePath(listing.relativePath);
-      setEntries(listing.entries);
-      setReadOnly(listing.readOnly);
+      commitCurrentSpaceRequest(request, 'success', () => {
+        setRelativePath(listing.relativePath);
+        setEntries(listing.entries);
+        setReadOnly(listing.readOnly);
+      });
     } catch (caught) {
-      setEntries([]);
-      setError(describeError(caught));
-      if (caught instanceof ApiError && caught.status === 401) setSessionState('signed-out');
+      commitCurrentSpaceRequest(request, 'error', () => {
+        setEntries([]);
+        setError(describeError(caught));
+        if (caught instanceof ApiError && caught.status === 401) setSessionState('signed-out');
+      });
     } finally {
-      setLoading(false);
+      commitCurrentSpaceRequest(request, 'finally', () => setLoading(false));
     }
   }, []);
 
@@ -219,7 +304,8 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     try {
       const response = await listSpaces();
       setSpaces(response.items);
-      setActiveSpaceId((current) => response.items.some((space) => space.id === current) ? current : (response.items[0]?.id ?? ''));
+      const nextSpaceId = resolveAccessibleSpaceId(response.items, activeSpaceIdRef.current);
+      if (nextSpaceId !== activeSpaceIdRef.current) applySpaceTransition(nextSpaceId);
     } catch (caught) {
       setError(describeError(caught));
       if (caught instanceof ApiError && caught.status === 401) setSessionState('signed-out');
@@ -228,23 +314,27 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     }
   }, []);
 
-  function selectSpace(spaceId: string) {
-    setActiveSpaceId(spaceId);
+  function selectSpace(spaceId: string, tab = activeTabRef.current) {
+    if (spaceId === activeSpaceId) return;
+    pendingDirectoryPathRef.current = null;
+    applySpaceTransition(spaceId, tab);
+  }
+
+  function activateMemberTab(tab: MemberTab) {
+    if (tab !== 'files') {
+      setActiveTab(tab);
+      return;
+    }
+    if (activeSpaceId) {
+      selectSpace('', 'files');
+      return;
+    }
     setActiveTab('files');
-    setMounts([]);
-    setActiveMountId('');
-    setTrashItems([]);
-    setEntries([]);
-    setRelativePath('.');
-    setSearchResults(null);
-    setSearchNextCursor('');
-    setError('');
   }
 
   function selectMount(mount: MemberMount) {
     setActiveMountId(mount.id);
     if (!mountSupportsTrash(mount)) {
-      setActiveTab('files');
       setTrashItems([]);
       setError('');
     }
@@ -255,16 +345,20 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
       setTrashItems([]);
       return;
     }
+    const request = currentSpaceRequest(activeSpaceId);
+    if (!requestIsCurrent(request)) return;
     setLoading(true);
     setError('');
     try {
       const response = await listTrash(activeSpaceId, activeMountId);
-      setTrashItems(response.items ?? []);
+      commitCurrentSpaceRequest(request, 'success', () => setTrashItems(response.items ?? []));
     } catch (caught) {
-      setTrashItems([]);
-      setError(describeError(caught));
+      commitCurrentSpaceRequest(request, 'error', () => {
+        setTrashItems([]);
+        setError(describeError(caught));
+      });
     } finally {
-      setLoading(false);
+      commitCurrentSpaceRequest(request, 'finally', () => setLoading(false));
     }
   }, [activeMountId, activeMountSupportsTrash, activeSpaceId]);
 
@@ -302,27 +396,27 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   }, [loadSpaces]);
 
   useEffect(() => {
-    if (!activeSpaceId || sessionState !== 'ready') return;
+    if (sessionState !== 'ready') return;
+    pendingDirectoryPathRef.current = null;
+    applySpaceTransition(activeSpaceId);
+    if (!activeSpaceId) return;
+    const controller = new AbortController();
     void (async () => {
       setLoading(true);
-      setError('');
       try {
-        const response = await listMounts(activeSpaceId);
-        setMounts(response.items);
-        setActiveMountId((current) => {
-          if (response.items.some((mount) => mount.id === current)) return current;
-          const active = response.items.find((mount) => mount.health === 'active');
-          return active?.id ?? response.items[0]?.id ?? '';
-        });
-        setRelativePath('.');
-        setSearchResults(null);
-        setSearchNextCursor('');
+        const response = await listMounts(activeSpaceId, controller.signal);
+        if (!controller.signal.aborted) {
+          const mountSelection = mergeMountSelectionState({ activeSpaceId }, response.items);
+          setMounts(mountSelection.mounts);
+          setActiveMountId(mountSelection.activeMountId);
+        }
       } catch (caught) {
-        setError(describeError(caught));
+        if (!controller.signal.aborted) setError(describeError(caught));
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     })();
+    return () => controller.abort();
   }, [activeSpaceId, sessionState]);
 
   useEffect(() => {
@@ -333,14 +427,13 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   }, [activeMountId, activeSpaceId, refreshDirectory, sessionState]);
 
   useEffect(() => {
-    if (activeTab !== 'trash') return;
-    if (!activeMountSupportsTrash) {
-      setActiveTab('files');
+    const trashState = resolveTrashTabState(activeTab, activeMountSupportsTrash);
+    if (trashState.clearTrash) {
       setTrashItems([]);
       setError('');
       return;
     }
-    if (sessionState === 'ready') void refreshTrash();
+    if (trashState.loadTrash && sessionState === 'ready') void refreshTrash();
   }, [activeMountSupportsTrash, activeTab, refreshTrash, sessionState]);
 
   useEffect(() => {
@@ -538,31 +631,39 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   async function onSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!activeSpaceId || !searchQuery.trim()) return;
+    const request = currentSpaceRequest(activeSpaceId);
+    if (!requestIsCurrent(request)) return;
     setLoading(true);
     setError('');
     try {
       const result = await searchSpace(activeSpaceId, searchQuery.trim());
-      setSearchResults(result.items ?? []);
-      setSearchNextCursor(result.nextCursor ?? '');
+      commitCurrentSpaceRequest(request, 'success', () => {
+        setSearchResults(result.items ?? []);
+        setSearchNextCursor(result.nextCursor ?? '');
+      });
     } catch (caught) {
-      setError(describeError(caught));
+      commitCurrentSpaceRequest(request, 'error', () => setError(describeError(caught)));
     } finally {
-      setLoading(false);
+      commitCurrentSpaceRequest(request, 'finally', () => setLoading(false));
     }
   }
 
   async function loadMoreSearchResults() {
     if (!activeSpaceId || !searchQuery.trim() || !searchNextCursor) return;
+    const request = currentSpaceRequest(activeSpaceId);
+    if (!requestIsCurrent(request)) return;
     setLoading(true);
     setError('');
     try {
       const result = await searchSpace(activeSpaceId, searchQuery.trim(), 50, searchNextCursor);
-      setSearchResults((current) => [...(current ?? []), ...(result.items ?? [])]);
-      setSearchNextCursor(result.nextCursor ?? '');
+      commitCurrentSpaceRequest(request, 'success', () => {
+        setSearchResults((current) => [...(current ?? []), ...(result.items ?? [])]);
+        setSearchNextCursor(result.nextCursor ?? '');
+      });
     } catch (caught) {
-      setError(describeError(caught));
+      commitCurrentSpaceRequest(request, 'error', () => setError(describeError(caught)));
     } finally {
-      setLoading(false);
+      commitCurrentSpaceRequest(request, 'finally', () => setLoading(false));
     }
   }
 
@@ -922,6 +1023,8 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
     previewKind: item.previewKind ?? 'unknown',
     mountName: readableLabel(mounts.find((mount) => mount.id === item.mountId)?.name),
   }));
+  const spaceFolders = useMemo(() => orderedMemberSpaceFolders(spaces), [spaces]);
+  const atSpaceRoot = activeTab === 'files' && !activeSpaceId;
   const crumbItems = breadcrumbs(relativePath);
   const previewSrc = preview ? previewURL(activeSpaceId, preview.mountId, preview.relativePath) : '';
   const previewDownload = preview ? downloadURL(activeSpaceId, preview.mountId, preview.relativePath) : '';
@@ -938,6 +1041,14 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
   ];
   const activeAdminTab = entry === 'admin' ? activeTab as AdminTab : null;
   const activeAdminGroup = activeAdminTab ? adminNavigation.find((group) => group.id === adminGroupForTab(activeAdminTab)) ?? adminNavigation[0] : null;
+  const memberNavigation = [
+    { id: 'files', label: text.files },
+    { id: 'trash', label: text.recycleBin },
+    { id: 'shares', label: text.navShares },
+    { id: 'tokens', label: text.navTokens },
+    { id: 'docs', label: text.navDocs },
+    { id: 'account', label: text.account },
+  ];
 
   return (
     <RecentReauthProvider locale={locale}>
@@ -955,16 +1066,7 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
               <button className={`member-nav ${activeAdminGroup?.id === group.id ? 'active' : ''}`} type="button" onClick={() => activateAdminGroup(group.id)} key={group.id}>{group.label}</button>
             ))}
           </nav>}
-          {entry === 'member' && <nav aria-label="Member workspace">
-            <button className={`member-nav ${activeTab === 'files' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('files')}>{text.files}</button>
-            {activeMountSupportsTrash && <button className={`member-nav ${activeTab === 'trash' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('trash')}>{text.recycleBin}</button>}
-            <button className={`member-nav ${activeTab === 'shares' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('shares')}>{text.navShares}</button>
-            <button className={`member-nav ${activeTab === 'tokens' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('tokens')}>{text.navTokens}</button>
-            <button className={`member-nav ${activeTab === 'docs' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('docs')}>{text.navDocs}</button>
-            <button className={`member-nav ${activeTab === 'account' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('account')}>{text.account}</button>
-          </nav>}
-          {(activeTab === 'files' || activeTab === 'trash') && <><div className="member-sidebar-section"><p>{text.spaces}</p>{spaces.map((space) => <button className={`member-space ${space.id === activeSpaceId ? 'selected' : ''}`} key={space.id} type="button" onClick={() => selectSpace(space.id)}>{space.name}<small>{space.role}</small></button>)}</div>
-          <div className="member-sidebar-section"><p>{text.mounts}</p>{mounts.map((mount) => <button className={`member-mount ${mount.id === activeMountId ? 'selected' : ''}`} key={mount.id} type="button" onClick={() => selectMount(mount)}><span>{mount.name}</span><small>{mount.health === 'unavailable' ? text.statusUnavailable : mount.mode === 'read-only' ? text.readOnly : text.readWrite}</small></button>)}</div></>}
+          {entry === 'member' && <MemberWorkspaceNavigation items={memberNavigation} activeTab={activeTab} onSelect={(tab) => activateMemberTab(tab as MemberTab)} />}
         </aside>
 
         <section className="member-content">
@@ -985,14 +1087,14 @@ export default function MemberFilesApp({ entry = 'member' }: MemberFilesAppProps
             </div>
           )}
           {activeTab === 'files' ? <div className="member-page-flow">
-          <div className="member-crumbs"><button type="button" onClick={() => openDirectory('.')}>{activeSpace?.name ?? text.myFiles}</button>{crumbItems.map((part, index) => <span key={`${part}-${index}`}><b>/</b><button type="button" onClick={() => openDirectory(crumbItems.slice(0, index + 1).join('/'))}>{part}</button></span>)}</div>
-          <div className="member-heading"><div><h1>{searchResults === null ? text.myFiles : `${text.search}: ${searchQuery}`}</h1><p>{activeMount ? `${activeMount.name} · ${mountUnavailable ? text.statusUnavailable : readOnly ? text.readOnly : text.readWrite}` : text.noMount}</p></div><div className="member-view-toggle"><button type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}>{text.list}</button><button type="button" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}>{text.grid}</button></div></div>
-          <div className="member-toolbar"><button className="member-primary" type="button" disabled={writeBlocked || !activeMountId} onClick={() => fileInputRef.current?.click()}>{text.upload}</button><button type="button" disabled={writeBlocked || !activeMountId} onClick={() => setNewFolderOpen(true)}>{text.newFolder}</button>{canManageShares && searchResults === null && <button type="button" disabled={!activeMountId} onClick={openShareForCurrentPath}>{text.shareAction}</button>}{searchResults !== null && <button type="button" onClick={() => { setSearchResults(null); setSearchNextCursor(''); setSearchQuery(''); }}>{text.clearSearch}</button>}<span className="member-toolbar-spacer" /><button type="button" onClick={() => void refreshDirectory(activeSpaceId, activeMountId, relativePath)} disabled={loading || !activeMountId || mountUnavailable}>{text.refresh}</button><input ref={fileInputRef} type="file" multiple hidden onChange={onFileInput} /></div>
+          <div className="member-crumbs">{activeSpace ? <><button type="button" onClick={() => selectSpace('', 'files')}>{text.files}</button><b>/</b><button type="button" onClick={() => openDirectory('.')}>{activeSpace.name}</button>{crumbItems.map((part, index) => <span key={`${part}-${index}`}><b>/</b><button type="button" onClick={() => openDirectory(crumbItems.slice(0, index + 1).join('/'))}>{part}</button></span>)}</> : <span>{text.files}</span>}</div>
+          <div className="member-heading"><div><h1>{atSpaceRoot ? text.files : searchResults === null ? text.myFiles : `${text.search}: ${searchQuery}`}</h1><p>{atSpaceRoot ? text.noSpaces : activeMount ? `${activeMount.name} · ${mountUnavailable ? text.statusUnavailable : readOnly ? text.readOnly : text.readWrite}` : text.noMount}</p></div>{!atSpaceRoot && <div className="member-view-toggle"><button type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}>{text.list}</button><button type="button" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}>{text.grid}</button></div>}</div>
+          {!atSpaceRoot && <div className="member-toolbar"><button className="member-primary" type="button" disabled={writeBlocked || !activeMountId} onClick={() => fileInputRef.current?.click()}>{text.upload}</button><button type="button" disabled={writeBlocked || !activeMountId} onClick={() => setNewFolderOpen(true)}>{text.newFolder}</button>{canManageShares && searchResults === null && <button type="button" disabled={!activeMountId} onClick={openShareForCurrentPath}>{text.shareAction}</button>}{searchResults !== null && <button type="button" onClick={() => { setSearchResults(null); setSearchNextCursor(''); setSearchQuery(''); }}>{text.clearSearch}</button>}<span className="member-toolbar-spacer" /><button type="button" onClick={() => void refreshDirectory(activeSpaceId, activeMountId, relativePath)} disabled={loading || !activeMountId || mountUnavailable}>{text.refresh}</button><input ref={fileInputRef} type="file" multiple hidden onChange={onFileInput} /></div>}
           {mountUnavailable && activeMount && <p className="member-readonly">{text.mountUnavailableHint}</p>}
           {!mountUnavailable && readOnly && activeMount && <p className="member-readonly">{text.uploadBlocked}</p>}
           {searchResults !== null && <p className="member-search-scope">{text.searchScope}</p>}
           {error && <div className="member-error member-page-error">{text.error}: {error}</div>}
-          {loading ? <div className="member-loading">{text.loading}</div> : visibleEntries.length === 0 ? <div className="member-empty">{spaces.length === 0 ? text.noSpaces : activeMount ? text.emptyFolder : text.noMount}</div> : viewMode === 'list' ? (
+          {atSpaceRoot ? spaceFolders.length === 0 ? <div className="member-empty">{text.noSpaces}</div> : <table className="member-file-table"><thead><tr><th>{text.name}</th><th>{text.actions}</th></tr></thead><tbody>{spaceFolders.map((space) => <tr key={space.id}><td><div className="member-file-name"><FileTypeIcon kind="dir" name={space.name} className="member-file-icon dir" /><button type="button" onClick={() => selectSpace(space.id, 'files')}>{space.name}</button></div></td><td><button type="button" onClick={() => selectSpace(space.id, 'files')}>{text.open}</button></td></tr>)}</tbody></table> : loading ? <div className="member-loading">{text.loading}</div> : visibleEntries.length === 0 ? <div className="member-empty">{spaces.length === 0 ? text.noSpaces : activeMount ? text.emptyFolder : text.noMount}</div> : viewMode === 'list' ? (
             <table className="member-file-table">
               <thead><tr><th>{text.name}</th><th>{text.size}</th><th>{text.modified}</th><th>{text.actions}</th></tr></thead>
               <tbody>{visibleEntries.map((entry) => (

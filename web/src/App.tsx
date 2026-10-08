@@ -1,4 +1,5 @@
 import MemberFilesApp from './member/MemberFilesApp';
+import ShareCollaborationPreview from './member/ShareCollaborationPreview';
 import SharePortalApp from './SharePortalApp';
 
 function RouteUnavailable({ title, detail }: { title: string; detail: string }) {
@@ -7,6 +8,9 @@ function RouteUnavailable({ title, detail }: { title: string; detail: string }) 
 
 export default function App() {
   const pathname = window.location.pathname;
+  if (import.meta.env.DEV && pathname === '/preview/sharing') {
+    return <ShareCollaborationPreview />;
+  }
   if (pathname === '/' || pathname === '/app' || pathname.startsWith('/app/')) {
     return <MemberFilesApp entry="member" />;
   }

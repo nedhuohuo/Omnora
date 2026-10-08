@@ -5,14 +5,17 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
+	"omnora/internal/domain"
 	"omnora/internal/mountid"
 	"omnora/internal/share"
 	"omnora/internal/store"
@@ -84,6 +87,45 @@ func (f shareFixture) viewer() access.Subject { return access.Subject{AccountID:
 
 func (f shareFixture) locator(path string) access.Locator {
 	return access.Locator{SpaceID: f.spaceID, MountID: f.mountID, Path: path}
+}
+
+func (f shareFixture) spaceGrantToken(t *testing.T, permission domain.SpacePermission, denies []aitoken.FolderDeny) access.Subject {
+	t.Helper()
+	issued, err := aitoken.NewService(f.db).CreateSpaceGrant(context.Background(), aitoken.CreateSpaceGrantRequest{
+		AccountID: "acct-manager",
+		Name:      "membershare space grant token",
+		Scopes:    []aitoken.Scope{aitoken.ScopeSharesCreate, aitoken.ScopeSharesRead, aitoken.ScopeSharesRevoke},
+		SpaceGrants: []aitoken.SpaceGrant{{
+			SpaceID: f.spaceID, Permission: permission, FolderDenylist: denies,
+		}},
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateSpaceGrant(token) error = %v", err)
+	}
+	principal := aitoken.Principal{
+		AccountID:          issued.Token.AccountID,
+		TokenID:            issued.Token.ID,
+		PublicID:           issued.Token.PublicID,
+		Scopes:             issued.Token.Scopes,
+		AuthorizationModel: issued.Token.AuthorizationModel,
+		SpaceGrants:        issued.Token.SpaceGrants,
+		ExpiresAt:          issued.Token.ExpiresAt,
+	}
+	return access.Subject{AccountID: principal.AccountID, Principal: &principal}
+}
+
+func shareDirectoryFingerprint(t *testing.T, target string) string {
+	t.Helper()
+	info, err := os.Lstat(target)
+	if err != nil {
+		t.Fatalf("Lstat(%q) error = %v", target, err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat == nil {
+		t.Fatal("directory stat did not expose syscall.Stat_t")
+	}
+	return fmt.Sprintf("dev:%d:ino:%d", uint64(stat.Dev), uint64(stat.Ino))
 }
 
 func TestCreateIsManagerOnlyValidatesOptionsAndReturnsOneTimeCapability(t *testing.T) {
@@ -278,6 +320,103 @@ func TestTokenScopesAndBoundariesApplyToMemberShares(t *testing.T) {
 	}
 	if _, err := s.List(context.Background(), subject, ListFilter{}); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("revoked token List() error = %v, want unauthorized", err)
+	}
+}
+
+func TestSpaceGrantSharesRecheckGrantDenyAndCreatorACL(t *testing.T) {
+	f := newShareFixture(t)
+	s := f.service()
+	ctx := context.Background()
+	privateDir := filepath.Join(f.root, "private")
+	if err := os.MkdirAll(privateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(private) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(privateDir, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatalf("WriteFile(secret) error = %v", err)
+	}
+	allowed, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("docs/readme.txt")})
+	if err != nil {
+		t.Fatalf("Create(allowed session share) error = %v", err)
+	}
+	denied, err := s.Create(ctx, f.manager(), CreateRequest{Locator: f.locator("private/secret.txt")})
+	if err != nil {
+		t.Fatalf("Create(denied session share) error = %v", err)
+	}
+	subject := f.spaceGrantToken(t, domain.SpacePermissionEditor, []aitoken.FolderDeny{{
+		MountID:             f.mountID,
+		RelativePath:        "private",
+		IdentityFingerprint: shareDirectoryFingerprint(t, privateDir),
+	}})
+
+	created, err := s.Create(ctx, subject, CreateRequest{Locator: f.locator("docs/readme.txt")})
+	if err != nil {
+		t.Fatalf("Create(space grant editor) error = %v", err)
+	}
+	if _, err := s.Create(ctx, subject, CreateRequest{Locator: f.locator("private/secret.txt")}); !errors.Is(err, access.ErrFolderDenied) {
+		t.Fatalf("Create(denied path) error = %v, want folder denied", err)
+	}
+	items, err := s.List(ctx, subject, ListFilter{})
+	if err != nil {
+		t.Fatalf("List(space grant) error = %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("List(space grant) = %#v, want two allowed shares", items)
+	}
+	for _, item := range items {
+		if item.ID == denied.ID || strings.Contains(item.RelativePath, "private") {
+			t.Fatalf("List(space grant) leaked denied share: %#v", item)
+		}
+	}
+	if err := s.Revoke(ctx, subject, denied.ID); !errors.Is(err, access.ErrFolderDenied) {
+		t.Fatalf("Revoke(denied creator share) error = %v, want folder denied", err)
+	}
+	viewerSubject := f.spaceGrantToken(t, domain.SpacePermissionViewer, nil)
+	if _, err := s.Create(ctx, viewerSubject, CreateRequest{Locator: f.locator("docs/readme.txt")}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("Create(space grant viewer) error = %v, want forbidden", err)
+	}
+	if err := s.Revoke(ctx, viewerSubject, allowed.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("Revoke(space grant viewer) error = %v, want forbidden", err)
+	}
+
+	if _, err := f.db.Exec(`DELETE FROM space_members WHERE space_id = ? AND account_id = ?`, f.spaceID, subject.AccountID); err != nil {
+		t.Fatalf("remove creator ACL: %v", err)
+	}
+	if err := s.Revoke(ctx, subject, allowed.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("Revoke(creator after ACL removal) error = %v, want forbidden", err)
+	}
+	if items, err := s.List(ctx, subject, ListFilter{}); err != nil || len(items) != 0 {
+		t.Fatalf("List(after ACL removal) = %#v, error = %v, want empty", items, err)
+	}
+	_ = created
+}
+
+func TestListFiltersDeniedRowsBeforeApplyingLimit(t *testing.T) {
+	f := newShareFixture(t)
+	privateDir := filepath.Join(f.root, "private")
+	if err := os.MkdirAll(privateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(private) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(privateDir, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatalf("WriteFile(secret) error = %v", err)
+	}
+	if _, err := f.db.Exec(`
+INSERT INTO shares(id, public_id, secret_hash, creator_account_id, space_id, mount_id, relative_path, expires_at, created_at)
+VALUES ('share-allowed-later', 'pub-allowed-later', ?, 'acct-manager', ?, ?, 'docs/readme.txt', ?, '2026-08-06T12:00:01Z'),
+       ('share-denied-first', 'pub-denied-first', ?, 'acct-manager', ?, ?, 'private/secret.txt', ?, '2026-08-06T12:00:02Z')
+`, share.HashSecret("allowed-secret"), f.spaceID, f.mountID, formatSQLiteTime(f.now.Add(time.Hour)), share.HashSecret("denied-secret"), f.spaceID, f.mountID, formatSQLiteTime(f.now.Add(time.Hour))); err != nil {
+		t.Fatalf("insert ordered shares: %v", err)
+	}
+	subject := f.spaceGrantToken(t, domain.SpacePermissionEditor, []aitoken.FolderDeny{{
+		MountID:             f.mountID,
+		RelativePath:        "private",
+		IdentityFingerprint: shareDirectoryFingerprint(t, privateDir),
+	}})
+	items, err := f.service().List(context.Background(), subject, ListFilter{Limit: 1})
+	if err != nil {
+		t.Fatalf("List(Limit=1) error = %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "share-allowed-later" {
+		t.Fatalf("List(Limit=1) = %#v, want allowed row after denied first row", items)
 	}
 }
 

@@ -10,8 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"omnora/internal/aitoken"
+	"omnora/internal/domain"
 )
 
 func TestMCPAccountDisableRejectsTheNextRequest(t *testing.T) {
@@ -66,6 +69,156 @@ func TestMCPMountIdentityDriftRejectsTheNextRequest(t *testing.T) {
 	response := mcpRawRequest(fixture, http.MethodPost, "/mcp", call, "", "", nil)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "mount_identity_unverifiable") {
 		t.Fatalf("identity drift MCP status/body = %d/%s, want typed mount identity error", response.Code, response.Body.String())
+	}
+}
+
+// TestMCPSpaceGrantSharesCreateRequiresEditorWritableAllowedTarget exercises
+// the real MCP transport and MRTR retry path. It locks the account-level
+// browser/MCP split: browser sessions remain manager-only, while an MCP
+// space-grant token may create a public share only as an editor on a writable,
+// non-denied target.
+func TestMCPSpaceGrantSharesCreateRequiresEditorWritableAllowedTarget(t *testing.T) {
+	fixture := newMCPProtocolFixture(t)
+	root := fixtureMountPath(fixture, ".")
+	privateDir := filepath.Join(root, "private")
+	if err := os.MkdirAll(privateDir, 0o755); err != nil {
+		t.Fatalf("create denied directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(privateDir, "secret.txt"), []byte("private"), 0o600); err != nil {
+		t.Fatalf("write denied fixture file: %v", err)
+	}
+
+	editorBearer := issueMCPSpaceGrant(t, fixture, domain.SpacePermissionEditor, nil)
+	result, confirmations := callMCPSpaceGrantSharesCreate(t, fixture, editorBearer, "hello.txt")
+	if result == nil || result.IsError {
+		t.Fatal("editor space-grant shares.create returned an MCP error")
+	}
+	if confirmations != 1 {
+		t.Fatalf("editor shares.create confirmations = %d, want one MRTR confirmation", confirmations)
+	}
+	var shareCount int
+	if err := fixture.db.SQL().QueryRow(`SELECT COUNT(1) FROM shares WHERE space_id = 'mcp-protocol-space'`).Scan(&shareCount); err != nil {
+		t.Fatalf("count editor-created shares: %v", err)
+	}
+	if shareCount != 1 {
+		t.Fatalf("editor-created share count = %d, want one", shareCount)
+	}
+
+	viewerBearer := issueMCPSpaceGrant(t, fixture, domain.SpacePermissionViewer, nil)
+	result, confirmations = callMCPSpaceGrantSharesCreate(t, fixture, viewerBearer, "hello.txt")
+	assertMCPShareCreateRejected(t, result, "forbidden")
+	if confirmations != 0 {
+		t.Fatalf("viewer shares.create confirmations = %d, want zero before authorization rejection", confirmations)
+	}
+
+	deniedBearer := issueMCPSpaceGrant(t, fixture, domain.SpacePermissionEditor, []aitoken.FolderDeny{{
+		MountID:      "mcp-protocol-mount",
+		RelativePath: "private",
+	}})
+	result, confirmations = callMCPSpaceGrantSharesCreate(t, fixture, deniedBearer, "private/secret.txt")
+	assertMCPShareCreateRejected(t, result, "folder_denied")
+	if confirmations != 0 {
+		t.Fatalf("denylisted shares.create confirmations = %d, want zero before authorization rejection", confirmations)
+	}
+
+	if _, err := fixture.db.SQL().Exec(`UPDATE mounts SET mode = 'read_only' WHERE id = 'mcp-protocol-mount'`); err != nil {
+		t.Fatalf("make MCP fixture mount read-only: %v", err)
+	}
+	readOnlyBearer := issueMCPSpaceGrant(t, fixture, domain.SpacePermissionEditor, nil)
+	result, confirmations = callMCPSpaceGrantSharesCreate(t, fixture, readOnlyBearer, "hello.txt")
+	assertMCPShareCreateRejected(t, result, "readonly_mount")
+	if confirmations != 0 {
+		t.Fatalf("read-only shares.create confirmations = %d, want zero before authorization rejection", confirmations)
+	}
+	if err := fixture.db.SQL().QueryRow(`SELECT COUNT(1) FROM shares WHERE space_id = 'mcp-protocol-space'`).Scan(&shareCount); err != nil {
+		t.Fatalf("count shares after rejected MCP requests: %v", err)
+	}
+	if shareCount != 1 {
+		t.Fatalf("rejected MCP shares.create calls changed share count to %d, want one", shareCount)
+	}
+}
+
+func issueMCPSpaceGrant(t *testing.T, fixture *mcpProtocolFixture, permission domain.SpacePermission, denies []aitoken.FolderDeny) string {
+	t.Helper()
+	service := aitoken.NewService(fixture.db.SQL())
+	grants := []aitoken.SpaceGrant{{
+		SpaceID:        "mcp-protocol-space",
+		Permission:     permission,
+		FolderDenylist: denies,
+	}}
+	if len(denies) > 0 {
+		var err error
+		grants, err = service.VerifySpaceGrantDirectories(context.Background(), grants)
+		if err != nil {
+			t.Fatalf("verify MCP space-grant deny directories: %v", err)
+		}
+	}
+	issued, err := service.CreateSpaceGrant(context.Background(), aitoken.CreateSpaceGrantRequest{
+		AccountID:   fixture.accountID,
+		Name:        "MCP share acceptance",
+		Scopes:      []aitoken.Scope{aitoken.ScopeSharesCreate},
+		SpaceGrants: grants,
+		ExpiresAt:   time.Now().UTC().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("issue MCP space-grant token: %v", err)
+	}
+	return issued.BearerToken
+}
+
+func callMCPSpaceGrantSharesCreate(t *testing.T, fixture *mcpProtocolFixture, bearer, relativePath string) (*mcp.CallToolResult, int) {
+	t.Helper()
+	authenticated := *fixture
+	authenticated.bearer = bearer
+	confirmations := 0
+	client, closeClient := authenticated.client(t, &mcp.ClientOptions{
+		Capabilities: &mcp.ClientCapabilities{Elicitation: &mcp.ElicitationCapabilities{Form: &mcp.FormElicitationCapabilities{}}},
+		ElicitationHandler: func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			confirmations++
+			return &mcp.ElicitResult{Action: "accept", Content: map[string]any{"confirmed": true}}, nil
+		},
+	})
+	defer closeClient()
+	session, err := client.Connect(context.Background(), authenticated.transport(), nil)
+	if err != nil {
+		t.Fatal("connect MCP space-grant client")
+	}
+	defer session.Close()
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "shares.create",
+		Arguments: map[string]any{
+			"spaceId":       "mcp-protocol-space",
+			"mountId":       "mcp-protocol-mount",
+			"path":          relativePath,
+			"allowPreview":  true,
+			"allowDownload": true,
+		},
+	})
+	if err != nil {
+		t.Fatal("call MCP shares.create with space-grant token")
+	}
+	return result, confirmations
+}
+
+func assertMCPShareCreateRejected(t *testing.T, result *mcp.CallToolResult, wantCode string) {
+	t.Helper()
+	if result == nil || !result.IsError {
+		t.Fatalf("MCP shares.create did not return error code %q", wantCode)
+	}
+	var output struct {
+		Error *struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := decodeMCPStructured(result.StructuredContent, &output); err != nil {
+		t.Fatalf("decode MCP shares.create error: %v", err)
+	}
+	if output.Error == nil || output.Error.Code != wantCode {
+		got := ""
+		if output.Error != nil {
+			got = output.Error.Code
+		}
+		t.Fatalf("MCP shares.create error code = %q, want %q", got, wantCode)
 	}
 }
 

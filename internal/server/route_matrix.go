@@ -60,6 +60,7 @@ var routeMatrix = []RouteRule{
 	// Lenient recent-reauth matrix: only credential issuance and hard-to-undo
 	// control-plane damage require a fresh password (and TOTP when enabled).
 	{Method: "POST", Pattern: "/api/v1/ai-tokens", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
+	{Method: "PATCH", Pattern: "/api/v1/ai-tokens/*", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "DELETE", Pattern: "/api/v1/ai-tokens/*", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "POST", Pattern: "/api/v1/admin/backups", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
 	{Method: "POST", Pattern: "/api/v1/admin/backups/*/restore", Mode: RouteAuthCookie, CSRF: true, RequiresRecentAuth: true},
@@ -74,6 +75,10 @@ var routeMatrix = []RouteRule{
 	{Method: "GET", Pattern: "/api/v1/share/*", Mode: RouteAuthShareCookie},
 	{Method: "HEAD", Pattern: "/api/v1/share/*", Mode: RouteAuthShareCookie},
 	{Method: "*", Pattern: "/api/v1/share/*", Mode: RouteAuthShareCookie, CSRF: true},
+	{Method: "POST", Pattern: "/api/v1/team-spaces", Mode: RouteAuthCookie, CSRF: true},
+	{Method: "GET", Pattern: "/api/v1/team-spaces/*/members", Mode: RouteAuthCookie},
+	{Method: "PUT", Pattern: "/api/v1/team-spaces/*/members/*", Mode: RouteAuthCookie, CSRF: true},
+	{Method: "DELETE", Pattern: "/api/v1/team-spaces/*/members/*", Mode: RouteAuthCookie, CSRF: true},
 	{Method: "*", Pattern: "/mcp/*", Mode: RouteAuthBearer},
 	{Method: "*", Pattern: "/mcp", Mode: RouteAuthBearer},
 	{Method: "*", Pattern: "/api/v1/*", Mode: RouteAuthCookie, CSRF: true},

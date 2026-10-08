@@ -5,16 +5,20 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"omnora/internal/access"
 	"omnora/internal/aitoken"
 	"omnora/internal/catalog"
+	"omnora/internal/domain"
 	"omnora/internal/files"
+	"omnora/internal/membershare"
 	"omnora/internal/mountid"
 	"omnora/internal/store"
 )
@@ -129,6 +133,71 @@ func (f readFixture) tokenWithScopes(t *testing.T, boundary string, scopes ...ai
 	return access.Subject{AccountID: principal.AccountID, Principal: &principal}
 }
 
+func (f readFixture) spaceGrantToken(t *testing.T, grants []aitoken.SpaceGrant, scopes ...aitoken.Scope) access.Subject {
+	t.Helper()
+	issued, err := aitoken.NewService(f.db).CreateSpaceGrant(context.Background(), aitoken.CreateSpaceGrantRequest{
+		AccountID:   "acct-memberfiles",
+		Name:        "memberfiles space grant token",
+		Scopes:      scopes,
+		SpaceGrants: grants,
+		ExpiresAt:   time.Now().UTC().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateSpaceGrant(token) error = %v", err)
+	}
+	principal := aitoken.Principal{
+		AccountID:          issued.Token.AccountID,
+		TokenID:            issued.Token.ID,
+		PublicID:           issued.Token.PublicID,
+		Scopes:             issued.Token.Scopes,
+		AuthorizationModel: issued.Token.AuthorizationModel,
+		SpaceGrants:        issued.Token.SpaceGrants,
+		ExpiresAt:          issued.Token.ExpiresAt,
+	}
+	return access.Subject{AccountID: principal.AccountID, Principal: &principal}
+}
+
+func memberfilesDirectoryFingerprint(t *testing.T, target string) string {
+	t.Helper()
+	info, err := os.Lstat(target)
+	if err != nil {
+		t.Fatalf("Lstat(%q) error = %v", target, err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat == nil {
+		t.Fatal("directory stat did not expose syscall.Stat_t")
+	}
+	return fmt.Sprintf("dev:%d:ino:%d", uint64(stat.Dev), uint64(stat.Ino))
+}
+
+func insertMemberfilesMount(t *testing.T, f readFixture, mountID, spaceID string) string {
+	t.Helper()
+	root, err := os.MkdirTemp(".", ".memberfiles-future-mount-")
+	if err != nil {
+		t.Fatalf("MkdirTemp() error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	root, err = filepath.Abs(root)
+	if err != nil {
+		t.Fatalf("Abs(root) error = %v", err)
+	}
+	identity, err := mountid.Capture(root)
+	if err != nil {
+		t.Fatalf("Capture(root) error = %v", err)
+	}
+	identityJSON, err := json.Marshal(identity)
+	if err != nil {
+		t.Fatalf("Marshal(identity) error = %v", err)
+	}
+	if _, err := f.db.Exec(`
+INSERT INTO mounts(id, space_id, display_name, root_path, kind, mode, status, index_enabled, mount_identity_json)
+VALUES (?, ?, 'Future files', ?, 'managed', 'read_write', 'active', 1, ?)
+`, mountID, spaceID, root, string(identityJSON)); err != nil {
+		t.Fatalf("insert future mount: %v", err)
+	}
+	return root
+}
+
 func TestListSpacesMountsAndReadOperationsUseSessionACL(t *testing.T) {
 	f := newReadFixture(t)
 	s := f.service()
@@ -194,6 +263,147 @@ VALUES ('space-order-personal', 'acct-memberfiles', 'viewer'),
 	}
 	if indices["space-order-personal"] >= indices["space-order-shared"] {
 		t.Fatalf("space order = %#v, want personal before shared for same name", spaces)
+	}
+}
+
+func TestSpaceGrantCollectionsShowGrantedSpaceWithoutMountAndFutureMount(t *testing.T) {
+	f := newReadFixture(t)
+	ctx := context.Background()
+	if _, err := f.db.Exec(`
+INSERT INTO spaces(id, kind, name, owner_account_id, status)
+VALUES ('space-empty-granted', 'shared', 'Granted Empty', 'acct-memberfiles', 'active'),
+       ('space-ungranted', 'shared', 'Ungranted', 'acct-memberfiles', 'active');
+INSERT INTO space_members(space_id, account_id, permission)
+VALUES ('space-empty-granted', 'acct-memberfiles', 'viewer'),
+       ('space-ungranted', 'acct-memberfiles', 'viewer');
+`); err != nil {
+		t.Fatalf("insert spaces: %v", err)
+	}
+	subject := f.spaceGrantToken(t, []aitoken.SpaceGrant{
+		{SpaceID: f.spaceID, Permission: domain.SpacePermissionViewer},
+		{SpaceID: "space-empty-granted", Permission: domain.SpacePermissionViewer},
+	}, aitoken.ScopeSpacesRead)
+
+	spaces, err := f.service().ListSpaces(ctx, subject)
+	if err != nil {
+		t.Fatalf("ListSpaces() error = %v", err)
+	}
+	spaceIDs := make(map[string]bool, len(spaces))
+	for _, space := range spaces {
+		spaceIDs[space.ID] = true
+	}
+	if len(spaces) != 2 || !spaceIDs[f.spaceID] || !spaceIDs["space-empty-granted"] || spaceIDs["space-ungranted"] {
+		t.Fatalf("ListSpaces() = %#v, want only the two explicitly granted spaces", spaces)
+	}
+	if mounts, err := f.service().ListMounts(ctx, subject, "space-empty-granted"); err != nil || len(mounts) != 0 {
+		t.Fatalf("ListMounts(empty granted space) = %#v, error = %v", mounts, err)
+	}
+
+	insertMemberfilesMount(t, f, "mount-future", "space-empty-granted")
+	insertMemberfilesMount(t, f, "mount-ungranted", "space-ungranted")
+	mounts, err := f.service().ListMounts(ctx, subject, "space-empty-granted")
+	if err != nil || len(mounts) != 1 || mounts[0].ID != "mount-future" {
+		t.Fatalf("ListMounts(after future mount) = %#v, error = %v", mounts, err)
+	}
+	if mounts, err := f.service().ListMounts(ctx, subject, "space-ungranted"); err != nil || len(mounts) != 0 {
+		t.Fatalf("ListMounts(ungranted space) = %#v, error = %v, want empty", mounts, err)
+	}
+}
+
+func TestSpaceGrantDirectoryAndSearchFilterDeniedSubtreeWithoutConsumingPage(t *testing.T) {
+	f := newReadFixture(t)
+	ctx := context.Background()
+	privateDir := filepath.Join(f.root, "docs", "private")
+	if err := os.MkdirAll(privateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(private) error = %v", err)
+	}
+	writeReadFile(t, filepath.Join(privateDir, "a-secret.txt"), "secret")
+	writeReadFile(t, filepath.Join(f.root, "docs", "b-public.txt"), "public b")
+	writeReadFile(t, filepath.Join(f.root, "docs", "c-public.txt"), "public c")
+	modifiedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := f.db.Exec(`
+INSERT INTO catalog_entries(id, space_id, mount_id, relative_path, name, entry_kind, preview_kind, size_bytes, modified_at, identity_fingerprint)
+VALUES ('entry-denied', ?, ?, 'docs/private/a-secret.txt', 'a-secret.txt', 'file', 'text', 6, ?, 'denied'),
+       ('entry-public-b', ?, ?, 'docs/b-public.txt', 'b-public.txt', 'file', 'text', 8, ?, 'public-b'),
+       ('entry-public-c', ?, ?, 'docs/c-public.txt', 'c-public.txt', 'file', 'text', 8, ?, 'public-c')
+`, f.spaceID, f.mountID, modifiedAt, f.spaceID, f.mountID, modifiedAt, f.spaceID, f.mountID, modifiedAt); err != nil {
+		t.Fatalf("insert catalog rows: %v", err)
+	}
+	subject := f.spaceGrantToken(t, []aitoken.SpaceGrant{{
+		SpaceID:    f.spaceID,
+		Permission: domain.SpacePermissionViewer,
+		FolderDenylist: []aitoken.FolderDeny{{
+			MountID:             f.mountID,
+			RelativePath:        "docs/private",
+			IdentityFingerprint: memberfilesDirectoryFingerprint(t, privateDir),
+		}},
+	}}, aitoken.ScopeFilesList, aitoken.ScopeSearchRead)
+
+	listing, err := f.service().List(ctx, subject, f.locator("docs"))
+	if err != nil {
+		t.Fatalf("List(docs) error = %v", err)
+	}
+	for _, entry := range listing.Entries {
+		if entry.Name == "private" || strings.Contains(entry.RelativePath, "private") {
+			t.Fatalf("List(docs) leaked denied child: %#v", listing.Entries)
+		}
+	}
+
+	first, err := f.service().Search(ctx, subject, SearchRequest{SpaceID: f.spaceID, Query: ".txt", Limit: 1})
+	if err != nil {
+		t.Fatalf("Search(first page) error = %v", err)
+	}
+	if len(first.Items) != 1 || first.Items[0].RelativePath != "docs/b-public.txt" || first.NextCursor == "" {
+		t.Fatalf("Search(first page) = %#v, want first authorized item and cursor", first)
+	}
+	second, err := f.service().Search(ctx, subject, SearchRequest{SpaceID: f.spaceID, Query: ".txt", Limit: 1, Cursor: first.NextCursor})
+	if err != nil {
+		t.Fatalf("Search(second page) error = %v", err)
+	}
+	if len(second.Items) != 1 || second.Items[0].RelativePath != "docs/c-public.txt" {
+		t.Fatalf("Search(second page) = %#v, want second authorized item", second)
+	}
+	for _, result := range append(first.Items, second.Items...) {
+		if strings.Contains(result.Name, "secret") || strings.Contains(result.RelativePath, "private") {
+			t.Fatalf("Search leaked denied path: %#v", result)
+		}
+	}
+}
+
+func TestSharesCreatePreviewMatchesSpaceGrantCreateAndWritableMount(t *testing.T) {
+	f := newReadFixture(t)
+	ctx := context.Background()
+	if _, err := f.db.Exec(`UPDATE space_members SET permission = 'manager' WHERE space_id = ? AND account_id = ?`, f.spaceID, "acct-memberfiles"); err != nil {
+		t.Fatalf("promote account to manager: %v", err)
+	}
+	locator := f.locator("docs/readme.txt")
+	filesService := f.service()
+	sharesService := membershare.NewService(f.db, access.NewGuard(f.db))
+	if _, err := filesService.Preview(ctx, f.session(), locator, aitoken.ScopeSharesCreate); err != nil {
+		t.Fatalf("browser Preview(shares:create) error = %v", err)
+	}
+	if _, err := sharesService.Create(ctx, f.session(), membershare.CreateRequest{Locator: locator}); err != nil {
+		t.Fatalf("browser Create(shares:create) error = %v", err)
+	}
+
+	tokenSubject := f.spaceGrantToken(t, []aitoken.SpaceGrant{{
+		SpaceID: f.spaceID, Permission: domain.SpacePermissionEditor,
+	}}, aitoken.ScopeSharesCreate)
+	if _, err := filesService.Preview(ctx, tokenSubject, locator, aitoken.ScopeSharesCreate); err != nil {
+		t.Fatalf("space-grant Preview(shares:create) error = %v", err)
+	}
+	if _, err := sharesService.Create(ctx, tokenSubject, membershare.CreateRequest{Locator: locator}); err != nil {
+		t.Fatalf("space-grant Create(shares:create) error = %v", err)
+	}
+
+	if _, err := f.db.Exec(`UPDATE mounts SET mode = 'read_only' WHERE id = ?`, f.mountID); err != nil {
+		t.Fatalf("set mount read-only: %v", err)
+	}
+	if _, err := filesService.Preview(ctx, tokenSubject, locator, aitoken.ScopeSharesCreate); !errors.Is(err, access.ErrReadonlyMount) {
+		t.Fatalf("space-grant Preview(read-only mount) error = %v, want readonly", err)
+	}
+	if _, err := sharesService.Create(ctx, tokenSubject, membershare.CreateRequest{Locator: locator}); !errors.Is(err, access.ErrReadonlyMount) {
+		t.Fatalf("space-grant Create(read-only mount) error = %v, want readonly", err)
 	}
 }
 

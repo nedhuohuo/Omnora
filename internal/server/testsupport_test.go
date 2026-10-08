@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"omnora/internal/mountid"
@@ -16,18 +15,15 @@ import (
 // identity has already been captured and stored so verifyLoadedMountIdentity
 // succeeds immediately.
 //
-// The temp directory is created under the workspace (rather than via
+// The temp directory is created under /private/tmp (rather than via
 // t.TempDir, which on macOS resolves under a symlinked /var) because
 // mountid.Capture rejects mount roots that resolve through a symlink
-// component.
+// component. Keeping it outside the source tree also lets the tests run from
+// a read-only checkout.
 func createTestSpaceAndMount(t *testing.T, db *store.DB, spaceID, mountID, ownerAccountID, mode string) string {
 	t.Helper()
 	ctx := context.Background()
-	workspace, err := filepath.Abs(".")
-	if err != nil {
-		t.Fatalf("resolve workspace dir: %v", err)
-	}
-	root, err := os.MkdirTemp(workspace, ".control-plane-test-")
+	root, err := os.MkdirTemp("/private/tmp", "omnora-control-plane-test-")
 	if err != nil {
 		t.Fatalf("create mount root: %v", err)
 	}

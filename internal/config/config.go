@@ -44,6 +44,11 @@ type MCPConfig struct {
 type StorageConfig struct {
 	ManagedDir           string
 	PredeclaredMountRoot string
+	// PersonalStorageDir is the system-managed root for per-account personal
+	// files. Omnora creates one child directory per account; it is never an
+	// external deployment slot and is not shared by creating a subdirectory in
+	// an operator-selected NAS folder.
+	PersonalStorageDir string
 }
 
 type HTTPConfig struct {
@@ -99,6 +104,7 @@ func LoadEnv() (Config, error) {
 		Storage: StorageConfig{
 			ManagedDir:           "/srv/omnora/managed",
 			PredeclaredMountRoot: "/mnt/omnora",
+			PersonalStorageDir:   "/var/lib/omnora/personal",
 		},
 		Routes:            access.DefaultRouteGroups(),
 		RouteEnvOverrides: map[domain.RouteGroup]bool{},
@@ -186,6 +192,9 @@ func LoadEnv() (Config, error) {
 	}
 	if value := strings.TrimSpace(os.Getenv("OMNORA_PREDECLARED_MOUNT_ROOT")); value != "" {
 		cfg.Storage.PredeclaredMountRoot = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OMNORA_PERSONAL_STORAGE_DIR")); value != "" {
+		cfg.Storage.PersonalStorageDir = value
 	}
 
 	envByGroup := map[domain.RouteGroup]string{

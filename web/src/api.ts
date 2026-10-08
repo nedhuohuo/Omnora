@@ -60,6 +60,24 @@ export type AdminMountPayload = {
   indexEnabled: boolean;
 };
 
+export type TeamSpaceCreatePayload = {
+  name: string;
+};
+
+export type TeamSpaceCreateResponse = {
+  space: MemberSpace;
+  mount: MemberMount;
+};
+
+export type TeamSpaceMemberRole = 'viewer' | 'editor' | 'manager';
+
+export type TeamSpaceMemberPayload = {
+  accountId: string;
+  email?: string;
+  displayName?: string;
+  permission: TeamSpaceMemberRole;
+};
+
 export type DirectoryChildrenPayload = {
   relativePath?: string;
   path?: string;
@@ -116,7 +134,9 @@ export type AiTokenScope =
 export type CreateAiTokenPayload = {
   name: string;
   scopes: AiTokenScope[];
-  boundaries: Array<{
+  authorizationModel?: 'legacy_boundary' | 'space_grant';
+  spaceGrants?: AiTokenSpaceGrantInput[];
+  boundaries?: Array<{
     spaceId: string;
     mountId: string;
     path: string;
@@ -132,6 +152,8 @@ export type CreateAiTokenResponse = {
     name: string;
     scopes: AiTokenScope[];
     expiresAt: string;
+    authorizationModel?: 'legacy_boundary' | 'space_grant';
+    spaceGrants?: AiTokenSpaceGrant[];
   };
   secret: string;
   bearerToken: string;
@@ -285,6 +307,26 @@ export type AiTokenBoundary = {
   path: string;
 };
 
+export type AiTokenFolderDeny = {
+  mountId: string;
+  mountName?: string;
+  path: string;
+  status?: 'active' | 'needs_review';
+};
+
+export type AiTokenSpaceGrant = {
+  spaceId: string;
+  spaceName?: string;
+  permission: 'viewer' | 'editor';
+  folderDenylist?: AiTokenFolderDeny[];
+};
+
+export type AiTokenSpaceGrantInput = {
+  spaceId: string;
+  permission: 'viewer' | 'editor';
+  folderDenylist?: Array<{ mountId: string; path: string }>;
+};
+
 export type AiTokenStatus = 'active' | 'expired' | 'revoked';
 
 export type AiTokenListItem = {
@@ -296,6 +338,8 @@ export type AiTokenListItem = {
   name: string;
   scopes: AiTokenScope[];
   boundaries?: AiTokenBoundary[];
+  authorizationModel?: 'legacy_boundary' | 'space_grant';
+  spaceGrants?: AiTokenSpaceGrant[];
   expiresAt?: string;
   createdAt?: string;
   lastUsedAt?: string;
@@ -671,6 +715,40 @@ export function listSpaces(signal?: AbortSignal) {
   return requestJson<{ items: MemberSpace[] }>('/api/v1/spaces', { signal });
 }
 
+export function createTeamSpace(payload: TeamSpaceCreatePayload, signal?: AbortSignal) {
+  return requestJson<TeamSpaceCreateResponse>('/api/v1/team-spaces', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function listTeamSpaceMembers(spaceId: string, signal?: AbortSignal) {
+  return requestJson<{ items: TeamSpaceMemberPayload[] }>(
+    `/api/v1/team-spaces/${encodeURIComponent(spaceId)}/members`,
+    { signal },
+  );
+}
+
+export function putTeamSpaceMember(
+  spaceId: string,
+  accountRef: string,
+  permission: TeamSpaceMemberRole,
+  signal?: AbortSignal,
+) {
+  return requestJson<TeamSpaceMemberPayload>(
+    `/api/v1/team-spaces/${encodeURIComponent(spaceId)}/members/${encodeURIComponent(accountRef)}`,
+    { method: 'PUT', body: JSON.stringify({ permission }), signal },
+  );
+}
+
+export function removeTeamSpaceMember(spaceId: string, accountId: string, signal?: AbortSignal) {
+  return requestJson<void>(
+    `/api/v1/team-spaces/${encodeURIComponent(spaceId)}/members/${encodeURIComponent(accountId)}`,
+    { method: 'DELETE', signal },
+  );
+}
+
 export function listMounts(spaceId: string, signal?: AbortSignal) {
   return requestJson<{ items: MemberMount[] }>(`/api/v1/spaces/${encodeURIComponent(spaceId)}/mounts`, { signal });
 }
@@ -746,6 +824,22 @@ export function createShare(payload: CreateSharePayload, signal?: AbortSignal) {
 export function createAiToken(payload: CreateAiTokenPayload, signal?: AbortSignal) {
   return requestJson<CreateAiTokenResponse>('/api/v1/ai-tokens', {
     method: 'POST',
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export type UpdateAiTokenPayload = {
+  name: string;
+  scopes: AiTokenScope[];
+  authorizationModel: 'space_grant';
+  spaceGrants: AiTokenSpaceGrantInput[];
+  expiresAt?: string;
+};
+
+export function updateAiToken(tokenId: string, payload: UpdateAiTokenPayload, signal?: AbortSignal) {
+  return requestJson<{ token: CreateAiTokenResponse['token'] }>(`/api/v1/ai-tokens/${encodeURIComponent(tokenId)}`, {
+    method: 'PATCH',
     body: JSON.stringify(payload),
     signal,
   });

@@ -3,6 +3,7 @@ package mcpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -142,5 +143,35 @@ func TestStableErrorCodesCoverTransferFailures(t *testing.T) {
 	_, _, err := toolFailure[struct{}](nil, errors.New("database connection failed"))
 	if wireErr, ok := err.(*jsonrpc.Error); !ok || wireErr.Code != jsonrpc.CodeInternalError {
 		t.Fatalf("internal tool error = %#v, want JSON-RPC internal error", err)
+	}
+}
+
+func TestFolderPolicyErrorsMapAcrossMCPToolPaths(t *testing.T) {
+	const hostPath = "/srv/omnora/private/mount/secret"
+	toolPaths := []string{"read", "mutation", "download ticket", "upload ticket", "upload complete"}
+	policyErrors := []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "denied", err: access.ErrFolderDenied, code: "folder_denied"},
+		{name: "review required", err: access.ErrFolderDenylistReviewRequired, code: "folder_denylist_review_required"},
+	}
+
+	for _, toolPath := range toolPaths {
+		for _, policyError := range policyErrors {
+			t.Run(toolPath+"/"+policyError.name, func(t *testing.T) {
+				result, output, err := toolFailure[struct{}](nil, fmt.Errorf("host path %s: %w", hostPath, policyError.err))
+				if err != nil || result == nil || !result.IsError || output.Error == nil {
+					t.Fatalf("toolFailure() = result %#v output %#v err %v", result, output, err)
+				}
+				if output.Error.Code != policyError.code {
+					t.Fatalf("error code = %q, want %q", output.Error.Code, policyError.code)
+				}
+				if strings.Contains(output.Error.Message, hostPath) {
+					t.Fatalf("error message leaked host path: %q", output.Error.Message)
+				}
+			})
+		}
 	}
 }
